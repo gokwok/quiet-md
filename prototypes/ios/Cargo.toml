@@ -1,0 +1,48 @@
+[package]
+name = "quiet_md_ios"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "../../build.rs"
+
+[workspace]
+
+[[bin]]
+name = "quiet_md_ios"
+path = "../../src/main.rs"
+
+[dependencies]
+fdl_core = { path = "../../crates/core" }
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["runtime_shaders"] }
+gpui_ios = { package = "gpui-pre-ios", version = "=0.3.12" }
+anyhow = "1.0.104"
+async-lock = "3.4"
+dirs = "7.0.0"
+quick-xml = "0.37"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+unicode-segmentation = "1.13.3"
+uuid = { version = "1.28.0", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+rustc-hash = "2.1"
+katex-rs = { version = "0.3", default-features = false }
+regex = "1"
+html5ever = "0.27"
+markup5ever_rcdom = "0.3"
+base64 = "0.22"
+minisign-verify = "0.3.0"
+log = "0.4"
+sys-locale = "0.3.2"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("devtools"))'] }
+
+[profile.dev]
+debug = 0
+
+# 桌面代码按 vendor 的 GPUI 写：同一元素可以再次设置 hover / active 样式，后设的生效。
+# 上游在调试构建里对此 debug_assert，关掉后行为与发布构建、与桌面一致。
+[profile.dev.package.gpui-pre]
+debug-assertions = false

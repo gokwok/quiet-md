@@ -1,0 +1,3653 @@
+--- a/build.rs
++++ b/build.rs
+@@ -49,7 +49,10 @@
+ 
+ fn embed(source: &str, output: &str) {
+     // Read at run time: a compile-time path goes stale when the checkout moves.
+-    let root = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join(source);
++    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
++    let mut root = Path::new(&manifest).to_path_buf();
++    if std::env::var("CARGO_PKG_NAME").as_deref() == Ok("quiet_md_ios") { root = root.join("../.."); }
++    let root = root.join(source);
+     println!("cargo:rerun-if-changed={}", root.display());
+     let mut files = vec![];
+     collect(&root, &root, &mut files);
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -30,6 +30,7 @@
+     use crate::settings::tr;
+     cx.set_menus(vec![
+         Menu {
++            disabled: false,
+             name: "Quiet.md".into(),
+             items: vec![
+                 MenuItem::action(tr("关于 Quiet.md", "About Quiet.md"), OpenAbout),
+@@ -47,6 +48,7 @@
+             ],
+         },
+         Menu {
++            disabled: false,
+             name: tr("文件", "File").into(),
+             items: vec![
+                 MenuItem::action(tr("新建文档", "New Document"), NewDoc),
+@@ -61,6 +63,7 @@
+         // The standard Edit menu: its items act on the focused editor, and
+         // macOS adds 听写 and 表情与符号 to it.
+         Menu {
++            disabled: false,
+             name: tr("编辑", "Edit").into(),
+             items: {
+                 use crate::editor::keymap as k;
+@@ -76,6 +79,7 @@
+             },
+         },
+         Menu {
++            disabled: false,
+             name: tr("窗口", "Window").into(),
+             items: vec![
+                 MenuItem::action(tr("最小化", "Minimize"), Minimize),
+@@ -89,9 +93,9 @@
+ 
+ pub fn bind_keys(cx: &mut App) {
+     cx.bind_keys([
+-        KeyBinding::new("secondary-z", crate::editor::keymap::Undo, Some("Workspace")),
+-        KeyBinding::new("secondary-shift-z", crate::editor::keymap::Redo, Some("Workspace")),
+-        KeyBinding::new("secondary-y", crate::editor::keymap::Redo, Some("Workspace")),
++        KeyBinding::new("cmd-z", crate::editor::keymap::Undo, Some("Workspace")),
++        KeyBinding::new("cmd-shift-z", crate::editor::keymap::Redo, Some("Workspace")),
++        KeyBinding::new("cmd-y", crate::editor::keymap::Redo, Some("Workspace")),
+         KeyBinding::new("cmd-n", NewDoc, None),
+         KeyBinding::new("cmd-shift-n", crate::quick_note::QuickNew, None),
+         KeyBinding::new("cmd-,", OpenSettings, None),
+@@ -168,7 +172,7 @@
+     pub id: String,
+     pub pos: Point<Pixels>,
+     /// Which corner of the menu sits at `pos`.
+-    pub corner: Corner,
++    pub corner: Anchor,
+     /// 下载 submenu open.
+     pub sub: bool,
+     /// The 批量操作 menu for the checked rows.
+@@ -235,6 +239,8 @@
+     /// Keyboard highlight inside search results.
+     pub search_sel: Option<usize>,
+     pub sidebar_open: bool,
++    /// 手机宽度下，侧栏是盖在内容上的抽屉；`sidebar_open` 这时恒为 false，内容按全宽排版。
++    pub drawer: bool,
+     /// Dragged width (300 by default, 268 to min(800, window − 540)).
+     pub sidebar_width: f32,
+     /// The resize handle is being dragged.
+@@ -272,7 +278,7 @@
+     /// 回收站 rows, refreshed when the page opens or changes.
+     pub trash: Vec<crate::store::TrashEntry>,
+     /// A 回收站 row's menu: the page and where it opens.
+-    pub trash_menu: Option<(String, Point<Pixels>, Corner)>,
++    pub trash_menu: Option<(String, Point<Pixels>, Anchor)>,
+     /// The toast and when it appeared.
+     pub toast: Option<(ToastKind, SharedString, Instant)>,
+     toast_task: Option<Task<()>>,
+@@ -417,7 +423,8 @@
+             editor: None,
+             search,
+             search_sel: None,
+-            sidebar_open: !quick,
++            sidebar_open: !quick && !crate::ios::compact(window),
++            drawer: false,
+             sidebar_width,
+             sidebar_drag: false,
+             folder_current: None,
+@@ -467,7 +474,8 @@
+         ws.load_home();
+         // An empty library opens on 主页's empty state; only a quick note
+         // window starts a document of its own.
+-        match document.or_else(|| (!quick).then(|| ws.entries.first().map(|e| e.id.clone())).flatten()) {
++        // 手机上从主页开始，不直接进最近的文档。
++        match document.or_else(|| (!quick && crate::ios::starts_in_document(window)).then(|| ws.entries.first().map(|e| e.id.clone())).flatten()) {
+             Some(id) => ws.open(&id, window, cx),
+             None if quick => ws.new_doc(window, cx),
+             None => ws.view = View::Home,
+@@ -500,6 +508,7 @@
+     /// could not be saved first, see [`Self::save_before`]).
+     pub fn try_open(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+         if self.entries.iter().any(|e| e.id == id && e.meta.folder.is_some()) { return self.open_folder(id, window, cx); }
++        if self.drawer { self.drawer = false; cx.notify(); }
+         if self.view != View::Doc {
+             self.view = View::Doc;
+             cx.notify();
+@@ -528,7 +537,7 @@
+         let pinned = meta.as_ref().is_some_and(|m| !m.catalogue_closed);
+         let editor = cx.new(|cx| {
+             let mut e = Editor::new(doc, modified, width, window, cx);
+-            e.cat_pinned = pinned;
++            e.cat_pinned = pinned && !crate::ios::compact(window);
+             e.markdown = meta.as_ref().is_some_and(|m| m.markdown);
+             if let Some(m) = &meta {
+                 e.created = m.created;
+@@ -584,9 +593,8 @@
+             }
+         }));
+         // Opening a document puts the caret in it, unless the user is typing a search.
+-        if !self.search_open {
+-            editor.read(cx).focus(window);
+-        }
++        // 触屏上打开文档不弹键盘：点进正文才聚焦。
++        if !self.search_open { window.focus(&self.focus, cx); }
+         if let Some(m) = self.store.touch(id)
+             && let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+                 e.meta.opened = m.opened;
+@@ -626,7 +634,7 @@
+                 self.search.update(cx, |s, cx| s.set_text("", cx));
+                 self.open(&id, window, cx);
+                 if let Some(ed) = &self.editor {
+-                    ed.read(cx).focus(window);
++                    window.focus(&ed.read(cx).focus.clone(), cx);
+                 }
+             }
+             Err(e) => self.status = SaveStatus::Failed(crate::localized_format!("新建失败：{}", "Could not create document: {}", crate::settings::diagnostic(&e.to_string()))),
+@@ -765,6 +773,7 @@
+             self.trash = self.store.list_trash();
+         }
+         self.view = view;
++        self.drawer = false;
+         self.row_menu = None;
+         self.trash_menu = None;
+         self.theme_menu = None;
+@@ -804,7 +813,7 @@
+             f
+         });
+         let focus = field.focus_handle(cx);
+-        window.focus(&focus);
++        window.focus(&focus, cx);
+         let subs = vec![
+             cx.subscribe_in(&field, window, |w, _, ev: &TextFieldEvent, window, cx| match ev {
+                 TextFieldEvent::Submit => w.finish_rename(true, window, cx),
+@@ -850,7 +859,7 @@
+         }
+         if refocus
+             && let Some(ed) = &self.editor {
+-                ed.read(cx).focus(window);
++                window.focus(&ed.read(cx).focus.clone(), cx);
+             }
+         self.sync_sub_pages(cx);
+         cx.notify();
+@@ -894,6 +903,8 @@
+         // caps that at SAVE_MAX_DELAY after the oldest unsaved edit.
+         let left = SAVE_MAX_DELAY.saturating_sub(self.dirty_since.map_or(Duration::ZERO, |t| t.elapsed()));
+         let delay = SAVE_DELAY.min(left);
++        // 冒烟测试只验证「进后台时保存」：不起定时保存。
++        if crate::ios::background_save_only() { cx.notify(); return; }
+         // Keep the list title live while typing; the body/snippet updates on save.
+         if let (Some(id), Some(ed)) = (&self.current, &self.editor) {
+             let title = ed.read(cx).core.doc.title.text.clone();
+@@ -1199,6 +1210,7 @@
+             crumbs.push(sep());
+         }
+         let record_more = self.more_btn_bounds.clone();
++        let phone = crate::ios::is_compact();
+         div()
+             .id("top-bar").relative()
+             .h(px(HEADER_H))
+@@ -1209,7 +1221,12 @@
+             // Clear of the traffic lights, which sit over the note when the sidebar is closed.
+             .pl(if self.sidebar_open { px(18.) } else { px(theme::TRAFFIC_LIGHTS_W) })
+             .title_bar()
+-            .when(!self.sidebar_open, |d| {
++            // 手机：左边只有一个返回，回到主页；抽屉从主页拉出。
++            .when(phone, |d| d.pl(px(6.)).child(
++                div().id("doc-back").no_drag().flex_none().size(px(HEADER_ACTIONS_H)).mr(px(2.)).flex().items_center().justify_center().rounded(px(10.))
++                    .active(|s| s.bg(Theme::fill_pressed())).child(crate::editor_ui::icon("chevron-left", 24., Theme::icon()))
++                    .on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx)))))
++            .when(!self.sidebar_open && !phone, |d| {
+                 d.child(
+                     div()
+                         .id("open-sidebar")
+@@ -1259,7 +1276,7 @@
+                             .child(
+                                 div()
+                                     .min_w_0()
+-                                    .text_size(px(14.))
++                                    .text_size(px(if phone { 16. } else { 14. }))
+                                     .line_height(px(20.))
+                                     .font_weight(FontWeight::SEMIBOLD)
+                                     .text_color(Theme::text())
+@@ -1281,6 +1298,11 @@
+                     .h(px(HEADER_ACTIONS_H)).flex_none()
+                     .flex()
+                     .items_center()
++                    .children(self.editor.as_ref().filter(|e| { let e = e.read(cx); e.compact() && e.has_catalogue() }).map(|editor| {
++                        let editor = editor.clone();
++                        div().id("doc-catalogue").no_drag().size(px(HEADER_ACTIONS_H)).rounded(px(8.)).flex_none().flex().items_center().justify_center().cursor_pointer()
++                            .active(|s| s.bg(Theme::fill_pressed())).child(crate::editor_ui::icon("catalogue-list", 18., Theme::icon())).on_click(move |_, _, cx| editor.update(cx, |e, cx| e.toggle_catalogue(cx)))
++                    }))
+                     .when(self.current.is_some(), |d| {
+                         d.child(
+                             // No tooltip while its dropdown is open; the menu hangs
+@@ -1297,7 +1319,7 @@
+                                 })),
+                         )
+                     })
+-                    .child(
++                    .when(!phone, |d| d.child(
+                         seg("doc-search", "search")
+                             .tip_label(crate::shortcuts::keys(crate::settings::text("搜索(⌘ + J)")).into(), TipSide::Below)
+                             .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(FocusSearch), cx))),
+@@ -1305,23 +1327,34 @@
+                     .child(
+                         // Straight to a new document: no 新建 menu, as 导入 is rare.
+                         seg("doc-new", "plus").tip(crate::settings::tr("新建文档", "New document"), None).on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx))),
+-                    ).into_any_element()
++                    )).into_any_element()
+             )
+     }
+ }
+ 
+ /// Header and action group share an 8px top/right inset.
+-pub const HEADER_H: f32 = 48.;
+-pub(crate) const HEADER_ACTIONS_H: f32 = 32.;
++pub const HEADER_H: f32 = 52.;
++pub(crate) const HEADER_ACTIONS_H: f32 = 40.;
+ 
+ impl Render for Workspace {
+     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+         // Clicks no longer take focus from the editor (see the root's mouse
+         // down), so leaving the document hands it back to the window's keys.
+-        if self.view != View::Doc && self.editor.as_ref().is_some_and(|e| e.read(cx).focus.is_focused(window)) { window.focus(&self.focus); }
++        if self.view != View::Doc && self.editor.as_ref().is_some_and(|e| e.read(cx).focus.is_focused(window)) { window.focus(&self.focus, cx); }
+         crate::editor::image::frame_drawn(window);
+         self.native_sidebar.sync(if self.sidebar_open { self.sidebar_w(window) } else { 0. }, window);
+-        let sidebar = if self.sidebar_open { Some(if matches!(self.view, View::Settings | View::Trash) { self.render_settings_sidebar(window, cx) } else { self.render_sidebar(window, cx) }) } else { None };
++        let compact = crate::ios::compact(window);
++        if compact && self.sidebar_open { self.sidebar_open = false; self.drawer = true; }
++        if !compact { self.drawer = false; }
++        // 外壳的菜单、对话框和抽屉出现时收起键盘。
++        if (self.drawer || self.doc_menu || self.mode_menu || self.row_menu.is_some() || self.doc_info.is_some() || self.confirm.is_some() || self.move_dlg.is_some() || self.export_md.is_some())
++            && self.editor.as_ref().is_some_and(|e| e.read(cx).focus.is_focused(window)) { window.focus(&self.focus, cx); }
++        crate::ios::set_overlay(self.view != View::Doc || self.drawer || self.search_open || self.doc_menu || self.mode_menu || self.row_menu.is_some() || self.doc_info.is_some() || self.confirm.is_some() || self.move_dlg.is_some() || self.export_md.is_some());
++        let safe = crate::ios::safe(window);
++        crate::ios::set_layout(compact, safe, window.viewport_size());
++        let sheet_scrim = (compact && (self.doc_menu || self.row_menu.is_some() || self.trash_menu.is_some())).then(crate::ios::sheet_scrim);
++        let sidebar = if self.sidebar_open || self.drawer { Some(if matches!(self.view, View::Settings | View::Trash) { self.render_settings_sidebar(window, cx) } else { self.render_sidebar(window, cx) }) } else { None };
++        let (sidebar, drawer) = if self.drawer { (None, sidebar.map(|s| crate::ios::drawer(s, safe, cx))) } else { (sidebar, None) };
+         let row_menu = self.render_row_menu(window, cx);
+         let resize = self.sidebar_open.then(|| self.render_resize_handle(window, cx));
+         let resize_overlay = self.render_resize_overlay(cx);
+@@ -1362,6 +1395,7 @@
+                         )
+                         .children(self.render_shortcuts(cx)),
+                 )
++                .children(crate::ios::keybar::render(self, window, cx))
+                 .into_any_element(),
+             View::Home => self.render_home(window, cx),
+             View::Folder => self.render_folder(window, cx),
+@@ -1376,7 +1410,7 @@
+         // them (no gutter, radius, border or shadow).
+         // A document sits on its theme's page colour.
+         let page = if self.view == View::Doc { crate::editor_theme::Theme::bg_body() } else { Theme::bg_body() };
+-        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).child(main)
++        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).pt(safe.top).pb(safe.bottom).pr(safe.right).when(!self.sidebar_open, |d| d.pl(safe.left)).child(main)
+             // Files from the Finder dropped on 主页 or a folder's page are imported there.
+             .when(matches!(self.view, View::Home | View::Folder), |d| d
+                 .on_drag_move(cx.listener(|w, ev: &DragMoveEvent<ExternalPaths>, _, cx| w.file_drag_move(ev, cx)))
+@@ -1405,6 +1439,8 @@
+             // whichever window macOS considers active.
+             .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
+             .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
++            .on_back_gesture(cx.listener(|w, ev, window, cx| crate::ios::back(w, ev, window, cx)))
++            .child(crate::ios::long_press_layer())
+             .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
+                 crate::quick_note::persist(cx);
+                 if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
+@@ -1421,7 +1457,7 @@
+             .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
+             .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
+             .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
+-                w.sidebar_open = !w.sidebar_open;
++                if w.drawer { w.drawer = false; } else { w.sidebar_open = !w.sidebar_open; }
+                 cx.notify();
+             }))
+             .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
+@@ -1458,7 +1494,7 @@
+             }))
+             // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
+             .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
+-                if w.file_history.busy && !(ev.keystroke.modifiers.secondary() && matches!(ev.keystroke.key.as_str(), "z" | "y")) { cx.stop_propagation(); return; }
++                if w.file_history.busy && !(ev.keystroke.modifiers.secondary(cx) && matches!(ev.keystroke.key.as_str(), "z" | "y")) { cx.stop_propagation(); return; }
+                 if ev.keystroke.key == "escape" && w.has_home_drag() {
+                     w.cancel_home_drag(cx); cx.stop_propagation(); return;
+                 }
+@@ -1490,10 +1526,12 @@
+                 if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
+                 cx.stop_propagation();
+             }))
+-            .children(sidebar)
++            .children(sidebar.map(|s| div().flex_none().h_full().pt(safe.top).pb(safe.bottom).pl(safe.left).child(s)))
+             .child(note)
++            .children(drawer)
+             .children(resize)
+             .children(crate::ui::window_controls(window))
++            .children(sheet_scrim)
+             .children(row_menu)
+             .children(doc_menu)
+             .children(mode_menu)
+--- a/src/devtools.rs
++++ b/src/devtools.rs
+@@ -190,7 +190,7 @@
+                     let mut done = 0.;
+                     for i in 1..=steps {
+                         let to = n[2] * ease(i as f32 / steps as f32);
+-                        let event = ScrollWheelEvent {
++                        let event = ScrollEvent {
+                             position: point(px(n[0]), px(n[1])),
+                             // Positive dy scrolls the content up (reading on).
+                             delta: ScrollDelta::Pixels(point(px(0.), px(done - to))),
+@@ -632,7 +632,7 @@
+         "wheel" => {
+             let n = nums(rest);
+             if n.len() >= 3 {
+-                let event = ScrollWheelEvent {
++                let event = ScrollEvent {
+                     position: point(px(n[0]), px(n[1])),
+                     // An optional fourth number is a sideways component, as a
+                     // trackpad swipe carries; positive reveals content on the right.
+--- a/src/docinfo.rs
++++ b/src/docinfo.rs
+@@ -102,7 +102,7 @@
+         });
+         self.doc_menu = false;
+         self.doc_sub = None;
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         cx.notify();
+     }
+ 
+@@ -163,7 +163,10 @@
+                     .min_h_0()
+                     .flex()
+                     .child(
+-                        div().flex_none().w(px(224.)).h_full().pt(px(12.)).px(px(12.)).border_r_1().border_color(Theme::line_divider()).child(
++                        div().flex_none().h_full().border_color(Theme::line_divider())
++                            // 手机：只有一项的导航栏让出宽度。
++                            .when(crate::ios::is_compact(), |d| d.w(px(0.)).overflow_hidden())
++                            .when(!crate::ios::is_compact(), |d| d.w(px(224.)).pt(px(12.)).px(px(12.)).border_r_1()).child(
+                             // The one nav item, selected the way the sidebar selects: a quiet pill.
+                             div()
+                                 .h(px(30.))
+@@ -203,6 +206,8 @@
+             deferred(
+                 div()
+                     .id("doc-info-mask")
++                    .pt(crate::ios::insets().top)
++                    .pb(crate::ios::insets().bottom)
+                     .absolute()
+                     .inset_0()
+                     .flex()
+--- a/src/docmenu.rs
++++ b/src/docmenu.rs
+@@ -149,7 +149,7 @@
+         let menu = popover()
+             .id("doc-menu")
+             .occlude()
+-            .w(px(MENU_W))
++            .w(crate::ios::menu_w(MENU_W))
+             .py(px(PAD))
+             .flex()
+             .flex_col()
+@@ -226,7 +226,8 @@
+                     .on_hover(hover_sub(None))
+                     .on_click(cx.listener(move |w, _, _, cx| w.ask_delete(&del_id, cx))),
+             )
+-            .child(divider())
++            // 触屏没有键盘快捷键：不放「快捷键」。
++            .when(false, |d| d.child(divider())
+             .child(
+                 menu_item("dm-shortcuts", "keyboard", crate::settings::text("快捷键"), false, false)
+                     .on_hover(hover_sub(None))
+@@ -235,13 +236,13 @@
+                         w.shortcuts = true;
+                         cx.notify();
+                     })),
+-            );
++            ));
+         let vw = window.viewport_size().width;
+         let btn = self.more_btn_bounds.get();
+         let right = btn.map_or(vw - px(120.), |b| b.right());
+         let menu_top = btn.map_or(px(60.), |b| b.bottom() + px(MENU_GAP));
+         let mut out = vec![
+-            deferred(anchored().anchor(Corner::TopRight).position(point(right, menu_top)).child(menu))
++            deferred(crate::ios::place(Anchor::TopRight, point(right, menu_top)).child(menu))
+                 .with_priority(2)
+                 .into_any_element(),
+         ];
+@@ -308,7 +309,7 @@
+         };
+         if let Some((top, el)) = sub_el {
+             out.push(
+-                deferred(anchored().anchor(Corner::TopRight).position(point(sub_at.x, px(top))).snap_to_window_with_margin(px(8.)).child(el))
++                deferred(crate::ios::place(Anchor::TopRight, point(sub_at.x, px(top))).child(el))
+                     .with_priority(2)
+                     .into_any_element(),
+             );
+--- a/src/editor/button.rs
++++ b/src/editor/button.rs
+@@ -356,7 +356,7 @@
+                     .child(icon("pen-line", 18., Theme::icon()))
+                     .on_click(cx.listener(move |e, _, window, cx| e.open_button_panel(at_, window, cx))),
+             );
+-        Some(at(self.rel(point(r.center().x - px(w / 2.), r.top() - px(4.))), Corner::BottomLeft, el))
++        Some(at(self.rel(point(r.center().x - px(w / 2.), r.top() - px(4.))), Anchor::BottomLeft, el))
+     }
+ 
+     // ---- 按钮设置
+@@ -385,7 +385,7 @@
+         self.dragging = false;
+         self.menu = Some(Menu::Button { block: p.block, offset: p.offset });
+         let fh = self.btn.text.read(cx).focus_handle(cx);
+-        window.focus(&fh);
++        window.focus(&fh, cx);
+         cx.notify();
+     }
+ 
+@@ -395,7 +395,7 @@
+             self.menu = None;
+         }
+         self.core.sel = Selection::caret(Pos::new(p.at.block, p.at.offset + EQUATION.len()));
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.restart_blink(window, cx);
+         cx.notify();
+     }
+@@ -431,7 +431,7 @@
+                 if self.btn.panel.as_ref().is_some_and(|p| p.preview.action == ButtonAction::OpenLink) {
+                     other.update(cx, |f, cx| f.select_all_text(cx));
+                     let fh = other.read(cx).focus_handle(cx);
+-                    window.focus(&fh);
++                    window.focus(&fh, cx);
+                 }
+                 cx.notify();
+             }
+@@ -477,14 +477,14 @@
+             self.btn.url.update(cx, |f, cx| f.set_text("", cx));
+         }
+         let fh = self.btn.text.read(cx).focus_handle(cx);
+-        window.focus(&fh);
++        window.focus(&fh, cx);
+         cx.notify();
+     }
+ 
+     pub(super) fn button_panel(&self, block: BlockId, offset: usize, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+         let p = self.btn.panel.as_ref().filter(|p| p.at == Pos::new(block, offset))?;
+         let r = self.probed(Probe::Button(p.at))?;
+-        let vh = f32::from(window.viewport_size().height);
++        let vh = f32::from(crate::ios::visible_height(window));
+         let view_top = f32::from(self.list.viewport_bounds().top());
+         let below = vh - f32::from(r.bottom());
+         let above = f32::from(r.top()) - view_top;
+@@ -653,7 +653,7 @@
+             }))
+             .child(content)
+             .child(footer);
+-        let (pos, corner) = if up { (point(r.left(), r.top() - px(4.)), Corner::BottomLeft) } else { (point(r.left(), r.bottom() + px(4.)), Corner::TopLeft) };
++        let (pos, corner) = if up { (point(r.left(), r.top() - px(4.)), Anchor::BottomLeft) } else { (point(r.left(), r.bottom() + px(4.)), Anchor::TopLeft) };
+         Some(at(self.rel(pos), corner, el))
+     }
+ 
+@@ -693,7 +693,7 @@
+             );
+         }
+         let h = 2. * MENU_PAD_Y + 2. + ACTION_ROW_H * ACTIONS.len() as f32;
+-        let vh = f32::from(window.viewport_size().height);
++        let vh = f32::from(crate::ios::visible_height(window));
+         let below = f32::from(a.bottom()) + 4.;
+         let y = if below + h > vh - 8. { f32::from(a.top()) - 4. - h } else { below };
+         out.push(
+--- a/src/editor/caption.rs
++++ b/src/editor/caption.rs
+@@ -103,7 +103,7 @@
+             }
+             // Enter / ↓ / Esc leave a code name for the start of the code.
+             TextFieldEvent::Submit | TextFieldEvent::Down | TextFieldEvent::Cancel if self.is_code(id) => {
+-                window.focus(&self.focus);
++                window.focus(&self.focus, cx);
+                 self.core.clear_block_sel();
+                 self.core.cell_sel = None;
+                 self.core.sel = core::Selection::caret(Pos::new(id, 0));
+@@ -112,7 +112,7 @@
+             // Image description: Enter starts a paragraph below the image;
+             // Esc, ↑ and Backspace on an empty description select the image.
+             TextFieldEvent::Submit => {
+-                window.focus(&self.focus);
++                window.focus(&self.focus, cx);
+                 let nid = self.core.insert_paragraph_after(id);
+                 self.core.clear_block_sel();
+                 self.core.cell_sel = None;
+@@ -120,7 +120,7 @@
+                 self.changed(window, cx);
+             }
+             TextFieldEvent::Cancel | TextFieldEvent::Up | TextFieldEvent::BackspaceEmpty => {
+-                window.focus(&self.focus);
++                window.focus(&self.focus, cx);
+                 self.core.select_block(id);
+                 self.changed(window, cx);
+             }
+--- a/src/editor/catalogue.rs
++++ b/src/editor/catalogue.rs
+@@ -12,7 +12,12 @@
+ use std::rc::Rc;
+ 
+ /// PAGE_MAIN_PADDING: the page's minimum side margin.
+-const PAD: f32 = 66.;
++const PAD_WIDE: f32 = 66.;
++/// 手机宽度的页边距。
++const PAD_COMPACT: f32 = 20.;
++/// 比这窄的版面按手机排：小页边距，目录按钮移到顶栏。
++pub const COMPACT_BELOW: f32 = 600.;
++fn pad(o: f32) -> f32 { if o < COMPACT_BELOW { PAD_COMPACT } else { PAD_WIDE } }
+ /// CATALOGUE_MAX_UNFOLD_WIDTH.
+ const UNFOLD: f32 = 236.5;
+ /// EDITOR_MIN_EXTRUDING_WIDTH: the narrowest text column beside a pinned catalogue.
+@@ -52,12 +57,16 @@
+     /// Width of the text column.
+     pub content: f32,
+     pub cat: CatMode,
++    /// 这个宽度下的最小页边距。
++    pub pad: f32,
+ }
+ 
+ pub fn page_layout(o: f32, max: Option<f32>, has_cat: bool, pinned: bool) -> PageLayout {
++    #[allow(non_snake_case)]
++    let PAD = pad(o);
+     let centered = |cat| {
+         let m = max.map_or(PAD, |w| ((o - w) / 2.).max(PAD));
+-        PageLayout { ml: m, mr: m, content: o - 2. * m, cat }
++        PageLayout { ml: m, mr: m, content: o - 2. * m, cat, pad: PAD }
+     };
+     if !has_cat {
+         return centered(CatMode::None);
+@@ -82,7 +91,7 @@
+         }
+         Some(_) => (o - EDITOR_MIN - PAD, PAD),
+     };
+-    PageLayout { ml, mr, content: o - ml - mr, cat: CatMode::Pinned(ml - PAD) }
++    PageLayout { ml, mr, content: o - ml - mr, cat: CatMode::Pinned(ml - PAD), pad: PAD }
+ }
+ 
+ /// One catalogue row.
+@@ -190,11 +199,12 @@
+     /// each side: to the page's minimum margin, as in Feishu, but not over
+     /// a pinned catalogue (nor nearer to it than that margin).
+     pub(super) fn bleed(&self) -> (f32, f32) {
++        let pad = self.layout.pad;
+         let l = match self.layout.cat {
+-            CatMode::Pinned(u) => self.layout.ml - PAD - u.min(RESPONSE_MAX),
+-            _ => self.layout.ml - PAD,
++            CatMode::Pinned(u) => self.layout.ml - pad - u.min(RESPONSE_MAX),
++            _ => self.layout.ml - pad,
+         };
+-        (l.max(0.), (self.layout.mr - PAD).max(0.))
++        (l.max(0.), (self.layout.mr - pad).max(0.))
+     }
+ 
+     /// Recomputes the outline and the page margins for this frame.
+@@ -263,13 +273,20 @@
+         self.item_of(id).unwrap_or(0)
+     }
+ 
++    /// 手机宽度：目录是临时浮层，由顶栏按钮开合，不记进设置。
++    pub fn compact(&self) -> bool { self.layout.pad == PAD_COMPACT }
++    pub fn has_catalogue(&self) -> bool { self.cat_entries.len() > 1 }
++    pub fn toggle_catalogue(&mut self, cx: &mut Context<Self>) { let pinned = !self.cat_pinned; self.set_cat_pinned(pinned, cx); }
++
+     fn set_cat_pinned(&mut self, pinned: bool, cx: &mut Context<Self>) {
+         self.cat_pinned = pinned;
++        if self.compact() { cx.notify(); return; }
+         cx.emit(EditorEvent::Catalogue(pinned));
+         cx.notify();
+     }
+ 
+     fn jump_to_heading(&mut self, id: BlockId, cx: &mut Context<Self>) {
++        if self.compact() { self.cat_pinned = false; }
+         self.cat_active = Some(id);
+         self.cat_jump = Some(id);
+         if id == TITLE {
+@@ -292,6 +309,8 @@
+         }
+         let floating = mode == CatMode::Forced;
+         let pinned = self.cat_pinned;
++        let compact = self.compact();
++        if compact && !pinned { return None; }
+         let pin = div()
+             .id(SharedString::from(format!("cat-pin-{pinned}")))
+             .absolute()
+@@ -320,7 +339,7 @@
+         };
+         let pane = self.pane_size();
+         // Below the cover while it is in view.
+-        let top = CAT_TOP + self.core.doc.cover.as_ref().map_or(0., |_| {
++        let top = if compact { 4. } else { CAT_TOP } + self.core.doc.cover.as_ref().map_or(0., |_| {
+             let at = self.list.logical_scroll_top();
+             if at.item_ix == 0 { (super::cover::cover_height(window) - f32::from(at.offset_in_item)).max(0.) } else { 0. }
+         });
+@@ -337,6 +356,7 @@
+                 .cursor(CursorStyle::Arrow)
+                 .when(list_w.is_none(), |d| d.w(px(42.)).h(px(PIN_H)).pt_0())
+                 .when(floating, |d| d.bg(theme::ta(255, 255, 255, 0.96)).rounded(px(8.)))
++                .when(floating && compact, |d| d.left(px(8.)).bg(crate::theme::raised(Theme::bg_body())).rounded(px(12.)).shadow(crate::theme::shadow_menu()))
+                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                 .child(pin)
+                 .children(body)
+@@ -450,7 +470,7 @@
+                 })
+                 .collect()
+         })
+-        .track_scroll(self.cat_scroll.clone())
++        .track_scroll(&self.cat_scroll)
+         .w(px(width - 11.))
+         .h(px((n as f32 * ROW_H + 22.).min(max_h.max(ROW_H))))
+         .pb(px(22.));
+--- a/src/editor/countdown.rs
++++ b/src/editor/countdown.rs
+@@ -148,7 +148,7 @@
+                         if let Some(d) = &mut e.cd.dialog {
+                             d.drop = None;
+                         }
+-                        window.focus(&e.cd.focus);
++                        window.focus(&e.cd.focus, cx);
+                         cx.notify();
+                     }
+                     TextFieldEvent::Cancel => e.cd_escape(window, cx),
+@@ -473,13 +473,13 @@
+         self.cd.palette_in = [false; 2];
+         self.cd.dialog = Some(Dialog { block: id, by_date: c.by_date, notify: c.notify, date, time, month: (date.0, date.1), drop: None });
+         self.cd_set_mode(c.by_date, cx);
+-        window.focus(&self.cd.focus);
++        window.focus(&self.cd.focus, cx);
+         cx.notify();
+     }
+ 
+     fn close_countdown(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         if self.cd.dialog.take().is_some() {
+-            window.focus(&self.focus);
++            window.focus(&self.focus, cx);
+             cx.notify();
+         }
+     }
+@@ -862,7 +862,7 @@
+                     if let Some(d) = &mut e.cd.dialog {
+                         d.drop = None;
+                     }
+-                    window.focus(&e.cd.focus);
++                    window.focus(&e.cd.focus, cx);
+                     cx.notify();
+                 }, cx)
+                 .w(px(64.))
+--- a/src/editor/cover.rs
++++ b/src/editor/cover.rs
+@@ -220,7 +220,7 @@
+     }
+ 
+     fn upload_cover(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+-        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(crate::settings::text("上传图片").into()), extensions: None });
++        let rx = crate::ios::prompt_for_paths(cx, PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(crate::settings::text("上传图片").into()) });
+         cx.spawn_in(window, async move |this, cx| {
+             if let Ok(Ok(Some(paths))) = rx.await
+                 && let Some(p) = paths.into_iter().next()
+@@ -438,7 +438,7 @@
+ 
+     fn cover_popover_at(&self, el: impl IntoElement) -> Option<AnyElement> {
+         let a = self.cover_ui.edit_bounds.get()?;
+-        let (x, corner) = if self.core.doc.cover.is_none() { (a.left(), Corner::TopLeft) } else { (a.right(), Corner::TopRight) };
++        let (x, corner) = if self.core.doc.cover.is_none() { (a.left(), Anchor::TopLeft) } else { (a.right(), Anchor::TopRight) };
+         Some(at(self.rel(point(x, a.bottom() + px(4.))), corner, el))
+     }
+ 
+@@ -471,7 +471,7 @@
+     /// 选择图片: 官方图库 / 本地上传, with 随机 and 移除 on the right.
+     pub(super) fn cover_panel(&self, upload: bool, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+         let a = self.cover_ui.edit_bounds.get()?;
+-        let h = (f32::from(window.viewport_size().height - a.bottom()) - 17.).clamp(120., 520.);
++        let h = (f32::from(crate::ios::visible_height(window) - a.bottom()) - 17.).clamp(120., 520.);
+         // Tabs: the chosen one semibold in the accent over a 2pt accent bar.
+         let tab = |id: &'static str, label: &'static str, on: bool, to_upload: bool| {
+             div()
+@@ -630,7 +630,7 @@
+             .flex_col()
+             .overflow_hidden()
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
++            .on_scroll(|_, _, cx| cx.stop_propagation())
+             .child(header)
+             .child(body);
+         self.cover_popover_at(el)
+--- a/src/editor/drag.rs
++++ b/src/editor/drag.rs
+@@ -509,7 +509,8 @@
+         let env = Env { cell: true, root: false, ..TOP };
+         let widths = self.ed.table_widths(b.id, t);
+         let n = widths.len();
+-        let mut grid = div().grid().grid_col_widths(widths.clone()).w(px(widths.iter().sum()));
++        let mut grid = div().grid().grid_cols_min_content(widths.len() as u16).w(px(widths.iter().sum()))
++            .children(widths.iter().enumerate().map(|(col, width)| div().col_start(col as i16 + 1).row_start(1).w(px(*width)).h_0()));
+         for (r, c, cell) in t.cells() {
+             let (rs, cs) = (cell.rowspan.max(1) as usize, cell.colspan.max(1) as usize);
+             let header = r < t.header_rows || (t.header_col && c == 0);
+--- a/src/editor/emoji_picker.rs
++++ b/src/editor/emoji_picker.rs
+@@ -120,7 +120,7 @@
+         // Keys go to the search box (typing must not reach the block), but it
+         // only looks focused once clicked or typed into.
+         let fh = self.emoji_field.read(cx).focus_handle(cx);
+-        window.focus(&fh);
++        window.focus(&fh, cx);
+         cx.notify();
+     }
+ 
+@@ -319,7 +319,7 @@
+                                     *selected = 0;
+                                 }
+                                 let fh = ed.emoji_field.read(cx).focus_handle(cx);
+-                                window.focus(&fh);
++                                window.focus(&fh, cx);
+                                 cx.notify();
+                             }),
+                         ),
+@@ -401,7 +401,7 @@
+             .shadow(theme::shadow_s4_down())
+             .font_family(theme::UI_FONT)
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
++            .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
+             .when(tabs, |d| {
+                 d.child(
+                     div().flex_none().h(px(TABS_H)).pl(px(24.)).flex().child(
+@@ -443,7 +443,7 @@
+         let (x, y) = if over_below <= over_right { (l, b + OFFSET) } else { (r + OFFSET, t) };
+         let x = x.min(vw - BOUNDARY - W).max(BOUNDARY);
+         let y = y.min(vh - BOUNDARY - h).max(BOUNDARY);
+-        Some(at(self.rel(point(px(x), px(y))), Corner::TopLeft, el))
++        Some(at(self.rel(point(px(x), px(y))), Anchor::TopLeft, el))
+     }
+ }
+ 
+--- a/src/editor/file.rs
++++ b/src/editor/file.rs
+@@ -128,7 +128,7 @@
+ /// The same icon painted into `b` (the inline chip).
+ pub fn paint_type_icon(k: Kind, b: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+     for (path, color) in [("editor-icons/file-page.svg", theme::c(kind_color(k))), ("editor-icons/file-fold.svg", theme::rgbaf(255, 255, 255, 0.45)), (glyph(k), gpui::white())] {
+-        let _ = window.paint_svg(b, path.into(), TransformationMatrix::unit(), color, cx);
++        let _ = window.paint_svg(b, path.into(), None, TransformationMatrix::unit(), color, cx);
+     }
+ }
+ 
+@@ -642,7 +642,7 @@
+         let Some(src) = local_path(f).filter(|p| p.is_file()) else { return self.toast(crate::settings::text("文件不存在"), cx) };
+         let picked = crate::devtools::take_pick().and_then(|p| p.into_iter().next());
+         let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_default();
+-        let rx = picked.is_none().then(|| cx.prompt_for_new_path(&dir, Some(&f.name)));
++        let rx = picked.is_none().then(|| crate::ios::prompt_for_new_path(cx, &dir, Some(&f.name)));
+         let bg = cx.background_executor().clone();
+         cx.spawn(async move |_, _| {
+             let dest = match rx {
+@@ -844,7 +844,7 @@
+                 window.prevent_default();
+             })
+             .child(bar);
+-        Some(at(self.rel(point(px(x), px(y))), Corner::TopLeft, el))
++        Some(at(self.rel(point(px(x), px(y))), Anchor::TopLeft, el))
+     }
+ 
+     /// The hover card of an inline attachment: 下载 | 文本视图 · 卡片视图 ·
+@@ -886,7 +886,7 @@
+                     window.prevent_default();
+                     if e.core.inline_to_file(p, v).is_some() {
+                         e.hide_button_card(cx);
+-                        window.focus(&e.focus);
++                        window.focus(&e.focus, cx);
+                         e.changed(window, cx);
+                     }
+                 }),
+@@ -904,7 +904,7 @@
+                 window.prevent_default();
+             })
+             .child(bar);
+-        Some(at(self.rel(point(r.center().x - px(w / 2.), r.top() - px(4.))), Corner::BottomLeft, el))
++        Some(at(self.rel(point(r.center().x - px(w / 2.), r.top() - px(4.))), Anchor::BottomLeft, el))
+     }
+ 
+     // ---- inserting
+@@ -912,7 +912,7 @@
+     /// 视频或文件: the picked files become attachments at the caret.
+     pub(super) fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         let picked = crate::devtools::take_pick();
+-        let rx = picked.is_none().then(|| cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(crate::settings::text("插入视频或文件").into()), extensions: None }));
++        let rx = picked.is_none().then(|| crate::ios::prompt_for_paths(cx, PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(crate::settings::text("插入视频或文件").into()) }));
+         cx.spawn_in(window, async move |this, cx| {
+             let paths = match rx {
+                 Some(rx) => rx.await.ok().and_then(Result::ok).flatten(),
+@@ -956,7 +956,7 @@
+                         e.core.sel = Selection::caret(Pos::new(p, 0));
+                     }
+                 }
+-                window.focus(&e.focus);
++                window.focus(&e.focus, cx);
+                 e.changed(window, cx);
+             });
+         })
+--- a/src/editor/find.rs
++++ b/src/editor/find.rs
+@@ -69,7 +69,7 @@
+         }
+         self.refresh_find(true, cx);
+         let field = self.find_field.clone();
+-        window.focus(&field.focus_handle(cx));
++        window.focus(&field.focus_handle(cx), cx);
+         field.update(cx, |f, cx| f.select_all_text(cx));
+         self.scroll_to_current(window);
+         cx.notify();
+@@ -83,7 +83,7 @@
+             self.core.sel = Selection { anchor: Pos::new(id, r.start), head: Pos::new(id, r.end) };
+             self.toolbar_hidden = true;
+         }
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         cx.notify();
+     }
+ 
+@@ -248,7 +248,7 @@
+                         f.replace = to_replace;
+                     }
+                     let field = e.find_field.clone();
+-                    window.focus(&field.focus_handle(cx));
++                    window.focus(&field.focus_handle(cx), cx);
+                     cx.notify();
+                 }))
+         };
+--- a/src/editor/grid.rs
++++ b/src/editor/grid.rs
+@@ -103,7 +103,7 @@
+         from.insert(at.min(from.len()), 0.);
+         self.col_anim.insert(grid, (from, Instant::now()));
+         self.gap_hover = None;
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.changed(window, cx);
+     }
+ 
+@@ -222,7 +222,7 @@
+                     cx.listener(move |e, _, window, cx| {
+                         cx.stop_propagation();
+                         e.core.focus_column_end(cid);
+-                        window.focus(&e.focus);
++                        window.focus(&e.focus, cx);
+                         e.changed(window, cx);
+                     }),
+                 ));
+--- a/src/editor/image.rs
++++ b/src/editor/image.rs
+@@ -210,7 +210,7 @@
+ impl PictureExt for Img {
+     /// Loads through the shared picture cache instead of the global one.
+     fn doc_picture(self) -> Self {
+-        match PICTURES.with(|p| p.get().cloned()) { Some(e) => self.image_cache(&e).load_visible_only(), None => self }
++        match PICTURES.with(|p| p.get().cloned()) { Some(e) => self.image_cache(&e), None => self }
+     }
+ }
+ 
+@@ -270,7 +270,6 @@
+ }
+ 
+ impl ImageCache for DocImages {
+-    fn peek(&self, r: &Resource) -> Option<Decoded> { self.0.borrow().get(r).and_then(|s| s.image.clone()) }
+     fn load(&mut self, r: &Resource, window: &mut Window, cx: &mut App) -> Option<Decoded> {
+         let id = window.window_handle().window_id();
+         if let Some(s) = self.0.borrow_mut().get_mut(r) {
+@@ -589,7 +588,7 @@
+                             .bg(gpui::white())
+                             .border_1()
+                             .border_color(if active { Theme::primary() } else { theme::ca(craft::N1000, 0.24) })
+-                            .shadow(vec![BoxShadow { color: Theme::shadow(), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.) }]),
++                            .shadow(vec![BoxShadow { inset: false, color: Theme::shadow(), offset: point(px(0.), px(1.)), blur_radius: px(2.), spread_radius: px(0.) }]),
+                     )
+                     .on_mouse_down(
+                         MouseButton::Left,
+@@ -850,7 +849,7 @@
+     fn start_resize(&mut self, id: BlockId, left: bool, cursor: CursorStyle, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+         let Some((g, container)) = self.image_geo(id) else { return };
+         let center = self.core.block(id).is_some_and(|b| b.align == Align::Center);
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.menu = None;
+         self.slash = None;
+         self.core.clear_block_sel();
+@@ -947,7 +946,7 @@
+             cx.emit(EditorEvent::Changed);
+         }
+         if reselect {
+-            window.focus(&self.focus);
++            window.focus(&self.focus, cx);
+             self.core.clear_block_sel();
+             self.core.cell_sel = None;
+             self.core.sel = Selection::caret(Pos::new(c.id, 0));
+@@ -1236,7 +1235,7 @@
+                 window.prevent_default();
+             })
+             .child(bar);
+-        Some(at(self.rel(point(px(x), px(y))), Corner::TopLeft, el))
++        Some(at(self.rel(point(px(x), px(y))), Anchor::TopLeft, el))
+     }
+ 
+     /// 添加描述 / 编辑描述: shows the description and puts the caret in it.
+@@ -1253,7 +1252,7 @@
+         }
+         self.img.caption_focus = Some(id);
+         if let Some(f) = self.caption_field(id) {
+-            window.focus(&f.read(cx).focus_handle(cx));
++            window.focus(&f.read(cx).focus_handle(cx), cx);
+         }
+         cx.notify();
+     }
+@@ -1302,7 +1301,7 @@
+             moved: false,
+             rotated: None,
+         });
+-        window.focus(&self.img.lb_focus);
++        window.focus(&self.img.lb_focus, cx);
+         cx.notify();
+     }
+ 
+@@ -1310,7 +1309,7 @@
+         let Some(lb) = &mut self.img.lightbox else { return };
+         if lb.closing.is_none() {
+             lb.closing = Some(Instant::now());
+-            window.focus(&self.focus);
++            window.focus(&self.focus, cx);
+             cx.notify();
+         }
+     }
+@@ -1445,7 +1444,7 @@
+         let fmt = image::ImageReader::open(&path).ok().and_then(|r| r.with_guessed_format().ok()).and_then(|r| r.format());
+         let ext = fmt.and_then(|f| f.extensions_str().first().copied()).unwrap_or("png");
+         let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_default();
+-        let rx = cx.prompt_for_new_path(&dir, Some(&format!("image.{ext}")));
++        let rx = crate::ios::prompt_for_new_path(cx, &dir, Some(&format!("image.{ext}")));
+         let bg = cx.background_executor().clone();
+         cx.spawn(async move |_, _| {
+             let Ok(Ok(Some(dest))) = rx.await else { return };
+@@ -1538,7 +1537,7 @@
+                 && lb.closing.is_none()
+             {
+                 lb.closing = Some(Instant::now());
+-                window.focus(&self.focus);
++                window.focus(&self.focus, cx);
+             }
+             window.request_animation_frame();
+             return;
+@@ -1702,7 +1701,7 @@
+             .h(px(vh))
+             .bg(theme::rgbaf(0, 0, 0, 0.8))
+             .opacity(fade)
+-            .when(!lb.chrome && k >= 1., |d| d.cursor(CursorStyle::None))
++            .when(!lb.chrome && k >= 1., |d| d.cursor(CursorStyle::Arrow))
+             .on_action(cx.listener(|e, _: &LbClose, window, cx| e.close_lightbox(window, cx)))
+             .on_action(cx.listener(|e, _: &LbPrev, _, cx| e.lb_go(-1, cx)))
+             .on_action(cx.listener(|e, _: &LbNext, _, cx| e.lb_go(1, cx)))
+@@ -1758,7 +1757,7 @@
+                     cx.notify();
+                 }),
+             )
+-            .on_scroll_wheel(cx.listener(|e, ev: &ScrollWheelEvent, _, cx| {
++            .on_scroll(cx.listener(|e, ev: &ScrollEvent, _, cx| {
+                 let (dx, dy, lines) = match ev.delta {
+                     ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y), false),
+                     ScrollDelta::Lines(l) => (l.x, l.y, true),
+@@ -1871,7 +1870,7 @@
+         self.core.clear_block_sel();
+         self.core.cell_sel = None;
+         self.core.sel = Selection::caret(Pos::new(last, 0));
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.changed(window, cx);
+     }
+ 
+--- a/src/editor/link.rs
++++ b/src/editor/link.rs
+@@ -173,7 +173,7 @@
+             &self.link_field
+         };
+         let fh = field.read(cx).focus_handle(cx);
+-        window.focus(&fh);
++        window.focus(&fh, cx);
+         cx.notify();
+     }
+ 
+@@ -240,7 +240,7 @@
+         if matches!(self.menu, Some(Menu::Link { .. })) {
+             self.menu = None;
+         }
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.restart_blink(window, cx);
+         cx.notify();
+     }
+@@ -314,7 +314,7 @@
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+             .child(rows)
+             .child(button);
+-        Some(at(self.rel(point(x, bottom)), Corner::TopLeft, el))
++        Some(at(self.rel(point(x, bottom)), Anchor::TopLeft, el))
+     }
+ 
+     // ---- hover card
+@@ -449,7 +449,7 @@
+         let view_top = self.list.viewport_bounds().top();
+         let x = union.center().x - px(CARD_W / 2.);
+         let above = first.top() - px(7. + CARD_H) >= view_top;
+-        let (pos, corner) = if above { (point(x, first.top() - px(7.)), Corner::BottomLeft) } else { (point(x, union.bottom() + px(7.)), Corner::TopLeft) };
++        let (pos, corner) = if above { (point(x, first.top() - px(7.)), Anchor::BottomLeft) } else { (point(x, union.bottom() + px(7.)), Anchor::TopLeft) };
+         let btn = |id: &'static str| {
+             div()
+                 .id(id)
+@@ -574,7 +574,7 @@
+         menu()
+             .id("tb-more-menu")
+             .occlude()
+-            .w(px(SUBMENU_W))
++            .w(crate::ios::menu_w(SUBMENU_W))
+             .py(px(crate::editor_ui::MENU_PAD_Y))
+             .on_hover(cx.listener(|e, h: &bool, _, cx| e.tb_drop_over(Menu::TbMore, 1, *h, cx)))
+             .child(menu_item("tm-search", "search", crate::settings::text("文档库内搜索")).on_click(cx.listener(|e, _, _, cx| {
+--- a/src/editor/links.rs
++++ b/src/editor/links.rs
+@@ -313,9 +313,9 @@
+             .w(px(280.))
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+             .child(list);
+-        let vh = f32::from(window.viewport_size().height);
++        let vh = f32::from(crate::ios::visible_height(window));
+         let below = point(p.x, p.y + lh);
+-        Some(if vh - f32::from(below.y) < 380. { at(self.rel(p), Corner::BottomLeft, el) } else { at(self.rel(below), Corner::TopLeft, el) })
++        Some(if vh - f32::from(below.y) < 380. { at(self.rel(p), Anchor::BottomLeft, el) } else { at(self.rel(below), Anchor::TopLeft, el) })
+     }
+ 
+     // ---- 反向引用 / 本文引用
+--- a/src/editor/math.rs
++++ b/src/editor/math.rs
+@@ -101,7 +101,7 @@
+             match it {
+                 Item::Text { x, y, line } => {
+                     let lh = line.ascent + line.descent;
+-                    let _ = line.paint(point(origin.x + px(*x), origin.y + px(*y) - line.ascent), lh, window, cx);
++                    let _ = line.paint(point(origin.x + px(*x), origin.y + px(*y) - line.ascent), lh, TextAlign::Left, None, window, cx);
+                 }
+                 Item::Rect { x, y, w, h, color } => {
+                     window.paint_quad(fill(
+@@ -111,7 +111,7 @@
+                 }
+                 Item::Svg { x, y, w, h, path, color } => {
+                     let b = Bounds::new(point(origin.x + px(*x), origin.y + px(*y)), size(px(*w), px(*h)));
+-                    let _ = window.paint_svg(b, path.clone(), TransformationMatrix::unit(), *color, cx);
++                    let _ = window.paint_svg(b, path.clone(), None, TransformationMatrix::unit(), *color, cx);
+                 }
+             }
+         }
+--- a/src/editor/mod.rs
++++ b/src/editor/mod.rs
+@@ -28,4 +28,6 @@
+ pub mod table;
+ pub use fdl_core::editor::table_ops;
+ pub mod text;
++#[path = "../../prototypes/ios/touch.rs"]
++mod touch;
+ pub mod view;
+--- a/src/editor/numbering.rs
++++ b/src/editor/numbering.rs
+@@ -7,7 +7,7 @@
+     pub(super) fn open_ordered_number(&mut self, block: BlockId, depth: usize, pos: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+         self.toolbar_hidden = true;
+         self.menu = Some(Menu::OrderedNumber { block, pos: self.rel(pos + point(px(0.), px(16.))), edit: false, depth });
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         cx.notify();
+     }
+ 
+@@ -45,7 +45,7 @@
+                         if i == 2 {
+                             e.number_field.update(cx, |f, cx| { f.set_text(super::core::ordered_marker(number, depth).trim_end_matches('.'), cx); f.select_all_text(cx); });
+                             e.menu = Some(Menu::OrderedNumber { block, pos, edit: true, depth });
+-                            w.focus(&e.number_field.read(cx).focus_handle(cx));
++                            w.focus(&e.number_field.read(cx).focus_handle(cx), cx);
+                             cx.notify();
+                         } else {
+                             e.core.set_ordered_number(block, if i == 0 { previous.unwrap_or(1) } else { 1 }, i == 0);
+@@ -55,7 +55,7 @@
+                     }))));
+             }
+         }
+-        Some(super::overlays::at(pos, Corner::TopLeft, panel))
++        Some(super::overlays::at(pos, Anchor::TopLeft, panel))
+     }
+ }
+ 
+--- a/src/editor/overlays.rs
++++ b/src/editor/overlays.rs
+@@ -40,7 +40,7 @@
+ }
+ 
+ /// Place `el` at `rel` (content-column coordinates), above everything else.
+-pub(super) fn at(rel: Point<Pixels>, corner: Corner, el: impl IntoElement) -> AnyElement {
++pub(super) fn at(rel: Point<Pixels>, corner: Anchor, el: impl IntoElement) -> AnyElement {
+     div()
+         .absolute()
+         .top_0()
+@@ -123,19 +123,20 @@
+         .flex_none()
+         .h(px(MENU_ROW_H))
+         .mx(px(MENU_INSET))
+-        .px(px(8.))
++        .px(px(12.))
+         .flex()
+         .items_center()
+-        .rounded(px(crate::ui::ROW_RADIUS))
+-        .text_size(px(13.))
+-        .line_height(px(20.))
++        .rounded(px(10.))
++        .text_size(px(16.))
++        .line_height(px(22.))
++        .active(|s| s.bg(Theme::fill_pressed()))
+         .text_color(text)
+         .when(highlighted, |d| d.bg(Theme::fill_hover()))
+         // Disabled items (drawn in text_disabled) neither hover nor point.
+         .when(text != Theme::text_disabled(), |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())))
+         // The app's menu row: 16px glyph, the label 8 after it.
+-        .child(icon(icon_name, 16., icon_color))
+-        .child(div().ml(px(8.)).flex_1().whitespace_nowrap().child(crate::settings::label(label.into())))
++        .child(icon(icon_name, 20., icon_color))
++        .child(div().ml(px(12.)).flex_1().whitespace_nowrap().child(crate::settings::label(label.into())))
+         .when_some(right, |d, r| {
+             if r == "›" {
+                 d.child(icon("chevron-right", 14., Theme::icon()))
+@@ -150,16 +151,16 @@
+ fn swatch(id: impl Into<ElementId>, sel: bool, hairline: bool, inner: Div) -> Stateful<Div> {
+     div()
+         .id(id)
+-        .size(px(26.))
+-        .rounded(px(4.))
++        .size(px(if crate::ios::is_compact() { 40. } else { 26. }))
++        .rounded(px(if crate::ios::is_compact() { 10. } else { 4. }))
+         .border_2()
+         .border_color(if sel { Theme::primary_500() } else { transparent_black() })
+         .cursor_pointer()
+-        .child(inner.size(px(22.)).rounded(px(2.)).when(hairline && !sel, |d| d.border_1().border_color(Theme::swatch_border())))
++        .child(inner.size(px(if crate::ios::is_compact() { 36. } else { 22. })).rounded(px(if crate::ios::is_compact() { 8. } else { 2. })).when(hairline && !sel, |d| d.border_1().border_color(Theme::swatch_border())))
+ }
+ 
+ fn font_swatch(hex: u32) -> Div {
+-    div().flex().items_center().justify_center().text_size(px(14.)).text_color(theme::c(hex)).child("A")
++    div().flex().items_center().justify_center().text_size(px(if crate::ios::is_compact() { 18. } else { 14. })).text_color(theme::c(hex)).child("A")
+ }
+ 
+ /// White square crossed by a grey diagonal: "no color".
+@@ -168,7 +169,7 @@
+ }
+ 
+ fn color_title(t: &'static str) -> Div {
+-    div().mt(px(7.)).mb(px(4.)).text_size(px(12.)).line_height(px(20.)).text_color(Theme::text()).child(crate::settings::text(t))
++    div().mt(px(7.)).mb(px(4.)).text_size(px(if crate::ios::is_compact() { 14. } else { 12. })).line_height(px(20.)).text_color(Theme::text()).child(crate::settings::text(t))
+ }
+ 
+ /// 在下方添加 ›: hovering opens the insert panel next to the handle menu.
+@@ -184,9 +185,34 @@
+                 cx.notify();
+             }
+         }))
+-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
++        .on_mouse_down(MouseButton::Left, cx.listener(|e: &mut Editor, _, _, cx| {
++            cx.stop_propagation();
++            if let Some(Menu::Block { sub, .. }) = &mut e.menu && !matches!(sub, Some(BlockSub::Add(_))) {
++                *sub = Some(BlockSub::Add(usize::MAX));
++                e.size_pick = (0, 0);
++                e.slash_scroll.set_offset(Point::default());
++                cx.notify();
++            }
++        }))
+ }
+ 
++/// 手机上的底部面板：宽度占满屏宽（两侧各留 8）。宽屏是 None，菜单照原样挂在手柄旁。
++fn sheet_w(ed: &Editor) -> Option<f32> { ed.compact().then(|| f32::from(crate::ios::menu_w(MENU_W))) }
++
++/// 子面板的位置：宽屏挂在菜单右侧 `top` 处，手机上盖在面板之上、同样贴底。
++fn sub_pos<E: Styled>(e: E, sheet: bool, top: f32) -> E {
++    if sheet { e } else { e.absolute().left(px(MENU_W + 4.)).top(px(top)) }
++}
++
++/// 子面板顶上的返回行：回到块菜单。
++fn back_row(label: &'static str, cx: &Context<Editor>) -> Stateful<Div> {
++    row("bm-back", "chevron-left", label, None, false).font_weight(FontWeight::SEMIBOLD)
++        .on_mouse_down(MouseButton::Left, cx.listener(|e: &mut Editor, _, _, cx| {
++            cx.stop_propagation();
++            if let Some(Menu::Block { sub, .. }) = &mut e.menu { *sub = None; cx.notify(); }
++        }))
++}
++
+ /// Split the basic grid into rows of 6, a plain 6-column grid, so items
+ /// just flow with no forced breaks.
+ fn grid_rows<T>(cells: Vec<(menus::SlashKind, T)>) -> Vec<Vec<T>> {
+@@ -308,6 +334,7 @@
+         self.callout_zone.borrow_mut().clear();
+         let mut out = vec![];
+         if self.read_only {
++            out.extend(self.touch_callout(window, cx));
+             return out;
+         }
+         let menu_el = match self.menu.clone() {
+@@ -338,6 +365,7 @@
+         out.extend(self.button_layers(window, cx));
+         out.extend(self.reminder_layers(window, cx));
+         out.extend(self.countdown_overlays(window, cx));
++        out.extend(self.touch_callout(window, cx));
+         out
+     }
+ 
+@@ -408,7 +436,7 @@
+                     }
+                 }),
+             );
+-        Some(at(point(px(left), px(top)), Corner::TopLeft, el))
++        Some(at(point(px(left), px(top)), Anchor::TopLeft, el))
+     }
+ 
+     // ---- slash / add menu
+@@ -439,12 +467,21 @@
+             }
+             _ => return None,
+         };
++        // 键盘弹出时可见区域很矮：面板高度收到上下两侧较大的那一侧里。
++        let vh = f32::from(crate::ios::visible_height(window));
++        let top_edge = f32::from(self.list.viewport_bounds().top()) + 4.;
++        let (room_below, room_above) = (vh - f32::from(anchor_bottom.y) - 8., f32::from(anchor_top.y) - top_edge);
++        let slash_max = if beside.is_some() { SLASH_MAX_H.min(vh - top_edge - 8.) } else { SLASH_MAX_H.min(room_below.max(room_above)) }.max(140.);
++        // 手机：从工具条或块菜单打开的添加面板是底部面板；打字触发的「/」菜单仍跟着光标。
++        let sheet = self.compact() && self.slash.is_none();
++        let slash_w = if sheet { f32::from(crate::ios::menu_w(SLASH_W)) } else { SLASH_W };
++        let slash_max = if sheet { (vh - top_edge - 16.).min(440.).max(140.) } else { slash_max };
+         let results = self.slash_results();
+         let grid_basic = self.slash_grid();
+         let mut list = div()
+             .id("slash-list")
+-            .w(px(SLASH_W - SCROLLBAR_GUTTER - 2.))
+-            .max_h(px(SLASH_MAX_H - 2.))
++            .w(px(slash_w - SCROLLBAR_GUTTER - 2.))
++            .max_h(px(slash_max - 2.))
+             .overflow_y_scroll()
+             .track_scroll(&self.slash_scroll)
+             .py(px(MENU_PAD_Y))
+@@ -553,8 +590,8 @@
+                     .rounded(px(crate::ui::ROW_RADIUS))
+                     .cursor_pointer()
+                     .when(n == selected, |d| d.bg(Theme::fill_hover()))
+-                    .child(icon(it.icon, 16., crate::feishu_theme::c(it.color)))
+-                    .child(div().ml(px(8.)).flex_1().text_size(px(13.)).line_height(px(20.)).child(crate::settings::label(it.label)))
++                    .child(icon(it.icon, 20., crate::feishu_theme::c(it.color)))
++                    .child(div().ml(px(12.)).flex_1().text_size(px(16.)).line_height(px(22.)).child(crate::settings::label(it.label)))
+                     .when(sub, |d| d.child(icon("chevron-right", 14., Theme::icon())))
+                     .on_mouse_move(hover_sel(n))
+                     .when(!sub, |d| d.on_mouse_down(MouseButton::Left, run(kind)))
+@@ -572,17 +609,16 @@
+         }
+         // An always-visible 8px thumb, rgba(31,35,41,.3), 3px in
+         // from the right border and 2px from the top/bottom.
+-        let view_h = content_h.min(SLASH_MAX_H - 2.);
+-        let vh = f32::from(window.viewport_size().height);
++        let view_h = content_h.min(slash_max - 2.);
+         let (pos, corner) = if let Some(p) = beside {
+             // The panel lines up 8px above the row, inside the window.
+-            let top = (f32::from(p.y) - 8.).min(vh - 8. - view_h - 2.).max(8.);
+-            (point(p.x, px(top)), Corner::TopLeft)
+-        } else if vh - f32::from(anchor_bottom.y) < 240. {
+-            (anchor_top, Corner::BottomLeft)
++            let top = (f32::from(p.y) - 8.).min(vh - 8. - view_h - 2.).max(top_edge);
++            (point(p.x, px(top)), Anchor::TopLeft)
++        } else if room_below < view_h + 2. && room_above > room_below {
++            (anchor_top, Anchor::BottomLeft)
+         } else {
+             // The menu hangs right off the line box, no gap.
+-            (anchor_bottom, Corner::TopLeft)
++            (anchor_bottom, Anchor::TopLeft)
+         };
+         let thumb = (content_h > view_h).then(|| {
+             let track = view_h - 4.;
+@@ -595,12 +631,13 @@
+             .id("slash-menu")
+             .occlude()
+             .relative()
+-            .w(px(SLASH_W))
++            .w(px(slash_w))
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+-            .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
++            .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
+             .child(list)
+             .children(thumb);
+-        out.push(at(self.rel(pos), corner, el));
++        let sheet_at = point(window.viewport_size().width / 2., px(vh - 8.));
++        if sheet { out.push(at(self.rel(sheet_at), Anchor::BottomCenter, el)); } else { out.push(at(self.rel(pos), corner, el)); }
+         let (kind, row_top) = picker_at?;
+         // The picker hangs off the list's right edge (over the scrollbar
+         // gutter), centred on its row and kept inside the window.
+@@ -609,11 +646,11 @@
+         } else {
+             (self.size_picker(kind, cx), picker_height(kind))
+         };
+-        let menu_top = if corner == Corner::TopLeft { pos.y } else { pos.y - px(view_h + 2.) };
++        let menu_top = if corner == Anchor::TopLeft { pos.y } else { pos.y - px(view_h + 2.) };
+         let off = -f32::from(self.slash_scroll.offset().y);
+         let top = (f32::from(menu_top) + 1. + row_top - off + 16. - ph / 2.).min(vh - 8. - ph).max(8.);
+         let left = pos.x + px(1. + SLASH_W - SCROLLBAR_GUTTER - 2.);
+-        out.push(at(self.rel(point(left, px(top))), Corner::TopLeft, picker));
++        if sheet { out.push(at(self.rel(sheet_at), Anchor::BottomCenter, picker)); } else { out.push(at(self.rel(point(left, px(top))), Anchor::TopLeft, picker)); }
+         Some(())
+     }
+ 
+@@ -708,6 +745,12 @@
+             .child(grid)
+     }
+ 
++    /// 手柄菜单的落点：宽屏在手柄下方，手机上是底部面板。
++    fn place_handle_menu(&self, r: Bounds<Pixels>, el: impl IntoElement) -> AnyElement {
++        if self.compact() { return at(self.rel(crate::ios::sheet_point()), Anchor::BottomCenter, el); }
++        at(self.rel(point(r.left(), r.bottom() + px(4.))), Anchor::TopLeft, el)
++    }
++
+     // ---- block menu
+ 
+     fn block_menu(&self, block: BlockId, sub: Option<BlockSub>, cx: &mut Context<Self>) -> Option<AnyElement> {
+@@ -734,7 +777,14 @@
+                 }
+             })
+         };
+-        let mut m = menu().id("block-menu").occlude().w(px(MENU_W)).py(px(MENU_PAD_Y)).flex().flex_col();
++        let sheet = sheet_w(self);
++        let menu_w = sheet.unwrap_or(MENU_W);
++        // 触屏没有悬停：点「›」的行也打开子面板。
++        let tap_sub = |s: BlockSub| cx.listener(move |e: &mut Editor, _: &MouseDownEvent, _, cx| {
++            cx.stop_propagation();
++            if let Some(Menu::Block { sub, .. }) = &mut e.menu { *sub = Some(s); cx.notify(); }
++        });
++        let mut m = menu().id("block-menu").occlude().w(px(menu_w)).py(px(MENU_PAD_Y)).flex().flex_col();
+         let mut turn = shape.turn_items();
+         if self.markdown { turn.retain(|t| !matches!((t.kind)(), BlockKind::Callout { .. })); }
+         if !turn.is_empty() {
+@@ -745,7 +795,10 @@
+                 }
+                 _ => menus::same_kind(&kind, k),
+             };
+-            let mut grid = div().flex().flex_wrap().gap_x(px(12.5)).gap_y(px(12.)).px(px(12.)).py(px(4.));
++            // 手机：六个一行铺满面板，每格 44pt。
++            let cell = if sheet.is_some() { 44. } else { 24. };
++            let gap_x = sheet.map_or(12.5, |w| ((w - 2. - 24. - 6. * cell) / 5. - 1.).floor().max(0.));
++            let mut grid = div().flex().flex_wrap().gap_x(px(gap_x)).gap_y(px(if sheet.is_some() { 4. } else { 12. })).px(px(12.)).py(px(4.));
+             for (i, it) in turn.iter().enumerate() {
+                 let k = (it.kind)();
+                 let active = current(&k);
+@@ -753,16 +806,16 @@
+                 grid = grid.child(
+                     div()
+                         .id(("turn", i))
+-                        .size(px(24.))
++                        .size(px(cell))
+                         .flex()
+                         .items_center()
+                         .justify_center()
+-                        .rounded(px(4.))
++                        .rounded(px(if sheet.is_some() { 10. } else { 4. }))
+                         .cursor_pointer()
+                         .when(active, |d| d.bg(Theme::fill_turninto_active()))
+                         .hover(|s| s.bg(Theme::fill_hover()))
+                         .tip_md(tip, keys, md)
+-                        .child(icon(it.icon, 18., if active { Theme::primary() } else { Theme::icon() }))
++                        .child(icon(it.icon, if sheet.is_some() { 22. } else { 18. }, if active { Theme::primary() } else { Theme::icon() }))
+                         .on_mouse_down(MouseButton::Left, act(BlockAct::Turn(k))),
+                 );
+             }
+@@ -774,11 +827,11 @@
+         let (indent_icon, indent_label) = if shape == menus::MenuShape::Text && !self.markdown { ("indent-align", crate::settings::text("缩进和对齐")) } else { ("indent-increase", crate::settings::text("缩进")) };
+         m = m.child(
+             row("bm-indent", indent_icon, indent_label, Some("›"), sub == Some(BlockSub::Indent))
+-                .on_mouse_move(set_sub(Some(BlockSub::Indent))),
++                .on_mouse_move(set_sub(Some(BlockSub::Indent))).on_mouse_down(MouseButton::Left, tap_sub(BlockSub::Indent)),
+         );
+         let colorable = shape == menus::MenuShape::Text && !self.markdown;
+         if colorable {
+-            m = m.child(row("bm-color", "palette", crate::settings::text("颜色"), Some("›"), sub == Some(BlockSub::Color)).on_mouse_move(set_sub(Some(BlockSub::Color))));
++            m = m.child(row("bm-color", "palette", crate::settings::text("颜色"), Some("›"), sub == Some(BlockSub::Color)).on_mouse_move(set_sub(Some(BlockSub::Color))).on_mouse_down(MouseButton::Left, tap_sub(BlockSub::Color)));
+         }
+         let adding = matches!(sub, Some(BlockSub::Add(_)));
+         m = m
+@@ -817,14 +870,10 @@
+                     }
+                 };
+                 Some(
+-                    menu()
+-                        .id("bm-indent-sub")
+-                        .occlude()
+-                        .absolute()
+-                        .left(px(MENU_W + 4.))
+-                        .top(px(indent_y - MENU_PAD_Y))
+-                        .w(px(MENU_W))
++                    sub_pos(menu().id("bm-indent-sub").occlude(), sheet.is_some(), indent_y - MENU_PAD_Y)
++                        .w(px(menu_w))
+                         .py(px(MENU_PAD_Y))
++                        .when(sheet.is_some(), |d| d.child(back_row(indent_label, cx)).child(separator_h()))
+                         .when(shape == menus::MenuShape::Text && !self.markdown, |d| {
+                             d.child(align_row("al-l", "align-left", crate::settings::text("左对齐"), crate::shortcuts::hint("editor::AlignLeft", "⌘ + Shift + L"), Align::Left))
+                                 .child(align_row("al-c", "align-center", crate::settings::text("居中对齐"), crate::shortcuts::hint("editor::AlignCenter", "⌘ + Shift + E"), Align::Center))
+@@ -842,16 +891,21 @@
+                 } else {
+                     self.color_panel(Some(block), cx).into_any_element()
+                 };
+-                Some(div().absolute().left(px(MENU_W + 4.)).top(px(color_y - MENU_PAD_Y)).child(p).into_any_element())
++                Some(if sheet.is_some() {
++                    menu().id("bm-color-sub").occlude().w(px(menu_w)).py(px(MENU_PAD_Y)).child(back_row(crate::settings::text("颜色"), cx)).child(separator_h())
++                        .child(div().py(px(8.)).flex().justify_center().child(p)).into_any_element() }
++                    else { div().absolute().left(px(MENU_W + 4.)).top(px(color_y - MENU_PAD_Y)).child(p).into_any_element() })
+             }
+             _ => None,
+         };
++        // 手机：子面板换下主面板（带一行返回），添加面板自己就是底部面板。
++        let swap = sheet.is_some() && sub.is_some();
+         let el = div()
+             .relative()
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+-            .child(m)
++            .when(!swap, |d| d.child(m))
+             .children(sub_el);
+-        Some(at(self.rel(point(r.left(), r.bottom() + px(4.))), Corner::TopLeft, el))
++        Some(self.place_handle_menu(r, el))
+     }
+ 
+     /// Top of the 在下方添加 row inside the handle menu (mirrors its layout).
+@@ -914,10 +968,12 @@
+             ));
+         }
+         let title = color_title;
+-        panel()
++        // 手机：色板占满面板宽度；在块菜单的子面板里不再套一层外壳。
++        let phone = self.compact();
++        if phone && block.is_some() { div() } else { panel() }
+             .id("color-panel")
+             .occlude()
+-            .w(px(CALLOUT_PANEL_W))
++            .w(px(if phone { f32::from(crate::ios::menu_w(CALLOUT_PANEL_W)) - if block.is_some() { 4. } else { 0. } } else { CALLOUT_PANEL_W }))
+             .pt(px(4.))
+             .px(px(10.))
+             .pb(px(12.))
+@@ -930,14 +986,14 @@
+                 div()
+                     .id("color-reset")
+                     .mt(px(12.))
+-                    .h(px(24.))
+-                    .rounded(px(6.))
++                    .h(px(if crate::ios::is_compact() { 44. } else { 24. }))
++                    .rounded(px(if crate::ios::is_compact() { 10. } else { 6. }))
+                     .border_1()
+                     .border_color(Theme::line_border())
+                     .flex()
+                     .items_center()
+                     .justify_center()
+-                    .text_size(px(12.))
++                    .text_size(px(if crate::ios::is_compact() { 16. } else { 12. }))
+                     .cursor_pointer()
+                     .hover(|s| s.bg(Theme::fill_hover()))
+                     .child(crate::settings::text("恢复默认"))
+@@ -1016,7 +1072,7 @@
+             .child(div().h(px(40.)).px(px(10.)).flex().items_center().child(palette))
+             .child(self.zone_probe())
+             .children(drop);
+-        Some(at(self.rel(pos), Corner::TopLeft, el))
++        Some(at(self.rel(pos), Anchor::TopLeft, el))
+     }
+ 
+     /// Callout panel: 字体颜色 8 / 边框颜色 8 / 填充颜色 16, 随机, 恢复默认.
+@@ -1189,7 +1245,7 @@
+                     .text_color(Theme::text_placeholder())
+                     .child(crate::settings::text("按 ESC 完成输入")),
+             );
+-        Some(at(self.rel(point(b.left(), b.bottom() + px(4.))), Corner::TopLeft, el))
++        Some(at(self.rel(point(b.left(), b.bottom() + px(4.))), Anchor::TopLeft, el))
+     }
+ 
+     // ---- code language picker
+@@ -1262,10 +1318,10 @@
+         let h = px(2. * MENU_PAD_Y + 38. + (langs.len().max(1) as f32 * MENU_ROW_H).min(288.) + 2.);
+         let x = b.right() - px(267.);
+         let below = b.top() + px(34.);
+-        let (pos, corner) = if below + h > window.viewport_size().height - px(8.) && b.top() + px(4.) - h >= px(8.) {
+-            (point(x, b.top() + px(4.)), Corner::BottomLeft)
++        let (pos, corner) = if below + h > crate::ios::visible_height(window) - px(8.) && b.top() + px(4.) - h >= px(8.) {
++            (point(x, b.top() + px(4.)), Anchor::BottomLeft)
+         } else {
+-            (point(x, below), Corner::TopLeft)
++            (point(x, below), Anchor::TopLeft)
+         };
+         Some(at(self.rel(pos), corner, el))
+     }
+@@ -1279,7 +1335,7 @@
+             _ => return None,
+         };
+         let sel = self.core.sel;
+-        if self.core.cell_sel.is_some() || self.toolbar_hidden || matches!(self.menu, Some(Menu::Equation { .. })) || self.dragging || sel.is_collapsed() || self.core.in_block_mode() || self.slash.is_some() {
++        if self.touch_menu || self.core.cell_sel.is_some() || self.toolbar_hidden || matches!(self.menu, Some(Menu::Equation { .. })) || self.dragging || sel.is_collapsed() || self.core.in_block_mode() || self.slash.is_some() {
+             return None;
+         }
+         if !self.focus.is_focused(window) {
+@@ -1297,32 +1353,41 @@
+         let viewport = self.list.viewport_bounds();
+         let view_top = viewport.top();
+         let pane_left = self.rel(point(viewport.left() + px(8.), px(0.))).x;
+-        let x = (hp.x - px(TOOLBAR_W / 2.)).max(pane_left);
++        // 手机宽度放不下整条：去掉对齐（块菜单里还有），并留在屏幕内。
++        let compact = self.compact();
++        let bar_w = if compact { TOOLBAR_W - 61. } else { TOOLBAR_W };
++        let x = (hp.x - px(bar_w / 2.)).min(self.rel(point(viewport.right() - px(8. + bar_w), px(0.))).x).max(pane_left);
+         let above = sp.y - px(45.) >= view_top;
+         let pos = if above { point(x, sp.y - px(45.)) } else { point(x, ep.y + elh + px(5.)) };
++        // 手机：工具栏停在键盘上方，占满屏宽，按钮 40pt；下拉是它上面的整宽面板。
++        let (u, ic, bar_h) = if compact { (40., 22., 52.) } else { (24., 18., 40.) };
++        let wide = f32::from(crate::ios::menu_w(200.));
+ 
+         let head_kind = self.core.kind_of(s.block).cloned().unwrap_or(BlockKind::Text);
+         let align = self.current_align();
+         let btn = |id: &'static str| {
+             div()
+                 .id(id)
+-                .h(px(24.))
+-                .min_w(px(24.))
++                .h(px(u))
++                .min_w(px(u))
++                .flex_none()
+                 .flex()
+                 .items_center()
+                 .justify_center()
+-                .rounded(px(4.))
++                .rounded(px(if compact { 10. } else { 4. }))
++                .active(|s| s.bg(Theme::fill_pressed()))
+                 .cursor_pointer()
+                 .hover(|s| s.bg(Theme::fill_hover_strong()))
+         };
+         let sep = || div().w(px(1.)).h(px(20.)).bg(Theme::line_border());
++        let icon_size = ic;
+         let mark_btn = |id: &'static str, ic: &'static str, tip: &'static str, keys: &'static str, md: Option<&'static str>, mark: Mark, get: fn(&Marks) -> bool| {
+             let active = self.mark_active(get);
+             btn(id)
+-                .w(px(24.))
++                .w(px(u))
+                 .when(active, |d| d.bg(Theme::fill_turninto_active()))
+                 .tip_md(tip, Some(keys), md)
+-                .child(icon(ic, 18., if active { Theme::primary() } else { Theme::icon() }))
++                .child(icon(ic, icon_size, if active { Theme::primary() } else { Theme::icon() }))
+                 .on_mouse_down(
+                     MouseButton::Left,
+                     cx.listener(move |e, _, window, cx| {
+@@ -1341,22 +1406,23 @@
+             })
+         };
+         let hover = |m: Menu| cx.listener(move |e: &mut Editor, h: &bool, _, cx| e.tb_drop_over(m.clone(), 0, *h, cx));
+-        let turn_below = (window.viewport_size().height - pos.y - px(52.)).max(px(0.));
++        let turn_below = (crate::ios::visible_height(window) - pos.y - px(52.)).max(px(0.));
+         let turn_above = (pos.y - px(8.)).max(px(0.));
+         let turn_up = turn_below < px(338.) && turn_above > turn_below;
+         let turn_height = if turn_up { turn_above } else { turn_below }.min(px(338.));
+         let more_height = px(2. + 2. * crate::editor_ui::MENU_PAD_Y + 2. * crate::editor_ui::MENU_ROW_H);
+         let more_above = (pos.y - px(10.)).max(px(0.));
+-        let more_below = (window.viewport_size().height - pos.y - px(52.)).max(px(0.));
++        let more_below = (crate::ios::visible_height(window) - pos.y - px(52.)).max(px(0.));
+         // Down unless it doesn't fit there, like the other dropdowns.
+         let more_up = more_below < more_height && more_above > more_below;
+         let drop = |m: Menu, x: f32| {
+             div()
+                 .id("tb-drop")
+                 .absolute()
+-                .when(matches!(m, Menu::TurnInto) && turn_up, |d| d.bottom(px(44.)))
+-                .when(!matches!(m, Menu::TurnInto) || !turn_up, |d| d.top(px(44.)))
+-                .left(px(x))
++                .when(compact, |d| d.bottom(px(bar_h + 8.)).left(px(-1.)))
++                .when(!compact && matches!(m, Menu::TurnInto) && turn_up, |d| d.bottom(px(44.)))
++                .when(!compact && (!matches!(m, Menu::TurnInto) || !turn_up), |d| d.top(px(44.)))
++                .when(!compact, |d| d.left(px(x)))
+                 .on_hover(cx.listener(move |e: &mut Editor, h: &bool, _, cx| e.tb_drop_over(m.clone(), 1, *h, cx)))
+         };
+         // The chevron flips while its dropdown is open.
+@@ -1371,25 +1437,27 @@
+         // x offsets of the dropdown buttons (padding 8, gap 8, separators 1).
+         let x_turn = 8.;
+         let x_align = x_turn + 44. + 8. + 1. + 8.;
+-        let x_color = x_align + 44. + 8. + 1. + 8. + 6. * (24. + 8.);
++        let x_color = if compact { x_turn + 44. + 8. + 1. + 8. } else { x_align + 44. + 8. + 1. + 8. } + 6. * (24. + 8.);
+         let bar = div()
+-            .h(px(40.))
++            .id("toolbar-bar")
++            .h(px(bar_h))
+             .px(px(8.))
+             .flex()
+             .items_center()
+             .gap(px(8.))
++            .when(compact, |d| d.w(px(wide - 2.)).overflow_x_scroll().restrict_scroll_to_axis())
+             .child(
+                 btn("tb-turn")
+-                    .w(px(44.))
++                    .w(px(u + 20.))
+                     .gap(px(6.))
+                     .when(matches!(dropdown, Some(Menu::TurnInto)), |d| d.bg(Theme::fill_hover_strong()))
+-                    .child(icon(kind_icon(&head_kind), 18., Theme::icon()))
++                    .child(icon(kind_icon(&head_kind), ic, Theme::icon()))
+                     .child(chevron(Menu::TurnInto))
+                     .on_hover(hover(Menu::TurnInto))
+                     .on_mouse_down(MouseButton::Left, open(Menu::TurnInto)),
+             )
+             .child(sep())
+-            .when(!self.markdown, |d| d.child(
++            .when(!self.markdown && !compact, |d| d.child(
+                 btn("tb-align")
+                     .w(px(44.))
+                     .gap(px(6.))
+@@ -1406,9 +1474,9 @@
+             .child(mark_btn("tb-u", "underline", crate::settings::text("下划线"), crate::shortcuts::hint("editor::Underline", "⌘ + U"), Some(crate::settings::text("~文本~ 空格")), Mark::Underline, |m| m.underline))
+             .child(
+                 btn("tb-link")
+-                    .w(px(24.))
++                    .w(px(u))
+                     .tip_above(crate::settings::text("链接"), Some(crate::shortcuts::hint("editor::Link", "⌘ + K")))
+-                    .child(icon("link", 18., Theme::icon()))
++                    .child(icon("link", ic, Theme::icon()))
+                     .on_mouse_down(
+                         MouseButton::Left,
+                         cx.listener(|e, _, window, cx| {
+@@ -1419,12 +1487,12 @@
+             )
+             .child(mark_btn("tb-code", "code", crate::settings::text("代码"), crate::shortcuts::hint("editor::InlineCode", "⌘ + Control + C"), Some(crate::settings::text("`代码`")), Mark::Code, |m| m.code))
+             .when(!self.markdown, |d| d.child(color_btn))
+-            .child(div().mx(px(4.)).w(px(1.)).h(px(40.)).bg(Theme::line_border()))
++            .child(div().flex_none().mx(px(4.)).w(px(1.)).h(px(bar_h)).bg(Theme::line_border()))
+             .child(
+                 btn("tb-more")
+-                    .w(px(24.))
++                    .w(px(u))
+                     .when(matches!(dropdown, Some(Menu::TbMore)), |d| d.bg(Theme::fill_hover_strong()))
+-                    .child(icon("layout-grid", 18., Theme::icon()))
++                    .child(icon("layout-grid", ic, Theme::icon()))
+                     .on_hover(hover(Menu::TbMore))
+                     .on_mouse_down(
+                         MouseButton::Left,
+@@ -1438,7 +1506,8 @@
+ 
+         let drop_el: Option<AnyElement> = match dropdown {
+             Some(Menu::TurnInto) => {
+-                let mut list = menu().id("tb-turn-menu").occlude().w(px(200.)).py(px(MENU_PAD_Y)).max_h(turn_height).overflow_y_scroll().on_scroll_wheel(|_, _, cx| cx.stop_propagation());
++                let turn_height = if compact { (crate::ios::visible_height(window) - viewport.top() - px(bar_h + 24.)).max(px(120.)) } else { turn_height };
++                let mut list = menu().id("tb-turn-menu").occlude().w(px(if compact { wide } else { 200. })).py(px(MENU_PAD_Y)).max_h(turn_height).overflow_y_scroll().on_scroll(|_, _, cx| cx.stop_propagation());
+                 for (i, it) in TURN_ITEMS.iter().enumerate() {
+                     let k = (it.kind)();
+                     if self.markdown && matches!(k, BlockKind::Callout { .. }) {
+@@ -1483,7 +1552,7 @@
+                 Some(drop(Menu::Align, x_align).child(list).into_any_element())
+             }
+             Some(Menu::Color) => Some(drop(Menu::Color, x_color).child(self.color_panel(None, cx)).into_any_element()),
+-            Some(Menu::TbMore) => Some(div().absolute().when(more_up, |d| d.bottom(px(44.))).when(!more_up, |d| d.top(px(44.))).right_0().child(self.tb_more_menu(cx)).into_any_element()),
++            Some(Menu::TbMore) => Some(div().absolute().when(compact, |d| d.bottom(px(bar_h + 8.)).right(px(-1.))).when(!compact && more_up, |d| d.bottom(px(44.))).when(!compact && !more_up, |d| d.top(px(44.))).right_0().child(self.tb_more_menu(cx)).into_any_element()),
+             _ => None,
+         };
+         let el = popover()
+@@ -1493,7 +1562,8 @@
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+             .child(bar)
+             .children(drop_el);
+-        Some(at(self.rel(pos), Corner::TopLeft, el))
++        if compact { return Some(at(self.rel(crate::ios::sheet_point()), Anchor::BottomCenter, el)); }
++        Some(at(self.rel(pos), Anchor::TopLeft, el))
+     }
+ }
+ 
+@@ -1523,10 +1593,12 @@
+     /// hover. Each half darkens over the button's own hover fill.
+     fn color_split(&self, id: &'static str, open: bool, cx: &Context<Self>) -> Stateful<Div> {
+         let (lt, lb) = self.last_color.clone();
++        let u = if self.compact() { 40. } else { 24. };
+         let fill = || crate::theme::adapt(rgba(0x1f23290d).into());
+         div()
+             .id(id)
+-            .h(px(24.))
++            .h(px(u))
++            .flex_none()
+             .flex()
+             .rounded(px(4.))
+             .overflow_hidden()
+@@ -1535,15 +1607,15 @@
+             .child(
+                 div()
+                     .id((id, 0usize))
+-                    .size(px(24.))
++                    .size(px(u))
+                     .flex()
+                     .items_center()
+                     .justify_center()
+                     .hover(|s| s.bg(fill()))
+                     .child(
+                         div()
+-                            .size(px(20.))
+-                            .rounded(px(2.))
++                            .size(px(u - 4.))
++                            .rounded(px(if u > 24. { 8. } else { 2. }))
+                             .when_some(lb.as_ref().and_then(|c| theme::bg_color(&c.0)), |d, c| d.bg(c))
+                             .flex()
+                             .items_center()
+@@ -1569,7 +1641,7 @@
+                 div()
+                     .id((id, 1usize))
+                     .w(px(20.))
+-                    .h(px(24.))
++                    .h(px(u))
+                     .flex()
+                     .items_center()
+                     .justify_center()
+@@ -1665,7 +1737,7 @@
+             })
+         };
+         let hover = |m: Menu| cx.listener(move |e: &mut Editor, h: &bool, _, cx| e.tb_drop_over(m.clone(), 0, *h, cx));
+-        let turn_below = (window.viewport_size().height - y - px(52.)).max(px(0.));
++        let turn_below = (crate::ios::visible_height(window) - y - px(52.)).max(px(0.));
+         let turn_above = (y - px(8.)).max(px(0.));
+         let turn_up = turn_below < px(338.) && turn_above > turn_below;
+         let turn_height = if turn_up { turn_above } else { turn_below }.min(px(338.));
+@@ -1816,7 +1888,7 @@
+         let x_color = x_align + 44. + 17. + 5. * 32.;
+         let drop_el: Option<AnyElement> = match dropdown {
+             Some(Menu::TurnInto) => {
+-                let mut list = menu().id("ttb-turn-menu").occlude().w(px(200.)).py(px(MENU_PAD_Y)).max_h(turn_height).overflow_y_scroll().on_scroll_wheel(|_, _, cx| cx.stop_propagation());
++                let mut list = menu().id("ttb-turn-menu").occlude().w(px(200.)).py(px(MENU_PAD_Y)).max_h(turn_height).overflow_y_scroll().on_scroll(|_, _, cx| cx.stop_propagation());
+                 for (i, it) in TURN_ITEMS.iter().enumerate() {
+                     let k = (it.kind)();
+                     if matches!(k, BlockKind::Callout { .. }) {
+@@ -1893,7 +1965,7 @@
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+             .child(bar)
+             .children(drop_el);
+-        Some(at(self.rel(point(x, y)), Corner::TopLeft, el))
++        Some(at(self.rel(point(x, y)), Anchor::TopLeft, el))
+     }
+ 
+     /// 单元格背景颜色 (230 × 142): 2 × 8 swatches and 恢复默认.
+@@ -1938,7 +2010,7 @@
+                     .flex()
+                     .items_center()
+                     .justify_center()
+-                    .text_size(px(12.))
++                    .text_size(px(if crate::ios::is_compact() { 16. } else { 12. }))
+                     .cursor_pointer()
+                     .hover(|s| s.bg(Theme::fill_hover()))
+                     .child(crate::settings::text("恢复默认"))
+@@ -1969,14 +2041,20 @@
+             row(id, ic, label, None, false).on_mouse_move(set_sub(None)).on_mouse_down(MouseButton::Left, act(a))
+         };
+         let toggle = |id: &'static str, ic: &'static str, label: &'static str, on: bool, a: BlockAct| plain(id, ic, label, a).child(switch(on));
++        let sheet = sheet_w(self);
++        let menu_w = sheet.unwrap_or(MENU_W);
+         let m = menu()
+             .id("block-menu")
+             .occlude()
+-            .w(px(MENU_W))
++            .w(px(menu_w))
+             .py(px(MENU_PAD_Y))
+             .flex()
+             .flex_col()
+-            .child(row("bm-indent", "indent-align", crate::settings::text("缩进"), Some("›"), sub == Some(BlockSub::Indent)).on_mouse_move(set_sub(Some(BlockSub::Indent))))
++            .child(row("bm-indent", "indent-align", crate::settings::text("缩进"), Some("›"), sub == Some(BlockSub::Indent)).on_mouse_move(set_sub(Some(BlockSub::Indent)))
++                .on_mouse_down(MouseButton::Left, cx.listener(|e: &mut Editor, _, _, cx| {
++                    cx.stop_propagation();
++                    if let Some(Menu::Block { sub, .. }) = &mut e.menu { *sub = Some(BlockSub::Indent); cx.notify(); }
++                })))
+             .child(separator_h().on_mouse_move(set_sub(None)))
+             .child(plain("bm-cut", "scissors", crate::settings::text("剪切"), BlockAct::Cut))
+             .child(plain("bm-copy", "copy", crate::settings::text("复制"), BlockAct::Copy))
+@@ -2000,23 +2078,21 @@
+                     row_tinted(id, ic, label, None, false, d, d).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                 }
+             };
+-            menu()
+-                .id("bm-indent-sub")
+-                .occlude()
+-                .absolute()
+-                .left(px(MENU_W + 4.))
+-                .top_0()
+-                .w(px(MENU_W))
++            sub_pos(menu().id("bm-indent-sub").occlude(), sheet.is_some(), 0.)
++                .w(px(menu_w))
+                 .py(px(MENU_PAD_Y))
++                .when(sheet.is_some(), |d| d.child(back_row(crate::settings::text("缩进"), cx)).child(separator_h()))
+                 .child(indent_row("in-inc", "indent-increase", crate::settings::text("增加缩进"), None, self.core.can_indent(block), BlockAct::Indent))
+                 .child(indent_row("in-dec", "indent-decrease", crate::settings::text("减少缩进"), Some("Shift + Tab"), self.core.can_outdent(block), BlockAct::Outdent))
+                 .into_any_element()
+         });
++        // 手机：子面板换下主面板（带一行返回），添加面板自己就是底部面板。
++        let swap = sheet.is_some() && sub.is_some();
+         let el = div()
+             .relative()
+             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+-            .child(m)
++            .when(!swap, |d| d.child(m))
+             .children(sub_el);
+-        Some(at(self.rel(point(r.left(), r.bottom() + px(4.))), Corner::TopLeft, el))
++        Some(self.place_handle_menu(r, el))
+     }
+ }
+--- a/src/editor/reminder.rs
++++ b/src/editor/reminder.rs
+@@ -377,7 +377,7 @@
+         if matches!(self.menu, Some(Menu::Reminder { .. })) {
+             self.menu = None;
+         }
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         cx.notify();
+     }
+ 
+@@ -423,7 +423,7 @@
+                 if let Some(p) = &mut self.rm.panel {
+                     p.drop = None;
+                 }
+-                window.focus(&self.focus);
++                window.focus(&self.focus, cx);
+             }
+             TextFieldEvent::Cancel => {
+                 if self.rm.panel.as_ref().is_some_and(|p| p.drop.is_some()) {
+@@ -462,7 +462,7 @@
+         let at_ = p.at;
+         if d == Drop::Time {
+             let fh = self.rm.time.read(cx).focus_handle(cx);
+-            window.focus(&fh);
++            window.focus(&fh, cx);
+             self.rm.time.update(cx, |f, cx| f.select_all_text(cx));
+             if let Some(r) = self.core.reminder_at(at_) {
+                 let t = r.expire - day_start(r.expire);
+@@ -473,7 +473,7 @@
+                 self.rm.list.set_offset(point(px(0.), px(-y)));
+             }
+         } else {
+-            window.focus(&self.focus);
++            window.focus(&self.focus, cx);
+         }
+         cx.notify();
+     }
+@@ -481,7 +481,7 @@
+     /// The hover card: the full date (`LL`, `，HH:mm`), a small popover.
+     pub(super) fn reminder_card(&self, at_: Pos, r: &InlineReminder, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+         let rect = self.probed(Probe::Button(at_))?;
+-        let vh = f32::from(window.viewport_size().height);
++        let vh = f32::from(crate::ios::visible_height(window));
+         // Padding 5 + the 40 card and its border + 10.
+         let up = f32::from(rect.bottom()) + 5. + 42. + 10. > vh;
+         let el = div()
+@@ -500,7 +500,7 @@
+                 ),
+             );
+         let x = rect.center().x - px(CARD_W / 2.);
+-        Some(if up { at(self.rel(point(x, rect.top())), Corner::BottomLeft, el) } else { at(self.rel(point(x, rect.bottom())), Corner::TopLeft, el) })
++        Some(if up { at(self.rel(point(x, rect.top())), Anchor::BottomLeft, el) } else { at(self.rel(point(x, rect.bottom())), Anchor::TopLeft, el) })
+     }
+ 
+     /// The editor (`intact` popover): calendar, 设置时间, 提醒.
+@@ -712,13 +712,13 @@
+             }))
+             .child(shell().w(px(POPOVER_W)).child(calendar).child(options));
+         let h = 5. + 12. + 32. + 32. + 248. + 1. + 20. + 30. + 16. + 30. + 24. + 10. + if timed { SELECT_H } else { 0. } + if notify { SELECT_H } else { 0. };
+-        let vh = f32::from(window.viewport_size().height);
++        let vh = f32::from(crate::ios::visible_height(window));
+         let view_top = f32::from(self.list.viewport_bounds().top());
+         let below = vh - f32::from(rect.bottom());
+         let above = f32::from(rect.top()) - view_top;
+         let up = below < h && above > below;
+         let x = rect.center().x - px(POPOVER_W / 2.);
+-        Some(if up { at(self.rel(point(x, rect.top())), Corner::BottomLeft, el) } else { at(self.rel(point(x, rect.bottom())), Corner::TopLeft, el) })
++        Some(if up { at(self.rel(point(x, rect.top())), Anchor::BottomLeft, el) } else { at(self.rel(point(x, rect.bottom())), Anchor::TopLeft, el) })
+     }
+ 
+     /// The open select's list.
+@@ -765,14 +765,14 @@
+                                 Drop::Time => e.apply_reminder(|r| at_time(r, v), window, cx),
+                                 Drop::Jet => e.apply_reminder(|r| with_jet(r, v), window, cx),
+                             }
+-                            window.focus(&e.focus);
++                            window.focus(&e.focus, cx);
+                         }),
+                     ),
+             );
+         }
+         let w = f32::from(a.size.width).max(166.);
+         let h = (n as f32 * ITEM_H + LIST_PAD).min(LIST_H) + 2.;
+-        let vh = f32::from(window.viewport_size().height);
++        let vh = f32::from(crate::ios::visible_height(window));
+         let below = f32::from(a.bottom()) + 4.;
+         let y = if below + h > vh - 8. { f32::from(a.top()) - 4. - h } else { below };
+         let list = super::countdown::list_box().w(px(w)).occlude().child(col).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+--- a/src/editor/render.rs
++++ b/src/editor/render.rs
+@@ -693,7 +693,7 @@
+                         MouseButton::Left,
+                         cx.listener(move |e, _, window, cx| {
+                             cx.stop_propagation();
+-                            window.focus(&e.focus);
++                            window.focus(&e.focus, cx);
+                             e.core.toggle_todo(id);
+                             e.changed(window, cx);
+                         }),
+@@ -1380,6 +1380,16 @@
+                 if !read_only {
+                     window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
+                 }
++                // 阅读模式也能长按选词（为了复制）。
++                #[cfg(target_os = "ios")]
++                {
++                    let editor = entity.clone();
++                    window.on_mouse_event(move |ev: &LongPressEvent, phase, window, cx| {
++                        if phase == DispatchPhase::Bubble {
++                            editor.update(cx, |ed, cx| ed.touch_selection(ev, window, cx));
++                        }
++                    });
++                }
+                 // Links point (`cursor: pointer`).
+                 for h in &link_hitboxes {
+                     window.set_cursor_style(CursorStyle::PointingHand, h);
+@@ -1397,7 +1407,7 @@
+                     }
+                 }
+                 if pointer_hidden {
+-                    window.set_window_cursor_style(CursorStyle::None);
++                    window.set_window_cursor_style(CursorStyle::Arrow);
+                     let e = entity.clone();
+                     window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
+                         if phase == DispatchPhase::Bubble {
+@@ -1940,7 +1950,7 @@
+                         MouseButton::Left,
+                         cx.listener(move |e, _, window, cx| {
+                             cx.stop_propagation();
+-                            window.focus(&e.focus);
++                            window.focus(&e.focus, cx);
+                             e.core.toggle_todo(id);
+                             e.changed(window, cx);
+                         }),
+--- a/src/editor/scrollbar.rs
++++ b/src/editor/scrollbar.rs
+@@ -31,7 +31,7 @@
+         let list2 = list.clone();
+         canvas(
+             move |bounds, window, _| {
+-                let (offset, content, view) = list.estimated_scroll_metrics();
++                let (offset, content, view) = (list.scroll_px_offset_for_scrollbar().y, list.max_offset_for_scrollbar().y + bounds.size.height, bounds.size.height);
+                 let (content, h) = match sb.grab.get() {
+                     Some((_, content, h)) => (content, h),
+                     None => (content, (view * (view / content)).max(px(MIN_H)).min(bounds.size.height)),
+@@ -88,7 +88,7 @@
+                                 let f = ((ev.position.y - dy - bounds.top()) / travel).clamp(0., 1.);
+                                 // At the end, go to the real bottom: the rows there may not
+                                 // be measured yet, so the estimate can stop short.
+-                                list.scroll_to_estimated_offset(if f >= 1. { px(f32::MAX) } else { (content - view) * f });
++                                list.set_offset_from_scrollbar(point(px(0.), (content - view) * f));
+                                 window.refresh();
+                             }
+                             // The button went up somewhere we didn't see.
+--- a/src/editor/table.rs
++++ b/src/editor/table.rs
+@@ -139,7 +139,7 @@
+     /// extends) and follow the pointer along the bar. On an already selected
+     /// segment it picks the selected lines up to move them instead.
+     fn bar_down(&mut self, table: BlockId, cols: bool, i: usize, p: Point<Pixels>, shift: bool, window: &mut Window, cx: &mut Context<Self>) {
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.menu = None;
+         self.slash = None;
+         self.toolbar_hidden = false;
+@@ -344,7 +344,7 @@
+         self.core.block_sel = None;
+         self.core.table_insert(table, cols, at);
+         self.tables.insert = None;
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.changed(window, cx);
+     }
+ }
+@@ -504,7 +504,8 @@
+ 
+         let mut cols_tpl = vec![BAR];
+         cols_tpl.extend(&widths);
+-        let mut grid = div().relative().grid().grid_col_widths(cols_tpl).w(px(BAR + total));
++        let mut grid = div().relative().grid().grid_cols_min_content(cols_tpl.len() as u16).w(px(BAR + total))
++            .children(cols_tpl.iter().enumerate().map(|(col, width)| div().col_start(col as i16 + 1).row_start(1).w(px(*width)).h_0()));
+ 
+         // A header row whose cells all end in it stays in view while the
+         // table scrolls under it; painted after the body so it covers it.
+@@ -811,6 +812,8 @@
+                             .pr(px(reach_r - br))
+                             .pb(px(12.))
+                             .overflow_x_scroll()
++                            // 触屏：竖向滑动经过表格时不带着表格横移。
++                            .restrict_scroll_to_axis()
+                             .child(grid),
+                     )
+                     .child(edges.absolute().top_0().left_0().size_full()),
+--- a/src/editor/text.rs
++++ b/src/editor/text.rs
+@@ -981,7 +981,7 @@
+         let o = point(bounds.left() + dx, bounds.top());
+         for (hi, (_, line)) in layout.lines.iter().enumerate() {
+             let tops: Vec<Pixels> = layout.rows.iter().filter(|r| r.hard == hi).map(|r| r.y + r.base_dy).collect();
+-            let _ = line.paint_background_rows(o, lh, &tops, gpui_align, Some(bounds), window, cx);
++            let _ = crate::ios::paint_background_rows(line, o, lh, &tops, gpui_align, Some(bounds), window, cx);
+         }
+         if let Some(sel) = &self.selection {
+             let rects = if self.text.is_empty() {
+@@ -1031,7 +1031,7 @@
+         }
+         for (hi, (_, line)) in layout.lines.iter().enumerate() {
+             let tops: Vec<Pixels> = layout.rows.iter().filter(|r| r.hard == hi).map(|r| r.y + r.base_dy).collect();
+-            let _ = line.paint_rows(o, lh, &tops, gpui_align, Some(bounds), window, cx);
++            let _ = crate::ios::paint_rows(line, o, lh, &tops, gpui_align, Some(bounds), window, cx);
+         }
+         for eq in prepaint.iter() {
+             let o = eq.origin;
+@@ -1048,13 +1048,13 @@
+                 EqBody::Reminder { .. } => self.paint_reminder(eq, window, cx),
+                 EqBody::Text { line, at, icon } => {
+                     let top = o.y + px(at[1]) - line.ascent;
+-                    let _ = line.paint(point(o.x + px(at[0]), top), line.ascent + line.descent, window, cx);
++                    let _ = line.paint(point(o.x + px(at[0]), top), line.ascent + line.descent, TextAlign::Left, None, window, cx);
+                     if let Some(i) = icon {
+                         let b = Bounds::new(point(o.x + px(i[0]), o.y + px(i[1])), size(px(14.), px(14.)));
+                         let _ = window.paint_svg(
+                             b,
+                             "editor-icons/equation-error.svg".into(),
+-                            TransformationMatrix::unit(),
++                            None, TransformationMatrix::unit(),
+                             theme::c(0xff9200),
+                             cx,
+                         );
+@@ -1122,7 +1122,7 @@
+         let shadows = if lifted { crate::editor::button::shadow_s4() } else { crate::editor::button::shadow_s1() };
+         // Content stays crisp: buttons in the text round at 5.
+         let radius = px(5.);
+-        window.paint_shadows(v, Corners::all(radius), &shadows);
++        window.paint_drop_shadows(v, Corners::all(radius), &shadows);
+         window.paint_quad(fill(v, bg).corner_radii(radius));
+         // A done to-do: `.todo-line-through .docx-button-component` draws
+         // a 1.6px `--icon-n2` line at 55% behind the label; `opacity: .7`.
+@@ -1135,7 +1135,7 @@
+         let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
+         let clip = Bounds::new(point(v.left() + px(*pad), v.top()), size((v.size.width - px(pad * 2.)).max(px(0.)), v.size.height));
+         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+-            let _ = line.paint(point(v.left() + px(*pad), v.top()), px(*bh), window, cx);
++            let _ = line.paint(point(v.left() + px(*pad), v.top()), px(*bh), TextAlign::Left, None, window, cx);
+         });
+     }
+ 
+@@ -1154,7 +1154,7 @@
+         let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
+         let clip = Bounds::new(point(o.x + px(*text_x), v.top()), size((v.size.width - px(text_x + 2.)).max(px(0.)), v.size.height));
+         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+-            let _ = line.paint(point(o.x + px(*text_x), v.top()), v.size.height, window, cx);
++            let _ = line.paint(point(o.x + px(*text_x), v.top()), v.size.height, TextAlign::Left, None, window, cx);
+         });
+     }
+ 
+@@ -1173,12 +1173,12 @@
+         let ib = Bounds::new(point(o.x + px(icon[0]), o.y + px(icon[1])), size(px(icon[2]), px(icon[2])));
+         match emoji {
+             Some(e) => {
+-                let _ = e.paint(point(ib.origin.x, v.top()), v.size.height, window, cx);
++                let _ = e.paint(point(ib.origin.x, v.top()), v.size.height, TextAlign::Left, None, window, cx);
+             }
+             None => {
+                 let c = if *deleted { Theme::text_disabled() } else { Theme::primary_500() };
+-                let _ = window.paint_svg(ib, "editor-icons/doc-blue.svg".into(), TransformationMatrix::unit(), c, cx);
+-                let _ = window.paint_svg(ib, "editor-icons/doc-blue-lines.svg".into(), TransformationMatrix::unit(), Theme::bg_body(), cx);
++                let _ = window.paint_svg(ib, "editor-icons/doc-blue.svg".into(), None, TransformationMatrix::unit(), c, cx);
++                let _ = window.paint_svg(ib, "editor-icons/doc-blue-lines.svg".into(), None, TransformationMatrix::unit(), Theme::bg_body(), cx);
+             }
+         }
+         let color = if *deleted { Theme::text_disabled() } else if hovered { Theme::link_hover() } else { Theme::link() };
+@@ -1186,7 +1186,7 @@
+         let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
+         let clip = Bounds::new(point(o.x + px(*text_x), v.top()), size((v.size.width - px(text_x + 2.)).max(px(0.)), v.size.height));
+         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+-            let _ = line.paint(point(o.x + px(*text_x), v.top()), v.size.height, window, cx);
++            let _ = line.paint(point(o.x + px(*text_x), v.top()), v.size.height, TextAlign::Left, None, window, cx);
+         });
+     }
+ 
+@@ -1200,9 +1200,9 @@
+         let o = eq.origin;
+         let ib = Bounds::new(point(o.x + px(icon[0]), o.y + px(icon[1])), size(px(icon[2]), px(icon[2])));
+         let path = if *filled { "editor-icons/reminder-filled.svg" } else { "editor-icons/reminder.svg" };
+-        let _ = window.paint_svg(ib, path.into(), TransformationMatrix::unit(), *icon_color, cx);
++        let _ = window.paint_svg(ib, path.into(), None, TransformationMatrix::unit(), *icon_color, cx);
+         let lh = px(self.spec.line_height);
+-        let _ = line.paint(point(o.x + px(*text_x), o.y), lh, window, cx);
++        let _ = line.paint(point(o.x + px(*text_x), o.y), lh, TextAlign::Left, None, window, cx);
+     }
+ 
+     /// Pointer cursor, hover and `:active` repaints for equation views.
+--- a/src/editor/view.rs
++++ b/src/editor/view.rs
+@@ -156,6 +156,10 @@
+     pub menu_hovered: bool,
+     /// Toolbar suppressed after typing / Esc until the selection changes.
+     pub toolbar_hidden: bool,
++    /// 触屏的 剪切/复制/粘贴 菜单正显示；显示时让出选区工具栏的位置。
++    pub(super) touch_menu: bool,
++    /// 按下前的（光标, 菜单是否显示），见 `touch.rs`。
++    pub(super) touch_before: Option<(Pos, bool)>,
+     /// Typing hides the mouse pointer until it moves, as browsers do, so the
+     /// I-beam left where the user clicked doesn't sit on top of the new text.
+     pub pointer_hidden: bool,
+@@ -387,6 +391,8 @@
+             menu: None,
+             menu_hovered: false,
+             toolbar_hidden: false,
++            touch_menu: false,
++            touch_before: None,
+             pointer_hidden: false,
+             autoscroll: false,
+             last_color: (None, Some(ColorName("light-yellow".into()))),
+@@ -448,9 +454,7 @@
+         e
+     }
+ 
+-    pub fn focus(&self, window: &mut Window) {
+-        window.focus(&self.focus);
+-    }
++    pub fn is_composing(&self) -> bool { self.marked.is_some() }
+ 
+     // ---- bookkeeping
+ 
+@@ -503,6 +507,7 @@
+         self.core.reveal_caret();
+         if self.core.dirty {
+             self.core.dirty = false;
++            self.touch_menu = false;
+             self.typing = true;
+             self.hide_link_card(cx);
+             cx.emit(EditorEvent::Changed);
+@@ -583,7 +588,7 @@
+     pub fn close_menu_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         self.menu = None;
+         self.menu_hovered = false;
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         cx.notify();
+     }
+ 
+@@ -930,12 +935,11 @@
+     }
+ 
+     fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+-        let rx = cx.prompt_for_paths(PathPromptOptions {
++        let rx = crate::ios::prompt_for_paths(cx, PathPromptOptions {
+             files: true,
+             directories: false,
+             multiple: false,
+             prompt: Some(crate::settings::text("插入图片").into()),
+-            extensions: None,
+         });
+         cx.spawn_in(window, async move |this, cx| {
+             if let Ok(Ok(Some(paths))) = rx.await
+@@ -978,7 +982,7 @@
+         self.dragging = false;
+         self.menu = Some(Menu::Equation { block: p.block, offset: p.offset });
+         let fh = self.eq_field.read(cx).focus_handle(cx);
+-        window.focus(&fh);
++        window.focus(&fh, cx);
+         cx.notify();
+     }
+ 
+@@ -988,7 +992,7 @@
+         self.core.break_coalescing();
+         let o = if after { offset + core::EQUATION.len() } else { offset };
+         self.core.sel = Selection::caret(Pos::new(block, o));
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.restart_blink(window, cx);
+         cx.notify();
+     }
+@@ -1003,7 +1007,7 @@
+                     let f = if text { &self.link_field } else { &self.link_text_field };
+                     let fh = f.read(cx).focus_handle(cx);
+                     f.update(cx, |f, cx| f.select_all_text(cx));
+-                    window.focus(&fh);
++                    window.focus(&fh, cx);
+                 }
+                 cx.notify();
+             }
+@@ -1027,7 +1031,7 @@
+         self.lang_field.update(cx, |f, cx| f.set_text("", cx));
+         self.menu = Some(Menu::Lang { block, selected: 0 });
+         let fh = self.lang_field.read(cx).focus_handle(cx);
+-        window.focus(&fh);
++        window.focus(&fh, cx);
+         cx.notify();
+     }
+ 
+@@ -2198,7 +2202,8 @@
+     }
+ 
+     pub fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+-        window.focus(&self.focus);
++        self.touch_press(window);
++        window.focus(&self.focus, cx);
+         self.reminder_blur(window, cx);
+         self.menu = None;
+         self.menu_hovered = false;
+@@ -2269,6 +2274,31 @@
+         }
+     }
+ 
++    #[cfg(target_os = "ios")]
++    pub(super) fn touch_selection(&mut self, ev: &LongPressEvent, window: &mut Window, cx: &mut Context<Self>) {
++        match ev.phase {
++            TouchPhase::Started => {
++                if crate::ios::overlay() || !self.list.viewport_bounds().contains(&ev.position) { return; }
++                let Some(pos) = self.pos_at(ev.position) else { return };
++                let Some(text) = self.core.text_of(pos.block) else { return };
++                let word = core::word_at(&text.text, pos.offset);
++                window.prevent_default();
++                window.focus(&self.focus, cx);
++                self.core.clear_block_sel();
++                self.core.cell_sel = None;
++                self.set_caret(Pos::new(pos.block, word.start), false);
++                self.core.sel.head = Pos::new(pos.block, word.end);
++                self.dragging = true;
++                self.toolbar_hidden = true;
++                self.restart_blink(window, cx);
++                cx.notify();
++            }
++            TouchPhase::Moved if self.dragging => self.drag_to(ev.position, cx),
++            TouchPhase::Ended | TouchPhase::Cancelled if self.dragging => { self.end_drag(None, cx); self.touch_menu = !self.core.sel.is_collapsed(); }
++            _ => {}
++        }
++    }
++
+     /// Mouse-up (or a move without the button) ends a text drag. Events can
+     /// arrive before the frame that registers the window-level drag listeners,
+     /// so the element-level handlers call this too.
+@@ -2280,6 +2310,7 @@
+             }
+             self.link_ui.click = None;
+             self.dragging = false;
++            if p.is_some() { self.touch_release(); }
+             cx.notify();
+         }
+     }
+@@ -2359,7 +2390,7 @@
+ 
+     /// Click in the empty area below the content: focus a trailing empty paragraph.
+     pub fn on_click_below(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         if self.read_only {
+             return;
+         }
+@@ -2374,7 +2405,7 @@
+ 
+     /// Handle (⋮⋮) click: select the block and open its menu; "+" opens the add panel.
+     pub fn open_block_menu(&mut self, block: BlockId, add: bool, window: &mut Window, cx: &mut Context<Self>) {
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.slash = None;
+         self.menu_hovered = false;
+         if add {
+@@ -2448,7 +2479,7 @@
+             BlockAct::HeaderCol => self.core.table_toggle_header_col(block),
+             BlockAct::DistributeCols => self.core.table_distribute(block),
+         }
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         self.changed(window, cx);
+     }
+ 
+@@ -2546,6 +2577,24 @@
+ }
+ 
+ impl EntityInputHandler for Editor {
++    #[cfg(target_os = "ios")]
++    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
++        let text = self.core.text_of(self.core.sel.head.block)?;
++        Some(text.text.encode_utf16().count())
++    }
++
++    #[cfg(target_os = "ios")]
++    fn set_selected_text_range(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
++        let Some(text) = self.head_text() else { return };
++        let block = self.core.sel.head.block;
++        let sel = Selection { anchor: Pos::new(block, from16(&text, range.start)), head: Pos::new(block, from16(&text, range.end)) };
++        if self.core.sel == sel { return; }
++        self.core.sel = sel;
++        if self.marked.is_none() { self.core.break_coalescing(); }
++        self.restart_blink(window, cx);
++        cx.notify();
++    }
++
+     fn text_for_range(
+         &mut self,
+         range: Range<usize>,
+@@ -2574,8 +2623,8 @@
+         Some(to16(&t.text, r.start)..to16(&t.text, r.end))
+     }
+ 
+-    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {
+-        self.marked = None;
++    fn unmark_text(&mut self, _: &mut Window, cx: &mut Context<Self>) {
++        if self.marked.take().is_some() { cx.emit(EditorEvent::Changed); }
+     }
+ 
+     fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+@@ -2595,7 +2644,8 @@
+                 self.core.sel = Selection { anchor: Pos::new(head, r.start), head: Pos::new(head, r.end) };
+             }
+         }
+-        self.type_text(text, window, cx);
++        if matches!(text, "\n" | "\r") { self.on_enter(&k::Enter, window, cx); }
++        else { self.type_text(text, window, cx); }
+     }
+ 
+     fn replace_and_mark_text_in_range(
+--- a/src/feishu_theme.rs
++++ b/src/feishu_theme.rs
+@@ -85,7 +85,7 @@
+ 
+ fn shadow(a: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
+     let a = if crate::theme::dark() { (a * 3.).min(0.6) } else { a };
+-    BoxShadow { color: rgbaf(31, 35, 41, a), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(spread) }
++    BoxShadow { inset: false, color: rgbaf(31, 35, 41, a), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(spread) }
+ }
+ 
+ /// Dropdowns and the slash / block menus (`shadow.popover`: 0 4 8).
+--- a/src/file_history.rs
++++ b/src/file_history.rs
+@@ -135,7 +135,7 @@
+                         if let Some(id) = w.current.clone() {
+                             if let Some(entry) = w.entries.iter().find(|e| e.id == id) {
+                                 if let Some(ed) = &w.editor { let title = entry.title.clone(); let _ = w.store.accept_file_title(&id, &title); ed.update(cx, |e, cx| e.receive_file_title(&title, cx)); }
+-                            } else { w.editor = None; w.editor_sub = None; w.current = None; w.view = View::Home; window.focus(&w.focus); }
++                            } else { w.editor = None; w.editor_sub = None; w.current = None; w.view = View::Home; window.focus(&w.focus, cx); }
+                         }
+                         if w.folder_current.as_ref().is_some_and(|id| !w.entries.iter().any(|e| &e.id == id)) { w.folder_current = None; w.view = View::Home; }
+                         w.trash = w.store.list_trash();
+--- a/src/folders.rs
++++ b/src/folders.rs
+@@ -61,7 +61,7 @@
+         self.doc_menu = false;
+         self.expanded.insert(id.to_string());
+         self.reveal_in_tree(id);
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         cx.notify();
+         true
+     }
+@@ -156,7 +156,7 @@
+         let (doc, folder, rename, mv, del) = (m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone(), m.id.clone());
+         let row = |id: &'static str, glyph: &'static str, label: &'static str| crate::ui::menu_row(id, SharedString::from(id)).child(icon(glyph, 16., Theme::icon())).child(label);
+         let pos = if m.pos.x < px(0.) { point(-m.pos.x, m.pos.y + px(22.)) } else { m.pos };
+-        vec![deferred(anchored().position(pos).snap_to_window_with_margin(px(8.)).child(popover().id("folder-row-menu").occlude().w(px(190.)).py(px(crate::ui::MENU_PAD_Y))
++        vec![deferred(crate::ios::place(Anchor::TopLeft, pos).child(popover().id("folder-row-menu").occlude().w(crate::ios::menu_w(190.)).py(px(crate::ui::MENU_PAD_Y))
+             .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.row_menu = None; cx.notify(); }))
+             .child(row("fr-new-doc", "doc", tr("新建文档", "New document")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.new_child(&doc, window, cx); })))
+             .child(row("fr-new-folder", "folder", tr("新建文件夹", "New folder")).on_click(cx.listener(move |w, _, window, cx| { w.row_menu = None; w.new_folder(Some(folder.clone()), window, cx); })))
+--- a/src/home.rs
++++ b/src/home.rs
+@@ -204,7 +204,7 @@
+         }
+         BlockKind::Table(table) => {
+             let widths: Vec<f32> = table.col_widths.iter().map(|w| w * s).collect();
+-            let mut table_el = div().grid().grid_col_widths(widths.clone()).w(px(widths.iter().sum())).max_w_full();
++            let mut table_el = div().grid().grid_cols(widths.len() as u16).w(px(widths.iter().sum())).max_w_full();
+             for (r, c, value) in table.cells() {
+                 let (rs, cs) = (value.rowspan as usize, value.colspan as usize);
+                 let header = r < table.header_rows || (table.header_col && c == 0);
+@@ -511,14 +511,14 @@
+     fn open_row_menu(&mut self, id: &str, key: &str, cx: &mut Context<Self>) {
+         let b = self.more_bounds.borrow().get(key).copied();
+         let Some(b) = b else { return };
+-        self.row_menu = Some(RowMenu { id: id.to_string(), pos: point(b.right(), b.bottom() + px(2.)), corner: Corner::TopRight, sub: false, batch: false });
++        self.row_menu = Some(RowMenu { id: id.to_string(), pos: point(b.right(), b.bottom() + px(2.)), corner: Anchor::TopRight, sub: false, batch: false });
+         cx.notify();
+     }
+ 
+     pub(crate) fn home_more(&self, e: &Entry, key: String, cx: &mut Context<Self>) -> Stateful<Div> {
+         let id = e.id.clone();
+         let (rec, k2) = (self.more_bounds.clone(), key.clone());
+-        let open = self.row_menu.as_ref().is_some_and(|m| m.id == e.id && m.pos.x > px(0.) && m.corner == Corner::TopRight);
++        let open = self.row_menu.as_ref().is_some_and(|m| m.id == e.id && m.pos.x > px(0.) && m.corner == Anchor::TopRight);
+         div()
+             .id(SharedString::from(key.clone()))
+             .relative()
+@@ -599,19 +599,21 @@
+         // Too narrow for the search box: a search icon beside +, in the same style.
+         let search = self.header_search(window, cx);
+         let narrow = search.is_none();
++        // 手机：搜索是标题下的一整条，新建是右下角的悬浮按钮。
++        let phone = crate::ios::compact(window);
+         let header = page_header(self, crate::settings::text("主页"), 26., cx).relative().children(search)
+-            .when(narrow, |d| d.child(crate::ui::header_icon("home-search", "search").mr(px(4.))
++            .when(narrow && !phone, |d| d.child(crate::ui::header_icon("home-search", "search").mr(px(4.))
+                 .tip(crate::settings::tr("搜索文档", "Search documents"), Some(crate::shortcuts::hint("workspace::FocusSearch", "⌘ + J")))
+                 .on_click(cx.listener(|w, _, window, cx| w.open_search(window, cx)))))
+             .child(self.import_button("home-import", None, cx))
+             .child(crate::ui::header_icon("home-new-folder", "folder-plus")
+                 .tip(crate::settings::tr("新建文件夹", "New folder"), None)
+                 .on_click(cx.listener(|w, _, window, cx| w.new_folder(None, window, cx))))
+-            .child(
++            .when(!phone, |d| d.child(
+             crate::ui::header_icon("home-new", "plus")
+                 .tip(crate::settings::tr("新建文档", "New document"), Some(crate::shortcuts::hint("workspace::NewDoc", "⌘ + N")))
+                 .on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx))).into_any_element()
+-        );
++        ));
+         // Tabs as segmented items: the current one on a quiet fill, no accent.
+         let tab = |id: &'static str, label: &'static str, t: HomeTab| {
+             let on = self.home.tab == t;
+@@ -653,6 +655,8 @@
+             .pr(px(24.))
+             .flex()
+             .items_center();
++        // 手机宽度：收紧间距，整行才放得下。
++        let tight = crate::ios::compact(window);
+         let toolbar = if let Some(sel) = &self.batch {
+             let ids: Vec<String> = self.home_entries().into_iter().take(crate::sidebar::BATCH_LIMIT).map(|e| e.id).collect();
+             let n = sel.len();
+@@ -679,17 +683,17 @@
+             .child(tab("home-tab-recent", crate::settings::text("我的文档"), HomeTab::Recent))
+             .child(tab("home-tab-star", crate::settings::text("收藏"), HomeTab::Starred))
+             .child(div().flex_1())
+-            .child(text_btn("home-batch", "batch", crate::settings::text("批量管理"), true).text_color(Theme::text_caption()).mr(px(8.))
++            .child(text_btn("home-batch", "batch", crate::settings::text("批量管理"), true).text_color(Theme::text_caption()).mr(px(if tight { 0. } else { 8. }))
+                 .on_click(cx.listener(|w, _, _, cx| { w.batch = Some(vec![]); w.row_menu = None; w.home.sort_menu = false; cx.notify(); })))
+             .child(
+-                div().id("home-sort").relative().h(px(28.)).px(px(10.)).flex().items_center().gap(px(6.))
++                div().id("home-sort").relative().h(px(28.)).px(px(if tight { 6. } else { 10. })).flex().items_center().gap(px(6.))
+                     .rounded(px(9.)).text_size(px(13.)).text_color(Theme::text_caption()).cursor_pointer()
+                     .hover(|s| s.bg(Theme::fill_hover())).when(self.home.sort_menu, |d| d.bg(Theme::fill_hover_strong()))
+                     .child(icon("sort-down", 14., Theme::icon())).child(crate::settings::label(self.home.sort.label()))
+                     .child(self.home.track("home-sort"))
+                     .on_click(cx.listener(|w, _, _, cx| { w.home.sort_menu = !w.home.sort_menu; cx.notify(); })),
+             )
+-            .child(self.view_switch(cx).ml(px(16.))
++            .child(self.view_switch(cx).ml(px(if tight { 4. } else { 16. }))
+             ) };
+ 
+         let entries = self.home_entries();
+@@ -706,9 +710,12 @@
+             .h_full()
+             .flex()
+             .flex_col()
++            .relative()
+             .child(header)
++            .when(phone, |d| d.child(crate::ios::search_bar(cx)))
+             .child(toolbar)
+             .child(body)
++            .when(phone && self.batch.is_none(), |d| d.child(crate::ios::new_button(cx)))
+             .into_any_element()
+     }
+ 
+@@ -717,8 +724,8 @@
+         let cols = self.home.cols();
+         let sort = self.home.sort_col();
+         // The title is sized at about three times a column.
+-        let title_cell = || div().flex_grow().flex_shrink().flex_basis(relative(0.)).min_w(px(200.));
+-        let col_cell = || div().flex_grow().flex_shrink().flex_basis(relative(0.)).max_w(px(240.)).min_w(px(120.));
++        let title_cell = || div().flex_grow(1.).flex_shrink(1.).flex_basis(relative(0.)).min_w(px(200.));
++        let col_cell = || div().flex_grow(1.).flex_shrink(1.).flex_basis(relative(0.)).max_w(px(240.)).min_w(px(120.));
+         // The list: 13pt tertiary headers over a hairline; the
+         // sorted column in the text colour, semibold, with its arrow.
+         let mut header = div()
+@@ -786,7 +793,7 @@
+                 .when(check.is_none(), |d| d.on_mouse_down(
+                     MouseButton::Right,
+                     cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
+-                        w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Corner::TopLeft, sub: false, batch: false });
++                        w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch: false });
+                         cx.notify();
+                     }),
+                 ))
+@@ -842,7 +849,7 @@
+         // list view's 24 and clear of the window's rounded corner.
+         // The top padding sits inside the list's clip, so a folder's papers can
+         // rise above the first row without being cut off.
+-        .flex_1().min_h_0().pt(px(14.)).pb(px(16.)).track_scroll(grid_scroll.clone());
++        .flex_1().min_h_0().pt(px(14.)).pb(px(16.)).track_scroll(&grid_scroll);
+         let scroll = grid_scroll.0.borrow().base_handle.clone();
+         div().relative().flex_1().min_h_0().mt(px(-4.)).flex().flex_col()
+             .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, _, cx| w.track_home_press(ev, cx)))
+@@ -909,7 +916,7 @@
+                     .when(check.is_none(), |d| d.on_mouse_down(
+                         MouseButton::Right,
+                         cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
+-                            w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Corner::TopLeft, sub: false, batch: false });
++                            w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch: false });
+                             cx.notify();
+                         }),
+                     ))
+@@ -932,8 +939,8 @@
+         if self.view != crate::app::View::Home {
+             return out;
+         }
+-        let place = |pos: Point<Pixels>, corner: Corner, menu: Stateful<Div>| {
+-            deferred(anchored().anchor(corner).position(pos).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(2).into_any_element()
++        let place = |pos: Point<Pixels>, corner: Anchor, menu: Stateful<Div>| {
++            deferred(crate::ios::place(corner, pos).child(menu)).with_priority(2).into_any_element()
+         };
+         if self.home.sort_menu
+             && let Some(b) = self.home.anchor("home-sort") {
+@@ -959,7 +966,7 @@
+                     .child(menu_label(crate::settings::tr("文件夹优先", "Folders first"), g.clone(), gpui::white()).flex_1())
+                     .when(self.home.folders_first && self.home.sort != HomeSort::Manual, |d| d.child(menu_glyph("check", 14., g)))
+                     .on_click(cx.listener(|w, _, _, cx| { if w.home.sort == HomeSort::Manual { return; } w.home.folders_first = !w.home.folders_first; w.save_home(); w.home.sort_menu = false; cx.notify(); })));
+-                out.push(place(point(b.right(), b.bottom() + px(4.)), Corner::TopRight, menu));
++                out.push(place(point(b.right(), b.bottom() + px(4.)), Anchor::TopRight, menu));
+             }
+         out
+     }
+--- a/src/home_folder.rs
++++ b/src/home_folder.rs
+@@ -146,7 +146,7 @@
+     /// lies on it, lines of "text" (below a real title when `titled`).
+     fn paint(&self, o: Point<Pixels>, face: Face, window: &mut Window) {
+         let b = Bounds::new(o + point(px(self.cx - self.w / 2.), px(self.cy - self.h / 2.)), size(px(self.w), px(self.h)));
+-        window.paint_shadows(b, Corners::all(px(10.)), &[BoxShadow { color: theme::rgbaf(0, 0, 0, if theme::dark() { 0.3 } else { 0.07 }), offset: point(px(0.), px(3.)), blur_radius: px(10.), spread_radius: px(0.) }]);
++        window.paint_drop_shadows(b, Corners::all(px(10.)), &[BoxShadow { inset: false, color: theme::rgbaf(0, 0, 0, if theme::dark() { 0.3 } else { 0.07 }), offset: point(px(0.), px(3.)), blur_radius: px(10.), spread_radius: px(0.) }]);
+         if let Some(p) = rounded(o, (self.cx, self.cy), self.w + 1., self.h + 1., 10.5, self.rot) { window.paint_path(p, ca(craft::N1000, 0.08)); }
+         if let Some(p) = rounded(o, (self.cx, self.cy), self.w, self.h, 10., self.rot) { window.paint_path(p, theme::raised(Theme::bg_body())); }
+         let mut rng = self.seed;
+@@ -210,8 +210,8 @@
+     };
+     // The whole folder's shadow sits under the front.
+     let lift = -p.lift / 4.;
+-    window.paint_shadows(Bounds::new(pt(6., yr + 10.), size(px(w - 12.), px(h - yr - 10.))), Corners::all(px(r)),
+-        &[BoxShadow { color: theme::rgbaf(0, 0, 0, if theme::dark() { 0.35 } else { 0.06 + 0.04 * lift }), offset: point(px(0.), px(8. + 6. * lift)), blur_radius: px(22. + 10. * lift), spread_radius: px(-2.) }]);
++    window.paint_drop_shadows(Bounds::new(pt(6., yr + 10.), size(px(w - 12.), px(h - yr - 10.))), Corners::all(px(r)),
++        &[BoxShadow { inset: false, color: theme::rgbaf(0, 0, 0, if theme::dark() { 0.35 } else { 0.06 + 0.04 * lift }), offset: point(px(0.), px(8. + 6. * lift)), blur_radius: px(22. + 10. * lift), spread_radius: px(-2.) }]);
+     let mut pb = PathBuilder::fill();
+     edge(&mut pb);
+     pb.line_to(pt(w, h - r));
+@@ -357,7 +357,7 @@
+             .when(self.batch.is_none(), |d| d
+                 .on_click(cx.listener(move |w, _, window, cx| { w.try_open(&open_id, window, cx); }))
+                 .on_mouse_down(MouseButton::Right, cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
+-                    w.row_menu = Some(RowMenu { id: menu_id.clone(), pos: ev.position, corner: Corner::TopLeft, sub: false, batch: false });
++                    w.row_menu = Some(RowMenu { id: menu_id.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch: false });
+                     cx.notify();
+                 })))
+             .child(back).children(title).child(front_glass).child(label)
+@@ -732,7 +732,7 @@
+             .child(div().absolute().inset_0().rounded(px(26.))
+                 .bg(linear_gradient(180., linear_color_stop(accent.opacity(0.025 + 0.05 * arm), 0.), linear_color_stop(accent.opacity(0.06 + 0.07 * arm), 1.)))
+                 .when(reject, |d| d.bg(ca(craft::N1000, 0.03))))
+-            .shadow(vec![BoxShadow { color: accent.opacity(0.10 * arm), offset: point(px(0.), px(10.)), blur_radius: px(40.), spread_radius: px(0.) }])
++            .shadow(vec![BoxShadow { inset: false, color: accent.opacity(0.10 * arm), offset: point(px(0.), px(10.)), blur_radius: px(40.), spread_radius: px(0.) }])
+             .opacity(show * (0.08 + 0.92 * ((d.veil.p - 0.12) / 0.88).clamp(0., 1.)).min(show))
+             .flex().flex_col().items_center().justify_center().gap(px(6.))
+             .child(canvas(move |b, _, _| record.set(Some(b)), |_, _, _, _| {}).absolute().inset_0())
+--- a/src/home_scrollbar.rs
++++ b/src/home_scrollbar.rs
+@@ -31,7 +31,7 @@
+         canvas(
+             move |bounds, window, _| {
+                 let view = list.bounds().size.height;
+-                let content = view + list.max_offset().height;
++                let content = view + list.max_offset().y;
+                 let offset = -list.offset().y;
+                 let (content, h) = match sb.grab.get() {
+                     Some((_, content, h)) => (content, h),
+@@ -89,7 +89,7 @@
+                                 let f = ((ev.position.y - dy - bounds.top()) / travel).clamp(0., 1.);
+                                 // At the end, go to the real bottom: the rows there may not
+                                 // be measured yet, so the estimate can stop short.
+-                                list.set_offset(point(list.offset().x, -list.max_offset().height * f));
++                                list.set_offset(point(list.offset().x, -list.max_offset().y * f));
+                                 window.refresh();
+                             }
+                             // The button went up somewhere we didn't see.
+--- a/src/home_text.rs
++++ b/src/home_text.rs
+@@ -142,14 +142,14 @@
+         let area = Bounds::new(bounds.origin, size(ready.width, ready.height));
+         window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
+             for (line, tops) in &ready.lines {
+-                let _ = line.paint_background_rows(bounds.origin, px(self.line_height), tops, align, Some(area), window, cx);
+-                let _ = line.paint_rows(bounds.origin, px(self.line_height), tops, align, Some(area), window, cx);
++                let _ = crate::ios::paint_background_rows(line, bounds.origin, px(self.line_height), tops, align, Some(area), window, cx);
++                let _ = crate::ios::paint_rows(line, bounds.origin, px(self.line_height), tops, align, Some(area), window, cx);
+             }
+             for placed in &ready.equations {
+                 let origin = point(bounds.left() + placed.x + px(placed.equation.left), bounds.top() + placed.baseline);
+                 match &placed.equation.body {
+                     Body::Math(math) => { math.paint(origin, window, cx); if let Some(tag) = &math.tag { tag.paint(point(origin.x + px(math.width + 8. * super::bs::SCALE), origin.y), window, cx); } }
+-                    Body::Invalid(line) => { let _ = line.paint(point(origin.x, origin.y - line.ascent), line.ascent + line.descent, window, cx); }
++                    Body::Invalid(line) => { let _ = line.paint(point(origin.x, origin.y - line.ascent), line.ascent + line.descent, TextAlign::Left, None, window, cx); }
+                 }
+             }
+         });
+--- a/src/input.rs
++++ b/src/input.rs
+@@ -365,7 +365,7 @@
+     }
+ 
+     fn on_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         let i = self.index_for(ev.position);
+         if ev.click_count >= 2 {
+             self.select_all_text(cx);
+@@ -412,6 +412,16 @@
+ }
+ 
+ impl EntityInputHandler for TextField {
++    // iOS 只在知道文本长度、选区落在其中时才弹出软键盘。
++    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
++        Some(self.text.encode_utf16().count())
++    }
++
++    fn set_selected_text_range(&mut self, range: Range<usize>, _: &mut Window, cx: &mut Context<Self>) {
++        let r = self.range8(&range);
++        if self.sel != r { self.sel = r; self.reversed = false; cx.notify(); }
++    }
++
+     fn text_for_range(
+         &mut self,
+         range: Range<usize>,
+@@ -438,6 +448,8 @@
+ 
+     fn replace_text_in_range(&mut self, range: Option<Range<usize>>, s: &str, _: &mut Window, cx: &mut Context<Self>) {
+         self.pointer_hidden = true;
++        // 软键盘的回车是一段文本，单行输入框当作提交。
++        if matches!(s, "\n" | "\r") && !self.multiline { self.marked = None; cx.emit(TextFieldEvent::Submit); return; }
+         let r = range.map(|r| self.range8(&r)).or(self.marked.clone()).unwrap_or(self.sel.clone());
+         self.marked = None;
+         self.replace(r, s, cx);
+@@ -559,7 +571,7 @@
+                     move |bounds, _, window, cx| {
+                         window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
+                         if pointer_hidden {
+-                            window.set_window_cursor_style(CursorStyle::None);
++                            window.set_window_cursor_style(CursorStyle::Arrow);
+                             let e = entity.clone();
+                             window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
+                                 if phase == DispatchPhase::Bubble {
+--- a/src/local_files.rs
++++ b/src/local_files.rs
+@@ -21,8 +21,7 @@
+ /// Markdown files to open: the system open panel, or a scripted answer.
+ fn pick(cx: &mut App) -> impl std::future::Future<Output = Option<Vec<PathBuf>>> + use<> {
+     let picked = crate::devtools::take_pick();
+-    let extensions = Some(MARKDOWN_EXTS.iter().map(|e| SharedString::from(*e)).collect());
+-    let prompt = picked.is_none().then(|| cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(tr("打开", "Open").into()), extensions }));
++    let prompt = picked.is_none().then(|| crate::ios::prompt_for_paths(cx, PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(tr("打开", "Open").into()) }));
+     async move {
+         match prompt {
+             Some(p) => p.await.ok().and_then(Result::ok).flatten(),
+@@ -100,7 +99,7 @@
+         let row = |id: &'static str, glyph: &'static str, label: &'static str| crate::ui::menu_row(id, SharedString::from(id)).child(icon(glyph, 16., Theme::icon())).child(label);
+         let pos = if m.pos.x < px(0.) { point(-m.pos.x, m.pos.y + px(22.)) } else { m.pos };
+         let shown = if cfg!(target_os = "macos") { tr("在访达中显示", "Show in Finder") } else if cfg!(target_os = "windows") { tr("在文件资源管理器中显示", "Show in File Explorer") } else { tr("在文件管理器中显示", "Show in File Manager") };
+-        vec![deferred(anchored().position(pos).snap_to_window_with_margin(px(8.)).child(popover().id("local-row-menu").occlude().w(px(200.)).py(px(crate::ui::MENU_PAD_Y))
++        vec![deferred(crate::ios::place(Anchor::TopLeft, pos).child(popover().id("local-row-menu").occlude().w(crate::ios::menu_w(200.)).py(px(crate::ui::MENU_PAD_Y))
+             .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.row_menu = None; cx.notify(); }))
+             .child(row("lr-import", "folder-input", tr("导入到文档库", "Import into library")).on_click(cx.listener(move |w, _, window, cx| w.import_local(&import, window, cx))))
+             .child(row("lr-rename", "square-pen", tr("重命名", "Rename")).on_click(cx.listener(move |w, _, window, cx| w.start_rename(&rename, window, cx))))
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
++#![cfg_attr(target_os = "ios", allow(dead_code))]
+ #![recursion_limit = "512"]
+ #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+ 
+@@ -58,9 +59,13 @@
+ mod tree;
+ mod ui;
+ mod update;
++#[cfg(target_os = "ios")]
++#[path = "../prototypes/ios/app.rs"]
++mod ios;
+ 
+ use fdl_core::{docxml, lang, markdown, model, palette, paste, store, time};
+ 
++#[cfg(not(target_os = "ios"))]
+ use gpui::*;
+ 
+ #[cfg(target_os = "macos")]
+@@ -81,6 +86,7 @@
+ }
+ 
+ /// The main window, centred at the remembered size.
++#[cfg(not(target_os = "ios"))]
+ fn open_main_window(scripted: bool, cx: &mut App) {
+     // Scripted dev runs must not steal keyboard focus from whatever the
+     // user is typing into.
+@@ -108,6 +114,7 @@
+     .expect("open window");
+ }
+ 
++#[cfg(not(target_os = "ios"))]
+ fn main() {
+     logging::init();
+     let scripted = devtools::scripted();
+@@ -165,3 +172,6 @@
+         }
+     });
+ }
++
++#[cfg(target_os = "ios")]
++fn main() { ios::run(); }
+--- a/src/modes.rs
++++ b/src/modes.rs
+@@ -96,7 +96,7 @@
+         let _ = self.store.update_meta(&id, |m| m.reading = reading);
+         if let Some(ed) = &self.editor {
+             ed.update(cx, |e, cx| e.set_read_only(reading, cx));
+-            ed.read(cx).focus(window);
++            window.focus(&ed.read(cx).focus.clone(), cx);
+         }
+         self.show_toast_kind(ToastKind::Info, if reading { crate::settings::text("已切换为阅读模式") } else { crate::settings::text("已切换为编辑模式") }, cx);
+     }
+--- a/src/search.rs
++++ b/src/search.rs
+@@ -166,7 +166,7 @@
+     extra.push(extra_segment(Some("pen-line"), if crate::settings::english() { format!("Modified {}", format_visit(e.meta.modified)) } else { format!("我在 {}修改过", format_visit(e.meta.modified)) }));
+     let last = extra.len() - 1;
+     let extra = extra.into_iter().enumerate().flat_map(|(i, seg)| {
+-        let seg = if i == last { seg.flex_shrink().min_w_0().overflow_hidden() } else { seg };
++        let seg = if i == last { seg.flex_shrink(1.).min_w_0().overflow_hidden() } else { seg };
+         [(i > 0).then(|| div().flex_none().child(" · ")), Some(seg)].into_iter().flatten()
+     });
+     div()
+@@ -222,7 +222,7 @@
+             s.line_height = 22.;
+             s.set_text("", cx)
+         });
+-        window.focus(&search.focus_handle(cx));
++        window.focus(&search.focus_handle(cx), cx);
+         self.search_scroll.set_offset(point(px(0.), px(0.)));
+         cx.notify();
+     }
+@@ -233,7 +233,7 @@
+         }
+         self.search_open = false;
+         if let Some(ed) = &self.editor {
+-            ed.read(cx).focus(window);
++            window.focus(&ed.read(cx).focus.clone(), cx);
+         }
+         cx.notify();
+     }
+@@ -248,7 +248,7 @@
+         self.close_search(window, cx);
+         self.open(&id, window, cx);
+         if let Some(ed) = &self.editor {
+-            ed.read(cx).focus(window);
++            window.focus(&ed.read(cx).focus.clone(), cx);
+         }
+     }
+ 
+@@ -316,7 +316,7 @@
+             }))
+             .on_click(cx.listener(move |w, _, window, cx| w.pick_search(row, window, cx)))
+             .child(entry_icon(e))
+-            .child(result_info(e, q, summary, INFO_W, window))
++            .child(result_info(e, q, summary, if crate::ios::compact(window) { f32::from(window.viewport_size().width) - 16. - 66. } else { INFO_W }, window))
+     }
+ 
+     pub(crate) fn render_search(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+@@ -326,7 +326,12 @@
+         let q = self.query(cx);
+         let has_text = !self.search.read(cx).text.is_empty();
+         let results: Vec<Entry> = self.search_results(cx).into_iter().cloned().collect();
+-        let vh = f32::from(window.viewport_size().height);
++        let vh = f32::from(crate::ios::visible_height(window));
++        // 手机：弹窗贴着顶部安全区，占满键盘上方，不显示键盘提示。
++        let compact = crate::ios::compact(window);
++        let safe = crate::ios::safe(window);
++        let dialog_w = if compact { f32::from(window.viewport_size().width) - 16. } else { 540. };
++        let dialog_h = if compact { (vh - f32::from(safe.top) - 16.).max(200.) } else { 630f32.min(vh - 120.).max(200.) };
+ 
+         let input = div()
+             .flex_none()
+@@ -350,7 +355,7 @@
+                 d.child(input_button("search-clear", "search-clear", 18., Theme::text_disabled()).ml(px(8.)).on_click(cx.listener(
+                     |w, _, window, cx| {
+                         w.search.update(cx, |s, cx| s.set_text("", cx));
+-                        window.focus(&w.search.focus_handle(cx));
++                        window.focus(&w.search.focus_handle(cx), cx);
+                         w.search_sel = Some(0);
+                         w.search_scroll.set_offset(point(px(0.), px(0.)));
+                         cx.notify();
+@@ -422,8 +427,8 @@
+         let modal = div()
+             .id("search-dialog")
+             .occlude()
+-            .w(px(540.))
+-            .h(px(630f32.min(vh - 120.).max(200.)))
++            .w(px(dialog_w))
++            .h(px(dialog_h))
+             .flex()
+             .flex_col()
+             .rounded(px(16.))
+@@ -434,7 +439,7 @@
+             .child(div().flex_none().h(px(1.)).bg(Theme::line_divider()))
+             // The thumb sits in the list's right padding, over no row.
+             .child(div().flex_1().min_h_0().relative().flex().flex_col().child(list).child(self.home.search_scrollbar.render(&self.search_scroll)))
+-            .child(footer);
++            .when(!compact, |d| d.child(footer));
+ 
+         Some(
+             deferred(
+@@ -445,7 +450,8 @@
+                     .flex()
+                     .flex_col()
+                     .items_center()
+-                    .justify_center()
++                    .when(!compact, |d| d.justify_center())
++                    .when(compact, |d| d.pt(safe.top + px(8.)))
+                     .bg(scrim())
+                     .on_mouse_down(MouseButton::Left, cx.listener(|w, _, window, cx| w.close_search(window, cx)))
+                     .child(modal),
+--- a/src/settings.rs
++++ b/src/settings.rs
+@@ -449,7 +449,7 @@
+                 cx.notify();
+             }))
+             .child(div().id("theme-menu-list").w(px(200.)).max_h(px(302.)).overflow_y_scroll().py(px(ui::MENU_PAD_Y)).flex().flex_col().children(rows));
+-        Some(deferred(anchored().anchor(Corner::TopRight).position(point(b.right(), b.bottom() + px(4.))).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(2).into_any_element())
++        Some(deferred(anchored().anchor(Anchor::TopRight).position(point(b.right(), b.bottom() + px(4.))).snap_to_window_with_margin(px(8.)).child(menu)).with_priority(2).into_any_element())
+     }
+ 
+     /// Keys while the theme dropdown is open; true when used.
+@@ -527,6 +527,7 @@
+     pub(crate) fn open_settings(&mut self, page: Page, cx: &mut Context<Self>) {
+         self.cancel_shortcut_recording(cx);
+         self.settings_page = page;
++        self.drawer = false;
+         self.theme_menu = None;
+         self.settings_scroll.set_offset(point(px(0.), px(0.)));
+         self.shortcut_error = None;
+@@ -541,7 +542,7 @@
+             let on = if page.is_some() { page == current } else { in_trash };
+             let (title, icon) = page.map_or((tr("回收站", "Trash"), "bin"), |p| (p.title(), p.icon()));
+             div().id(SharedString::from(format!("settings-nav-{page:?}"))).h(px(sb::ROW_H)).flex().items_center().pl(px(6.)).pr(px(4.)).rounded(px(sb::ROW_R))
+-                .text_size(px(13.)).line_height(px(20.)).cursor_pointer()
++                .text_size(px(16.)).line_height(px(22.)).cursor_pointer()
+                 .when(on, |d| d.bg(Theme::sidebar_selected()).text_color(Theme::text()))
+                 .when(!on, |d| d.text_color(Theme::sidebar_text()).hover(|s| s.bg(Theme::sidebar_hover())))
+                 .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(9.)).child(ui::icon(icon, sb::ROW_ICON, Theme::icon())))
+@@ -569,7 +570,7 @@
+     /// 收起侧栏 uses (28pt, 4pt past the traffic lights, glyph 17), so the
+     /// buttons don't move when switching between the document list and 设置.
+     pub(crate) fn header_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
+-        let open = self.sidebar_open;
++        let open = self.sidebar_open || self.drawer;
+         let bar_button = |id: &'static str, glyph: &'static str| {
+             div().id(id).no_drag().flex_none().size(px(28.)).flex().items_center().justify_center().rounded(px(8.)).cursor_pointer()
+                 .hover(move |s| s.bg(if open { Theme::sidebar_hover() } else { Theme::fill_hover_strong() }))
+@@ -578,7 +579,7 @@
+         div().flex().items_center().ml(px(4.)).gap(px(4.))
+             .child(bar_button("settings-collapse", if open { "panel-left-close" } else { "panel-left-open" })
+                 .tip(if open { tr("收起侧栏", "Hide sidebar") } else { tr("展开侧栏", "Show sidebar") }, Some(crate::shortcuts::hint("workspace::ToggleSidebar", "⌘ + ]")))
+-                .on_click(cx.listener(|w, _, _, cx| { w.sidebar_open = !w.sidebar_open; cx.notify(); })))
++                .on_click(cx.listener(|w, _, _, cx| { if w.drawer { w.drawer = false; } else { w.sidebar_open = !w.sidebar_open; } cx.notify(); })))
+             .child(bar_button("settings-home", "home").tip(tr("返回主页", "Home"), Some(crate::shortcuts::hint("workspace::GoHome", "⌘ + ⌥ + Home")))
+                 .on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx))))
+             .into_any_element()
+@@ -621,8 +622,7 @@
+                     segmented("lang", &["简体中文", "English"], p.english as usize, |w, i, cx| w.set_pref(|p| p.english = i == 1, cx), cx)).into_any_element(),
+                 row(tr("自动下载网络图片", "Download web images"), desc(tr("关闭后不联网，网络图片显示为占位，点击单独加载。", "When off the app stays offline; web images show a placeholder you can click to load.")),
+                     switch("pref-remote", p.remote_images).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.remote_images = !p.remote_images, cx)))).into_any_element(),
+-                row(tr("自动检查更新", "Check for updates automatically"), desc(tr("只读取一份版本信息，不发送任何数据；新版本由你决定何时下载安装。", "Reads a version file and sends nothing about you; you decide when to download and install.")),
+-                    switch("pref-update", p.auto_update).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.auto_update = !p.auto_update, cx)))).into_any_element(),
++                // iOS 版由系统更新，没有「自动检查更新」。
+             ]))
+             .into_any_element()
+     }
+@@ -708,7 +708,8 @@
+             .child(div().text_size(px(20.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child("Quiet.md"))
+             .child(div().text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(format!("{} {}", tr("版本", "Version"), env!("CARGO_PKG_VERSION"))))
+             .child(div().text_size(px(13.)).line_height(px(20.)).text_color(Theme::text_caption()).child(tr("本地优先的笔记应用：无需账号，文档就是你电脑上的文件。", "Local-first notes: no account, your documents are files on your Mac."))))
+-            .child(group(None, vec![update_row(cx).into_any_element()]))
++            // iOS 版由系统更新：不放「软件更新」。
++            .when(false, |d| d.child(group(None, vec![update_row(cx).into_any_element()])))
+             .into_any_element()
+     }
+ }
+@@ -729,7 +730,7 @@
+     };
+     let fill = if let State::Downloading(m) = &state { Some(crate::update::progress(m)) } else { None };
+     let busy = matches!(state, State::Downloading(_) | State::Installing(_));
+-    Some(div().id("update-pill").no_drag().flex_shrink().min_w_0().h(px(24.)).px(px(10.)).relative().overflow_hidden().flex().items_center().justify_center().rounded_full()
++    Some(div().id("update-pill").no_drag().flex_shrink(1.).min_w_0().h(px(24.)).px(px(10.)).relative().overflow_hidden().flex().items_center().justify_center().rounded_full()
+         .text_size(px(12.)).line_height(px(16.)).font_weight(FontWeight::MEDIUM)
+         .when(!busy, |d| d.cursor_pointer().bg(Theme::primary()).text_color(gpui::white()).hover(|s| s.opacity(0.9)))
+         .when(busy, |d| d.bg(Theme::sidebar_hover()).text_color(Theme::text_caption()))
+--- a/src/shortcuts.rs
++++ b/src/shortcuts.rs
+@@ -14,15 +14,15 @@
+ pub fn init(cx: &mut App) {
+     let base = cx.key_bindings().borrow().bindings().cloned().collect::<Vec<_>>();
+     #[cfg(not(target_os = "macos"))]
+-    let base = base.into_iter().filter_map(pc_binding).collect();
++    let base = base.into_iter().filter_map(|binding| pc_binding(binding, cx)).collect();
+     let custom = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+     cx.set_global(Shortcuts { base, custom });
+     rebuild(cx);
+ }
+ 
+ #[cfg(any(test, not(target_os = "macos")))]
+-fn pc_binding(binding: KeyBinding) -> Option<KeyBinding> {
+-    let keys = binding.keystrokes().iter().map(|k| k.unparse().replace("win-", "cmd-").replace("super-", "cmd-")).collect::<Vec<_>>().join(" ");
++fn pc_binding(binding: KeyBinding, cx: &App) -> Option<KeyBinding> {
++    let keys = binding.keystrokes().iter().map(|k| k.unparse(OperatingSystem::Ios).replace("win-", "cmd-").replace("super-", "cmd-")).collect::<Vec<_>>().join(" ");
+     // Cocoa's control-key navigation conflicts with PC editing shortcuts.
+     if matches!(keys.as_str(), "ctrl-a" | "ctrl-b" | "ctrl-d" | "ctrl-e" | "ctrl-f" | "ctrl-h" | "ctrl-n" | "ctrl-p" | "ctrl-backspace") { return None; }
+     // Ctrl+Backspace deletes a word on PC platforms; do not override it with macOS line deletion.
+@@ -35,7 +35,7 @@
+         "alt-left" | "alt-right" | "alt-shift-left" | "alt-shift-right" | "alt-backspace" | "alt-delete" => key.replacen("alt-", "ctrl-", 1),
+         _ => key.replace("cmd-", "ctrl-"),
+     }).collect::<Vec<String>>().join(" ") };
+-    KeyBinding::load(&keys, binding.action().boxed_clone(), binding.predicate(), false, binding.action_input(), &DummyKeyboardMapper).ok()
++    KeyBinding::load(&keys, binding.action().boxed_clone(), binding.predicate(), false, binding.action_input(), cx).ok()
+ }
+ 
+ #[cfg(test)]
+@@ -50,7 +50,7 @@
+             (KeyBinding::new("alt-delete", DeleteWordForward, Some("Editor")), "ctrl-delete"),
+         ] {
+             let mapped = pc_binding(binding).unwrap();
+-            assert_eq!(mapped.keystrokes()[0].unparse(), expected);
++            assert_eq!(mapped.keystrokes()[0].unparse(OperatingSystem::Ios), expected);
+         }
+         assert!(pc_binding(KeyBinding::new("cmd-backspace", DeleteToLineStart, Some("Editor"))).is_none());
+         assert!(pc_binding(KeyBinding::new("ctrl-backspace", Backspace, Some("Editor"))).is_none());
+@@ -60,8 +60,8 @@
+         use crate::editor::keymap::{Copy, InlineCode};
+         let copy = pc_binding(KeyBinding::new("cmd-c", Copy, Some("Editor"))).unwrap();
+         let code = pc_binding(KeyBinding::new("cmd-ctrl-c", InlineCode, Some("Editor"))).unwrap();
+-        assert_eq!(copy.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>(), ["ctrl-c"]);
+-        assert_eq!(code.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>(), ["ctrl-shift-c"]);
++        assert_eq!(copy.keystrokes().iter().map(|k| k.unparse(OperatingSystem::Ios)).collect::<Vec<_>>(), ["ctrl-c"]);
++        assert_eq!(code.keystrokes().iter().map(|k| k.unparse(OperatingSystem::Ios)).collect::<Vec<_>>(), ["ctrl-shift-c"]);
+         assert_ne!(copy.keystrokes(), code.keystrokes());
+     }
+ }
+@@ -142,7 +142,7 @@
+     let mut cache = HINTS.lock().unwrap();
+     if let Some(h) = cache.get(&key) { return h }
+     let text = key.split(' ').map(|stroke| {
+-        let Ok(k) = Keystroke::parse(stroke) else { return stroke.to_string() };
++        let Ok(k) = Keystroke::parse_with_os(stroke, OperatingSystem::Ios) else { return stroke.to_string() };
+         let m = k.modifiers;
+         let names = if cfg!(not(target_os = "macos")) { [(m.control, "Ctrl"), (m.alt, "Alt"), (m.shift, "Shift"), (m.platform, if cfg!(target_os = "windows") { "Win" } else { "Super" })] } else { [(m.platform, "⌘"), (m.alt, "⌥"), (m.shift, "Shift"), (m.control, "Control")] };
+         let mut parts: Vec<String> = names.into_iter().filter(|(on, _)| *on).map(|(_, s)| s.to_string()).collect();
+@@ -158,7 +158,7 @@
+     *CUSTOM.write().unwrap() = cx.global::<Shortcuts>().custom.clone();
+     let s = cx.global::<Shortcuts>();
+     let bindings: Vec<_> = s.base.iter().filter(|b| !s.custom.get(b.action().name()).is_some_and(|key| key.is_empty())).map(|b| {
+-        s.custom.get(b.action().name()).and_then(|key| KeyBinding::load(key, b.action().boxed_clone(), b.predicate(), false, b.action_input(), &DummyKeyboardMapper).ok()).unwrap_or_else(|| b.clone())
++        s.custom.get(b.action().name()).and_then(|key| KeyBinding::load(key, b.action().boxed_clone(), b.predicate(), false, b.action_input(), cx).ok()).unwrap_or_else(|| b.clone())
+     }).collect();
+     cx.clear_key_bindings(); cx.bind_keys(bindings);
+ }
+@@ -232,7 +232,7 @@
+ fn default_key(s: &Shortcuts, id: &str) -> String {
+     if id == "global" { return GLOBAL_DEFAULT.into(); }
+     if id.ends_with("::NewDoc") { return if cfg!(not(target_os = "macos")) { "ctrl-n" } else { "cmd-n" }.into(); }
+-    s.base.iter().find(|b| b.action().name() == id).map(|b| b.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>().join(" ")).unwrap_or_default()
++    s.base.iter().find(|b| b.action().name() == id).map(|b| b.keystrokes().iter().map(|k| k.unparse(OperatingSystem::Ios)).collect::<Vec<_>>().join(" ")).unwrap_or_default()
+ }
+ /// The key an action runs on now.
+ pub fn key_of(cx: &App, id: &str) -> String {
+@@ -257,7 +257,7 @@
+ pub fn pretty(key: &str) -> String {
+     if key.is_empty() { return tr("未设置", "Not set").into(); }
+     key.split(' ').map(|stroke| {
+-        let Ok(ks) = Keystroke::parse(stroke) else { return stroke.to_string() };
++        let Ok(ks) = Keystroke::parse_with_os(stroke, OperatingSystem::Ios) else { return stroke.to_string() };
+         let m = ks.modifiers;
+         let win = cfg!(not(target_os = "macos"));
+         let names = if win { [(m.control, "Ctrl"), (m.alt, "Alt"), (m.shift, "Shift"), (m.platform, if cfg!(target_os = "windows") { "Win" } else { "Super" })] } else { [(m.control, "⌃"), (m.alt, "⌥"), (m.shift, "⇧"), (m.platform, "⌘")] };
+@@ -274,7 +274,7 @@
+     }).collect::<Vec<_>>().join("  →  ")
+ }
+ fn sequence(key: &str) -> anyhow::Result<Vec<Keystroke>> {
+-    key.split_whitespace().map(|k| Keystroke::parse(k).map_err(Into::into)).collect()
++    key.split_whitespace().map(|k| Keystroke::parse_with_os(k, OperatingSystem::Ios).map_err(Into::into)).collect()
+ }
+ fn overlaps(a: &[Keystroke], b: &[Keystroke]) -> bool {
+     !a.is_empty() && !b.is_empty() && (a.starts_with(b) || b.starts_with(a))
+@@ -287,7 +287,7 @@
+     for b in &s.base {
+         let name = b.action().name();
+         if name == id || found.iter().any(|n| n == name) { continue; }
+-        let other = s.custom.get(name).cloned().unwrap_or_else(|| b.keystrokes().iter().map(|k| k.unparse()).collect::<Vec<_>>().join(" "));
++        let other = s.custom.get(name).cloned().unwrap_or_else(|| b.keystrokes().iter().map(|k| k.unparse(OperatingSystem::Ios)).collect::<Vec<_>>().join(" "));
+         let same_context = contexts.contains(&b.predicate().map(|p| p.to_string()));
+         if (label(name).is_some() || same_context || id == "global") && sequence(&other).is_ok_and(|other| overlaps(&parsed, &other)) {
+             found.push(name.to_string());
+@@ -343,7 +343,7 @@
+         self.shortcut_recording = Some(id.to_string());
+         self.shortcut_error = None;
+         crate::quick_note::suspend_hotkey();
+-        window.focus(&self.focus);
++        window.focus(&self.focus, cx);
+         cx.clear_key_bindings();
+         cx.notify();
+     }
+@@ -403,7 +403,7 @@
+             self.shortcut_error = Some((id, first_group_hint().into()));
+         } else if self.shortcut_strokes.len() >= if id == "global" { 1 } else { 4 } {
+             self.shortcut_error = Some((id, tr("已达到组合键上限，请保存或按退格修改", "Save or press Backspace to edit the sequence").into()));
+-        } else { self.shortcut_strokes.push(ev.keystroke.unparse()); }
++        } else { self.shortcut_strokes.push(ev.keystroke.unparse(OperatingSystem::Ios)); }
+         cx.notify(); true
+     }
+ 
+--- a/src/sidebar.rs
++++ b/src/sidebar.rs
+@@ -25,11 +25,12 @@
+ /// labels start at 54pt; groups are 16pt apart, a section header is 34pt
+ /// (6 above its 28pt label).
+ pub(crate) const SB_X: f32 = 14.;
+-pub(crate) const ROW_H: f32 = 30.;
++// 触屏：44pt 的行，15pt 的字。
++pub(crate) const ROW_H: f32 = 44.;
+ const DOC_ROW_H: f32 = ROW_H;
+ pub(crate) const ROW_R: f32 = 9.;
+ pub(crate) const ROW_GAP: f32 = 1.;
+-pub(crate) const ROW_ICON: f32 = 18.;
++pub(crate) const ROW_ICON: f32 = 20.;
+ pub(crate) const GROUP_GAP: f32 = 16.;
+ pub(crate) const SECTION_H: f32 = 34.;
+ pub(crate) const SECTION_TOP: f32 = 6.;
+@@ -49,7 +50,7 @@
+         .items_center()
+         .rounded(px(ROW_R))
+         .cursor_pointer()
+-        .text_size(px(13.))
++        .text_size(px(16.))
+         .line_height(px(20.))
+         .text_color(Theme::sidebar_text())
+         .hover(|s| s.bg(Theme::sidebar_hover()))
+@@ -94,6 +95,7 @@
+     /// 268 and min(800, window − 540).
+     pub(crate) fn sidebar_w(&self, window: &Window) -> f32 {
+         let vw = f32::from(window.viewport_size().width);
++        if crate::ios::compact(window) { return (vw - 56.).min(340.); }
+         let max = theme::SIDEBAR_MAX.min(vw - theme::SIDEBAR_MIN_CONTENT).max(theme::SIDEBAR_MIN);
+         self.sidebar_width.clamp(theme::SIDEBAR_MIN, max)
+     }
+@@ -127,6 +129,7 @@
+                     .child(icon("panel-left-close", 17., Theme::icon()))
+                     .on_click(cx.listener(|w, _, _, cx| {
+                         w.sidebar_open = false;
++                        w.drawer = false;
+                         cx.notify();
+                     })),
+             )
+@@ -146,7 +149,7 @@
+                 .items_center()
+                 .rounded(px(ROW_R))
+                 .cursor_pointer()
+-                .text_size(px(13.))
++                .text_size(px(16.))
+                 .line_height(px(20.))
+                 .when(home_on, |d| d.bg(Theme::sidebar_selected()).text_color(Theme::text()))
+                 .when(!home_on, |d| d.text_color(Theme::sidebar_text()).hover(|s| s.bg(Theme::sidebar_hover())))
+@@ -368,7 +371,7 @@
+                             cx.notify();
+                         })),
+                 )
+-                .child(div().flex_1().min_w_0().ml(px(8.)).text_size(px(13.)).line_height(px(20.)).text_color(Theme::text()).child(crate::localized_format!("已选 {n} 项", "Selected: {n}")))
++                .child(div().flex_1().min_w_0().ml(px(8.)).text_size(px(16.)).line_height(px(20.)).text_color(Theme::text()).child(crate::localized_format!("已选 {n} 项", "Selected: {n}")))
+                 .child(
+                     trigger("batch-exit", "x").ml(px(8.))
+                         .tip(crate::settings::text("退出批量操作"), None)
+@@ -393,7 +396,7 @@
+                 .cursor_pointer()
+                 .hover(|s| s.bg(Theme::sidebar_hover()))
+                 .tip(if folded { crate::settings::text("点击展开") } else { crate::settings::text("点击折叠") }, None)
+-                .child(div().pr(px(4.)).text_size(px(13.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::sidebar_section()).child(crate::settings::label(title)))
++                .child(div().pr(px(4.)).text_size(px(16.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::sidebar_section()).child(crate::settings::label(title)))
+                 .child(
+                     div()
+                         .when(!folded, |d| d.opacity(0.).group_hover(group, |s| s.opacity(1.)))
+@@ -508,7 +511,7 @@
+                     if batch && !w.batch.as_ref().is_some_and(|b| b.contains(&id2)) && !w.toggle_check(&id2) {
+                         return;
+                     }
+-                    w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Corner::TopLeft, sub: false, batch });
++                    w.row_menu = Some(RowMenu { id: id2.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch });
+                     cx.notify();
+                 }),
+             )
+@@ -545,7 +548,7 @@
+                     // Hang the menu from the button; a negative x marks "from the button".
+                     let b = lookup.borrow().get(&slot2).copied();
+                     let pos = b.map_or(ev.position, |b| point(-b.left() - px(1.), b.top()));
+-                    w.row_menu = Some(RowMenu { id: id.clone(), pos, corner: Corner::TopLeft, sub: false, batch: false });
++                    w.row_menu = Some(RowMenu { id: id.clone(), pos, corner: Anchor::TopLeft, sub: false, batch: false });
+                     cx.notify();
+                 }),
+             )
+@@ -595,8 +598,8 @@
+                     .bg(crate::theme::raised(Theme::bg_body()).opacity(a))
+                     .border_1()
+                     .border_color(Theme::sidebar_field_edge().opacity(a))
+-                    .shadow(vec![BoxShadow { color: Theme::sidebar_field_ring().opacity(a), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(3.) }])
+-                    .text_size(px(13.))
++                    .shadow(vec![BoxShadow { inset: false, color: Theme::sidebar_field_ring().opacity(a), offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(3.) }])
++                    .text_size(px(16.))
+                     .child(field)
+                     .into_any_element()
+             }
+@@ -604,7 +607,7 @@
+                 .pl(px(9.))
+                 .flex_1()
+                 .min_w_0()
+-                .text_size(px(13.))
++                .text_size(px(16.))
+                 .line_height(px(DOC_ROW_H))
+                 .overflow_hidden()
+                 .whitespace_nowrap()
+@@ -666,7 +669,7 @@
+                                 .with_transformation(Transformation::rotate(radians(if open { std::f32::consts::FRAC_PI_2 } else { 0. }))))))
+                     }
+                     _ if e.meta.markdown => d.child(icon("doc-md", ROW_ICON, Theme::icon())),
+-                    Some(em) => d.text_size(px(13.)).line_height(px(20.)).child(em.clone()),
++                    Some(em) => d.text_size(px(16.)).line_height(px(20.)).child(em.clone()),
+                     None => d.child(icon("doc", ROW_ICON, Theme::icon())),
+                 })
+             })
+@@ -697,7 +700,7 @@
+             let menu = popover()
+                 .id("batch-menu")
+                 .occlude()
+-                .w(px(ROW_MENU_W))
++                .w(crate::ios::menu_w(ROW_MENU_W))
+                 .px(px(5.))
+                 .py(px(crate::ui::MENU_PAD_Y))
+                 .on_mouse_down_out(cx.listener(|w, _, _, cx| {
+@@ -709,7 +712,7 @@
+                 .child(item("bm-move", "folder-input", crate::settings::text("移动到")).on_click(cx.listener(|w, _, window, cx| w.batch_move(window, cx))))
+                 .child(item("bm-delete", "bin", crate::settings::text("删除")).on_click(cx.listener(|w, _, _, cx| w.ask_batch_delete(cx))));
+             return vec![
+-                deferred(anchored().anchor(m.corner).position(m.pos).snap_to_window_with_margin(px(8.)).child(menu))
++                deferred(crate::ios::place(m.corner, m.pos).child(menu))
+                     .with_priority(2)
+                     .into_any_element(),
+             ];
+@@ -732,7 +735,7 @@
+         let menu = popover()
+             .id("row-menu")
+             .occlude()
+-            .w(px(ROW_MENU_W))
++            .w(crate::ios::menu_w(ROW_MENU_W))
+             .px(px(5.))
+             .py(px(crate::ui::MENU_PAD_Y))
+             .on_mouse_down_out(cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
+@@ -741,7 +744,8 @@
+                     cx.notify();
+                 }
+             }))
+-            .child(
++            // iOS 只有一个窗口，不放「在新窗口中打开」。
++            .when(false, |d| d.child(
+                 item("rm-window", "copy", crate::settings::text("在新窗口中打开"))
+                     .on_hover(set_sub(false))
+                     .on_click(cx.listener(move |w, _, _, cx| {
+@@ -750,7 +754,7 @@
+                         cx.defer(move |cx| crate::quick_note::open_document(Some(id), cx));
+                         cx.notify();
+                     })),
+-            )
++            ))
+             .child(
+                 item("rm-copy", "copy", crate::settings::text("创建副本"))
+                     .on_hover(set_sub(false))
+@@ -789,26 +793,26 @@
+                     .on_hover(set_sub(false))
+                     .on_click(cx.listener(move |w, _, _, cx| w.ask_delete(&del, cx))),
+             );
+-        let vh = f32::from(window.viewport_size().height);
++        let vh = f32::from(crate::ios::visible_height(window));
+         let menu_h = row_menu_height(8, 2);
+         // From the "…" button: hang 2px below it, or sit 2px above it when
+         // there's no room below. From a right-click: at the pointer.
+         let (origin, corner) = if m.pos.x < px(0.) {
+             let (left, top) = (-m.pos.x, f32::from(m.pos.y));
+             if top + 20. + 2. + menu_h > vh - 8. {
+-                (point(left, px(top - 2.)), Corner::BottomLeft)
++                (point(left, px(top - 2.)), Anchor::BottomLeft)
+             } else {
+-                (point(left, px(top + 22.)), Corner::TopLeft)
++                (point(left, px(top + 22.)), Anchor::TopLeft)
+             }
+         } else {
+             (m.pos, m.corner)
+         };
+         let menu_top = match corner {
+-            Corner::BottomLeft | Corner::BottomRight => f32::from(origin.y) - menu_h,
++            Anchor::BottomLeft | Anchor::BottomRight => f32::from(origin.y) - menu_h,
+             _ => f32::from(origin.y),
+         };
+         let mut out = vec![
+-            deferred(anchored().anchor(corner).position(origin).snap_to_window_with_margin(px(8.)).child(menu))
++            deferred(crate::ios::place(corner, origin).child(menu))
+                 .with_priority(2)
+                 .into_any_element(),
+         ];
+@@ -818,17 +822,17 @@
+             // Level the submenu's first item with 下载 (the 5th item, after one divider).
+             let top = menu_top + 4. * ROW_ITEM + ROW_DIVIDER;
+             let left = match corner {
+-                Corner::TopRight | Corner::BottomRight => origin.x - px(ROW_MENU_W),
++                Anchor::TopRight | Anchor::BottomRight => origin.x - px(ROW_MENU_W),
+                 _ => origin.x,
+             };
+             let x = left + px(ROW_MENU_W + 4.);
+             out.push(
+                 deferred(
+-                    anchored().anchor(Corner::TopLeft).position(point(x, px(top))).snap_to_window_with_margin(px(8.)).child(
++                    crate::ios::place(Anchor::TopLeft, point(x, px(top))).child(
+                         popover()
+                             .id("rm-download-menu")
+                             .occlude()
+-                            .w(px(130.))
++                            .w(crate::ios::menu_w(130.))
+                             .px(px(5.))
+                             .py(px(crate::ui::MENU_PAD_Y))
+                             .child(canvas(move |b, _, _| record.set(Some(b)), |_, _, _, _| {}).absolute().inset_0())
+--- a/src/sidebar_drag.rs
++++ b/src/sidebar_drag.rs
+@@ -239,7 +239,7 @@
+             self.folder_drag.icon_press = false;
+             self.folder_drag.icon_alt = false;
+             self.row_menu = None; self.create_menu = None;
+-            window.focus(&self.focus);
++            window.focus(&self.focus, cx);
+         }
+         self.project_folder_drop();
+         cx.notify();
+--- a/src/theme.rs
++++ b/src/theme.rs
+@@ -24,8 +24,8 @@
+         static GLASS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+         *GLASS.get_or_init(|| windows_build().is_some_and(|b| b >= 22621))
+     }
+-    #[cfg(target_os = "linux")] { false }
+-    #[cfg(not(any(target_os = "windows", target_os = "linux")))] { true }
++    #[cfg(any(target_os = "linux", target_os = "ios"))] { false }
++    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "ios")))] { true }
+ }
+ 
+ #[cfg(target_os = "windows")]
+@@ -265,7 +265,7 @@
+ /// Shadows stay black; on the dark page they need more weight to show.
+ fn shadow(a: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
+     let a = if dark() { (a * 3.).min(0.6) } else { a };
+-    BoxShadow { color: rgbaf(0, 0, 0, a), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(spread) }
++    BoxShadow { inset: false, color: rgbaf(0, 0, 0, a), offset: point(px(0.), px(y)), blur_radius: px(blur), spread_radius: px(spread) }
+ }
+ 
+ /// Menus and dropdowns: macOS 26 menu panel, soft and wide.
+--- a/src/transfer.rs
++++ b/src/transfer.rs
+@@ -66,7 +66,7 @@
+ /// scripted answer.
+ fn save_path(name: &str, cx: &mut App) -> impl std::future::Future<Output = Option<PathBuf>> + use<> {
+     let picked = crate::devtools::take_pick().and_then(|p| p.into_iter().next());
+-    let prompt = picked.is_none().then(|| cx.prompt_for_new_path(&downloads(), Some(name)));
++    let prompt = picked.is_none().then(|| crate::ios::prompt_for_new_path(cx, &downloads(), Some(name)));
+     async move {
+         match prompt {
+             Some(p) => p.await.ok().and_then(Result::ok).flatten(),
+@@ -79,8 +79,7 @@
+ /// scripted answer.
+ fn open_paths(cx: &mut App) -> impl std::future::Future<Output = Option<Vec<PathBuf>>> + use<> {
+     let picked = crate::devtools::take_pick();
+-    let extensions = Some(MARKDOWN_EXTS.iter().chain(&["xml"]).map(|e| SharedString::from(*e)).collect());
+-    let prompt = picked.is_none().then(|| cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(crate::settings::text("导入").into()), extensions }));
++    let prompt = picked.is_none().then(|| crate::ios::prompt_for_paths(cx, PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some(crate::settings::text("导入").into()) }));
+     async move {
+         match prompt {
+             Some(p) => p.await.ok().and_then(Result::ok).flatten(),
+@@ -364,16 +363,15 @@
+         self.import_menu = None;
+         cx.notify();
+         let picked = crate::devtools::take_pick();
+-        let (folders, extensions): (bool, &[&str]) = match kind {
++        let (folders, _extensions): (bool, &[&str]) = match kind {
+             ImportKind::Markdown => (false, &["md", "markdown", "mdown"]),
+             ImportKind::Folder => (true, &[]),
+             ImportKind::DocxXml => (false, &["xml"]),
+         };
+         let options = PathPromptOptions {
+             files: !folders, directories: folders, multiple: !folders, prompt: Some(crate::settings::text("导入").into()),
+-            extensions: (!folders).then(|| extensions.iter().map(|e| SharedString::from(*e)).collect()),
+         };
+-        let prompt = picked.is_none().then(|| cx.prompt_for_paths(options));
++        let prompt = picked.is_none().then(|| crate::ios::prompt_for_paths(cx, options));
+         cx.spawn_in(window, async move |this, cx| {
+             let paths = match prompt {
+                 Some(p) => p.await.ok().and_then(Result::ok).flatten(),
+@@ -396,7 +394,7 @@
+             let parent = parent.clone();
+             row(id, glyph, label).on_click(cx.listener(move |w, _, window, cx| w.open_import_kind(kind, parent.clone(), window, cx)))
+         };
+-        Some(deferred(anchored().anchor(Corner::TopRight).position(pos).snap_to_window_with_margin(px(8.)).child(
++        Some(deferred(anchored().anchor(Anchor::TopRight).position(pos).snap_to_window_with_margin(px(8.)).child(
+             crate::ui::popover().id("import-items").occlude().w(px(210.)).py(px(crate::ui::MENU_PAD_Y))
+                 .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.import_menu = None; cx.notify(); }))
+                 .child(item("import-md", "doc-md", crate::settings::tr("导入 Markdown 文件…", "Import Markdown Files…"), ImportKind::Markdown))
+--- a/src/trash.rs
++++ b/src/trash.rs
+@@ -107,6 +107,9 @@
+         }
+         // The list: 13pt tertiary headers over a hairline,
+         // 15pt titles, 13pt secondary cells.
++        // 手机宽度放不下四列：不显示「位置」，「剩余时间」收窄，标题才有地方。
++        let narrow = crate::ios::is_compact();
++        let time_w = if narrow { 96. } else { 168. };
+         let col = |w: Option<f32>, label: &'static str| {
+             div()
+                 .when_some(w, |d, w| d.w(px(w)).flex_none())
+@@ -126,8 +129,8 @@
+             .border_b_1()
+             .border_color(list_line())
+             .child(col(None, "标题"))
+-            .child(col(Some(168.), "位置"))
+-            .child(col(Some(168.), "剩余时间"))
++            .when(!narrow, |d| d.child(col(Some(168.), "位置")))
++            .child(col(Some(time_w), "剩余时间"))
+             .child(div().w(px(48.)).flex_none());
+         let mut list = div().id("trash-list").flex_1().min_h_0().overflow_y_scroll().px(px(24.)).pb(px(24.));
+         for (i, t) in self.trash.iter().enumerate() {
+@@ -148,7 +151,7 @@
+                 .on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
+                     cx.stop_propagation();
+                     let p = ev.position();
+-                    w.trash_menu = Some((id.clone(), point(p.x + px(12.), p.y + px(14.)), Corner::TopRight));
++                    w.trash_menu = Some((id.clone(), point(p.x + px(12.), p.y + px(14.)), Anchor::TopRight));
+                     cx.notify();
+                 }));
+             list = list.child(
+@@ -163,7 +166,7 @@
+                     .on_mouse_down(
+                         MouseButton::Right,
+                         cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
+-                            w.trash_menu = Some((id2.clone(), ev.position, Corner::TopLeft));
++                            w.trash_menu = Some((id2.clone(), ev.position, Anchor::TopLeft));
+                             cx.notify();
+                         }),
+                     )
+@@ -180,7 +183,7 @@
+                             })
+                             .child(div().min_w_0().text_size(px(15.)).line_height(px(22.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(title))),
+                     )
+-                    .child(
++                    .when(!narrow, |d| d.child(
+                         div()
+                             .w(px(168.))
+                             .flex_none()
+@@ -190,8 +193,8 @@
+                             .gap(px(4.))
+                             .child(icon("library", 16., Theme::icon()))
+                             .child(div().min_w_0().text_size(px(13.)).text_color(Theme::text_caption()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(self.trash_location(t)))),
+-                    )
+-                    .child(div().w(px(168.)).flex_none().pl(px(20.)).text_size(px(13.)).text_color(Theme::text_caption()).child(remaining(t.deleted)))
++                    ))
++                    .child(div().w(px(time_w)).flex_none().pl(px(20.)).text_size(px(13.)).text_color(Theme::text_caption()).child(remaining(t.deleted)))
+                     .child(div().w(px(48.)).flex_none().flex().justify_end().pr(px(12.)).child(more)),
+             );
+         }
+@@ -215,7 +218,7 @@
+             .occlude()
+             // At least TRASH_MENU_W, wider when a label needs it (English
+             // "Delete permanently" ran into the edge).
+-            .min_w(px(TRASH_MENU_W))
++            .min_w(crate::ios::menu_w(TRASH_MENU_W))
+             .py(px(crate::ui::MENU_PAD_Y))
+             .on_mouse_down_out(cx.listener(|w, _, _, cx| {
+                 w.trash_menu = None;
+@@ -232,7 +235,7 @@
+                 cx.notify();
+             })));
+         Some(
+-            deferred(anchored().anchor(corner).position(pos).snap_to_window_with_margin(px(8.)).child(menu))
++            deferred(crate::ios::place(corner, pos).child(menu))
+                 .with_priority(2)
+                 .into_any_element(),
+         )
+@@ -410,6 +413,8 @@
+             deferred(
+                 div()
+                     .id("confirm-mask")
++                    .pt(crate::ios::insets().top)
++                    .pb(crate::ios::insets().bottom)
+                     .absolute()
+                     .inset_0()
+                     .flex()
+--- a/src/tree.rs
++++ b/src/tree.rs
+@@ -177,16 +177,15 @@
+             }
+             cx.notify();
+         })];
+-        window.focus(&search.focus_handle(cx));
++        // 手机上不抢着弹键盘：点了搜索框再弹。
++        if !crate::ios::is_compact() { window.focus(&search.focus_handle(cx), cx); }
+         self.move_dlg = Some(MoveDialog { ids, target: None, expanded: HashSet::new(), search, scroll: ScrollHandle::new(), _subs: subs });
+         cx.notify();
+     }
+ 
+     fn close_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+         self.move_dlg = None;
+-        if let Some(ed) = &self.editor {
+-            ed.read(cx).focus(window);
+-        }
++        if self.editor.is_some() { window.focus(&self.focus, cx); }
+         cx.notify();
+     }
+ 
+@@ -247,13 +246,15 @@
+             .child(div().flex_1().min_w_0().ml(px(6.)).flex().child(dlg.search.clone()));
+         // The location column reads like a sidebar: a grey surface and
+         // a quiet pill for the selected location.
++        // 手机：位置一栏在上，文件夹树在下。
++        let compact = crate::ios::is_compact();
+         let left = div()
+-            .w(px(240.))
++            .when(compact, |d| d.w_full().pb(px(8.)).rounded_t(px(9.)))
++            .when(!compact, |d| d.w(px(240.)).rounded_l(px(9.)))
+             .flex_none()
+             .flex()
+             .flex_col()
+             .bg(Theme::bg_overlay())
+-            .rounded_l(px(9.))
+             .child(search)
+             .child(
+                 div()
+@@ -288,7 +289,7 @@
+             Some(em) => div().size(px(16.)).flex_none().flex().items_center().justify_center().text_size(px(14.)).child(em.clone()).into_any_element(),
+             None => icon(if e.meta.markdown { "doc-md" } else { "doc" }, 16., Theme::icon()).into_any_element(),
+         };
+-        let mut list = div().id("move-tree").flex_1().min_w_0().px(px(8.)).py(px(12.)).overflow_y_scroll().track_scroll(&dlg.scroll);
++        let mut list = div().id("move-tree").flex_1().min_w_0().min_h_0().px(px(8.)).py(px(12.)).overflow_y_scroll().track_scroll(&dlg.scroll);
+         if q.is_empty() {
+             list = list.child(
+                 row("move-root".into(), dlg.target == Some(None))
+@@ -385,13 +386,14 @@
+             .child(
+                 div().px(px(24.)).mt(px(16.)).mb(px(24.)).child(
+                     div()
+-                        .h(px(512.))
++                        .h(px(if compact { 420. } else { 512. }))
+                         .flex()
++                        .when(compact, |d| d.flex_col())
+                         .border_1()
+                         .border_color(border)
+                         .rounded(px(10.))
+                         .child(left)
+-                        .child(div().w(px(1.)).h_full().flex_none().bg(border))
++                        .child(div().flex_none().bg(border).when(compact, |d| d.h(px(1.)).w_full()).when(!compact, |d| d.w(px(1.)).h_full()))
+                         .child(list),
+                 ),
+             )
+@@ -418,6 +420,8 @@
+                     .id("move-mask")
+                     .absolute()
+                     .inset_0()
++                    .pt(crate::ios::insets().top)
++                    .pb(crate::ios::insets().bottom)
+                     .flex()
+                     .items_center()
+                     .justify_center()
+--- a/src/ui.rs
++++ b/src/ui.rs
+@@ -127,7 +127,7 @@
+ 
+ /// The modal dialog: white, radius 16, deep soft drop.
+ pub fn dialog(id: &'static str) -> Stateful<Div> {
+-    div().id(id).occlude().rounded(px(16.)).bg(crate::theme::raised(Theme::bg_body())).shadow(theme::shadow_dialog()).font_family(theme::UI_FONT).text_color(Theme::text())
++    div().id(id).occlude().max_w(relative(0.94)).rounded(px(16.)).bg(crate::theme::raised(Theme::bg_body())).shadow(theme::shadow_dialog()).font_family(theme::UI_FONT).text_color(Theme::text())
+ }
+ 
+ /// The primary button: the accent, a white 13pt semibold label, 30 tall, radius 9.
+@@ -135,19 +135,19 @@
+     div()
+         .id(id)
+         .flex_none()
+-        .h(px(30.))
+-        .px(px(16.))
++        .h(px(42.))
++        .px(px(22.))
+         .flex()
+         .items_center()
+         .justify_center()
+-        .rounded(px(9.))
++        .rounded(px(12.))
+         .cursor_pointer()
+         .bg(Theme::primary())
+         .shadow(theme::shadow_button())
+         .hover(|s| s.bg(theme::c(craft::B600)))
+         .active(|s| s.bg(theme::c(craft::B700)))
+-        .text_size(px(13.))
+-        .line_height(px(20.))
++        .text_size(px(16.))
++        .line_height(px(22.))
+         .font_weight(FontWeight::SEMIBOLD)
+         .text_color(gpui::white())
+         .child(crate::settings::label(label))
+@@ -158,12 +158,12 @@
+     div()
+         .id(id)
+         .flex_none()
+-        .h(px(30.))
+-        .px(px(16.))
++        .h(px(42.))
++        .px(px(22.))
+         .flex()
+         .items_center()
+         .justify_center()
+-        .rounded(px(9.))
++        .rounded(px(12.))
+         .cursor_pointer()
+         .bg(crate::theme::raised(Theme::bg_body()))
+         .border_1()
+@@ -171,8 +171,8 @@
+         .shadow(theme::shadow_button())
+         .hover(|s| s.bg(theme::c(craft::N100)))
+         .active(|s| s.bg(theme::c(craft::N200)))
+-        .text_size(px(13.))
+-        .line_height(px(20.))
++        .text_size(px(16.))
++        .line_height(px(22.))
+         .text_color(Theme::text())
+         .child(crate::settings::label(label))
+ }
+@@ -201,7 +201,8 @@
+ 
+ /// A menu row: 32 tall, 13pt label, 16pt glyph; hovering lays the quiet
+ /// fill the editor's menus use, and text and glyph keep their colours.
+-pub const MENU_ROW_H: f32 = 32.;
++// 触屏：44pt 的行。
++pub const MENU_ROW_H: f32 = 44.;
+ pub const MENU_PAD_Y: f32 = 6.;
+ /// How far a menu row sits in from the menu's sides.
+ pub const MENU_INSET: f32 = 5.;
+@@ -213,14 +214,15 @@
+         .flex_none()
+         .h(px(MENU_ROW_H))
+         .mx(px(MENU_INSET))
+-        .px(px(8.))
++        .px(px(12.))
+         .flex()
+         .items_center()
+-        .gap(px(8.))
+-        .rounded(px(ROW_RADIUS))
++        .gap(px(12.))
++        .rounded(px(10.))
+         .cursor_pointer()
+-        .text_size(px(13.))
+-        .line_height(px(20.))
++        .text_size(px(16.))
++        .line_height(px(22.))
++        .active(|s| s.bg(Theme::fill_pressed()))
+         .text_color(Theme::text())
+         .hover(|s| s.bg(Theme::fill_hover()))
+ }
+@@ -675,7 +677,7 @@
+         let font_size = style.font_size.to_pixels(window.rem_size());
+         let line_height = style.line_height.to_pixels(font_size.into(), window.rem_size());
+         let runs = if self.text.is_empty() { vec![] } else { self.runs(&style) };
+-        let ellipsis = style.text_overflow.as_ref().map(|TextOverflow::Truncate(s)| s.clone());
++        let ellipsis = style.text_overflow.as_ref().and_then(|overflow| match overflow { TextOverflow::Truncate(s) => Some(s.clone()), _ => None });
+         let full = Rc::new(RefCell::new(None));
+         let (text, r, f, clip) = (self.text.clone(), runs.clone(), full.clone(), ellipsis.is_some());
+         let id = window.request_measured_layout(Style::default(), move |known, avail, window, _| {
+@@ -725,7 +727,7 @@
+         cx: &mut App,
+     ) {
+         if let Some(line) = line {
+-            let _ = line.paint(bounds.origin, layout.line_height, window, cx);
++            let _ = line.paint(bounds.origin, layout.line_height, TextAlign::Left, None, window, cx);
+         }
+     }
+ }
+@@ -890,7 +892,7 @@
+ 
+ pub fn header_icon(id: &'static str, name: &'static str) -> Stateful<Div> {
+     div().id(id).no_drag().size(px(crate::app::HEADER_ACTIONS_H)).rounded(px(8.)).flex_none().flex().items_center().justify_center().cursor_pointer()
+-        .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())).child(icon(name, 18., Theme::icon()))
++        .hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed())).child(icon(name, 21., Theme::icon()))
+ }
+ 
+ pub(crate) fn checkbox(on: bool) -> Div {
+--- a/src/update.rs
++++ b/src/update.rs
+@@ -65,7 +65,7 @@
+     cx.spawn(async |cx| {
+         cx.background_executor().timer(Duration::from_secs(10)).await;
+         loop {
+-            if cx.update(|cx| if crate::settings::prefs().auto_update { check(false, cx) }).is_err() { break }
++            cx.update(|cx| if crate::settings::prefs().auto_update { check(false, cx) });
+             cx.background_executor().timer(Duration::from_secs(12 * 3600)).await;
+         }
+     }).detach();
+@@ -134,7 +134,7 @@
+     // Redraw the progress (read off the partial file) while the download runs.
+     cx.spawn(async |cx| loop {
+         cx.background_executor().timer(Duration::from_millis(300)).await;
+-        if !cx.update(|cx| if matches!(state(cx), State::Downloading(_)) { cx.refresh_windows(); true } else { false }).unwrap_or(false) { break }
++        if !cx.update(|cx| if matches!(state(cx), State::Downloading(_)) { cx.refresh_windows(); true } else { false }) { break }
+     }).detach();
+     let task = cx.background_executor().spawn({ let m = m.clone(); async move { fetch_package(&m) } });
+     cx.spawn(async move |cx| {
