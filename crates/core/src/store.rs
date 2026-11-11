@@ -42,6 +42,9 @@ pub struct Meta {
     /// 收藏时间 (0: not starred).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub starred: u64,
+    /// A folder's own icon (an emoji). A document keeps its icon in its file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_icon: Option<String>,
     /// 阅读模式, remembered per document like the page width.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reading: bool,
@@ -76,7 +79,7 @@ impl Default for Meta {
             folder: None, root_order: None, created: 0, modified: 0, pinned: false, opened: 0,
             width: PageWidth::default(), catalogue_closed: true,
             parent: None, order: 0, starred: 0, reading: false,
-            info: InfoRow::default(), refs_hidden: false,
+            info: InfoRow::default(), refs_hidden: false, folder_icon: None,
             markdown: false, path: None, name: None,
         }
     }
@@ -561,7 +564,7 @@ impl Store {
         folders.sort_by(|a, b| a.0.cmp(b.0));
         for (id, meta) in folders {
             let title = meta.folder.clone().unwrap_or_default();
-            out.push(Entry { id: id.clone(), meta: meta.clone(), title, icon: None, body: Default::default(), reminders: vec![], links: vec![] });
+            out.push(Entry { id: id.clone(), meta: meta.clone(), title, icon: meta.folder_icon.clone(), body: Default::default(), reminders: vec![], links: vec![] });
         }
         let seen: std::collections::HashSet<&str> = out.iter().map(|e| e.id.as_str()).collect();
         self.parsed.retain(|id, _| seen.contains(id.as_str()));
@@ -1003,6 +1006,15 @@ impl Store {
         }
         self.save_index()?;
         Ok(t)
+    }
+
+    /// A folder's icon; `None` puts the plain folder back.
+    pub fn set_folder_icon(&mut self, id: &str, icon: Option<String>) -> Result<()> {
+        let _lock = self.begin_write()?;
+        if let Some(m) = self.index.get_mut(id).filter(|m| m.folder.is_some()) {
+            m.folder_icon = icon;
+        }
+        self.save_index()
     }
 
     pub fn set_pinned(&mut self, id: &str, pinned: bool) -> Result<()> {

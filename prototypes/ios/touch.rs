@@ -39,7 +39,7 @@ impl Editor {
         let view = self.list.viewport_bounds();
         // 选区在同一行时居中，跨行时对着选区开头那一行的中间。
         let x = if sp.y == ep.y { (sp.x + ep.x) / 2. } else { (sp.x + view.right() - px(20.)) / 2. };
-        let above = sp.y - px(H + 10.) >= view.top();
+        let above = sp.y - px(H + 10.) >= view.top() + px(crate::ios::chrome_top());
         let (pos, anchor) = if above { (point(x, sp.y - px(8.)), Anchor::BottomCenter) } else { (point(x, ep.y + elh + px(8.)), Anchor::TopCenter) };
         let item = |id: &'static str, label: &'static str, action: fn() -> Box<dyn Action>, keep: bool| {
             div().id(id).h(px(H - 8.)).px(px(11.)).flex().items_center().rounded(px(7.)).text_size(px(14.)).whitespace_nowrap()

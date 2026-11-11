@@ -26,6 +26,10 @@ unicode-segmentation = "1.13.3"
 uuid = { version = "1.28.0", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 raw-window-handle = "0.6"
+objc2 = "0.6.5"
+block2 = "0.6.2"
+objc2-core-foundation = "0.3.2"
+resvg = { version = "0.46", default-features = false }
 rustc-hash = "2.1"
 katex-rs = { version = "0.3", default-features = false }
 regex = "1"
