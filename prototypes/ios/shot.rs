@@ -1,10 +1,11 @@
-//! 退场。GPUI 只画当前的状态：换了页，下一帧旧的那页就没了。这里趁屏幕上还是旧的那一帧，
+//! 退场。GPUI 只画当前的状态：换了页、收了面板，下一帧旧的就没了。这里趁屏幕上还是旧的那一帧，
 //! 用原生快照（`snapshotViewAfterScreenUpdates:NO`）把它留下来，盖在 GPUI 画面之上、玻璃之下，
 //! 交给 Core Animation 送走；GPUI 那边照常画新的状态（返回时下面那一页带视差地回来）。
 //!
 //! 快照只拍 Metal 视图，所以玻璃和系统菜单的按钮不放在它里面，而是放在它旁边的一层（`overlay`）：
 //! 否则快照里会带着一份标签栏，滑走时从真的那份底下透出来。
 use std::cell::{Cell, RefCell};
+use std::panic::Location;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -21,6 +22,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub const SLIDE: Duration = Duration::from_millis(380);
 /// 下面那一页从左边多远回来（屏宽的比例），和系统导航的视差差不多。
 pub const PARALLAX: f32 = 0.3;
+/// 收起的面板滑出屏幕下沿的时长。
+const SINK: f64 = 0.3;
 /// 和 `ease_out_cubic` 同一条曲线的贝塞尔控制点。
 const OUT_CUBIC: [f32; 4] = [0.33, 1., 0.68, 1.];
 pub fn ease_out_cubic(t: f32) -> f32 { 1. - (1. - t).powi(3) }
@@ -228,6 +231,83 @@ pub fn fade_page() {
             let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("fade")];
             let _: () = msg_send![layer, setOpacity: 0f32];
         });
+    }
+}
+
+// ---- 底部面板
+
+#[derive(Clone)]
+struct Seen { key: &'static Location<'static>, bounds: Bounds<Pixels> }
+thread_local! { static SHEETS: RefCell<(Vec<Seen>, Vec<Seen>)> = const { RefCell::new((Vec::new(), Vec::new())) }; }
+thread_local! { static SCRIM: Cell<(Option<f32>, Option<f32>)> = const { Cell::new((None, None)) }; }
+
+/// 放在底部面板里的记号：每帧（prepaint）报一次面板在哪。`key` 是升起它的那一处代码。
+pub fn sheet_marker(key: &'static Location<'static>) -> impl IntoElement {
+    canvas(move |bounds, _, _| SHEETS.with(|s| s.borrow_mut().1.push(Seen { key, bounds })), |_, _, _, _| {}).absolute().inset_0()
+}
+/// 放在遮罩里的记号：这一帧有一层这么暗的遮罩。
+pub fn scrim_marker(alpha: f32) -> impl IntoElement {
+    canvas(move |_, _, _| SCRIM.with(|s| s.set((s.get().0, Some(alpha)))), |_, _, _, _| {}).absolute().inset_0()
+}
+/// 每帧 paint 时调用（这时所有面板都已 prepaint，屏幕上还是上一帧）：上一帧在、这一帧不在的面板
+/// 拍下来往下滑出屏幕；遮罩没了就补一层原生的，淡掉。整页正在换的时候不管（旧页的快照里已经有它们）。
+pub fn settle() -> impl IntoElement {
+    canvas(|_, _, _| {}, |_, _, _, _| {
+        let gone: Vec<Seen> = SHEETS.with(|s| {
+            let mut s = s.borrow_mut();
+            let (last, now) = &mut *s;
+            let gone = last.iter().filter(|a| !now.iter().any(|b| b.key == a.key)).cloned().collect();
+            *last = std::mem::take(now);
+            gone
+        });
+        let scrim = SCRIM.with(|c| { let (last, now) = c.get(); c.set((now, None)); last.filter(|_| now.is_none()) });
+        if !super::is_compact() || sliding() { return; }
+        // 后画的在上面：先插的会被后插的垫在下面，所以从上往下插，遮罩最后。
+        for g in gone.iter().rev() { sink(g.bounds); }
+        if let Some(alpha) = scrim { fade_scrim(alpha); }
+    }).absolute().size_0()
+}
+
+/// 面板的圆角：剪快照用。外壳的菜单是 12，编辑器的是 6，按大的剪，角上不会露出底下的东西。
+const SHEET_RADIUS: f64 = 12.;
+
+fn sink(b: Bounds<Pixels>) {
+    let (Some(metal), Some(sup)) = (metal(), superview()) else { return; };
+    let (x, y, w, h) = (f64::from(b.origin.x), f64::from(b.origin.y), f64::from(b.size.width), f64::from(b.size.height));
+    if w < 1. || h < 1. { return; }
+    unsafe {
+        let snap: Option<Retained<AnyObject>> = msg_send![metal, snapshotViewAfterScreenUpdates: false];
+        let Some(snap) = snap else { return; };
+        let full: CGRect = msg_send![metal, frame];
+        let _: () = msg_send![&*snap, setFrame: CGRect::new(CGPoint::new(-x, -y), full.size)];
+        let clip: Retained<AnyObject> = msg_send![AnyClass::get(c"UIView").unwrap(), new];
+        let _: () = msg_send![&*clip, setUserInteractionEnabled: false];
+        let _: () = msg_send![&*clip, setClipsToBounds: true];
+        let _: () = msg_send![&*clip, setFrame: CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))];
+        let layer: *mut AnyObject = msg_send![&*clip, layer];
+        let _: () = msg_send![layer, setCornerRadius: SHEET_RADIUS];
+        let _: () = msg_send![&*clip, addSubview: &*snap];
+        let _: () = msg_send![sup, insertSubview: &*clip, aboveSubview: metal];
+        let drop = full.size.height - y;
+        let done = RcBlock::new(move || { let _: () = msg_send![&*clip, removeFromSuperview]; });
+        transaction(&done, || animate(layer, "transform.translation.y", 0., drop, SINK, OUT_CUBIC));
+    }
+}
+
+fn fade_scrim(alpha: f32) {
+    let (Some(metal), Some(sup)) = (metal(), superview()) else { return; };
+    unsafe {
+        let view: Retained<AnyObject> = msg_send![AnyClass::get(c"UIView").unwrap(), new];
+        let _: () = msg_send![&*view, setUserInteractionEnabled: false];
+        let full: CGRect = msg_send![metal, frame];
+        let _: () = msg_send![&*view, setFrame: full];
+        let black: *mut AnyObject = msg_send![AnyClass::get(c"UIColor").unwrap(), blackColor];
+        let _: () = msg_send![&*view, setBackgroundColor: black];
+        let _: () = msg_send![&*view, setAlpha: 0f64];
+        let _: () = msg_send![sup, insertSubview: &*view, aboveSubview: metal];
+        let layer: *mut AnyObject = msg_send![&*view, layer];
+        let done = RcBlock::new(move || { let _: () = msg_send![&*view, removeFromSuperview]; });
+        transaction(&done, || animate(layer, "opacity", f64::from(alpha), 0., SINK, OUT_CUBIC));
     }
 }
 

@@ -349,16 +349,17 @@
          div()
              .id("workspace")
              .key_context("Workspace")
-@@ -1405,6 +1469,8 @@
+@@ -1405,6 +1469,9 @@
              // whichever window macOS considers active.
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
              .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
 +            .on_back_gesture(cx.listener(|w, ev, window, cx| crate::ios::back(w, ev, window, cx)))
 +            .child(crate::ios::long_press_layer())
++            .child(crate::ios::shot::settle())
              .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
                  crate::quick_note::persist(cx);
                  if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
-@@ -1421,7 +1487,7 @@
+@@ -1421,7 +1488,7 @@
              .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
              .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
              .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
@@ -367,7 +368,7 @@
                  cx.notify();
              }))
              .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
-@@ -1458,7 +1524,7 @@
+@@ -1458,7 +1525,7 @@
              }))
              // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
              .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
@@ -376,7 +377,7 @@
                  if ev.keystroke.key == "escape" && w.has_home_drag() {
                      w.cancel_home_drag(cx); cx.stop_propagation(); return;
                  }
-@@ -1490,10 +1556,14 @@
+@@ -1490,10 +1557,14 @@
                  if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
                  cx.stop_propagation();
              }))
@@ -1308,12 +1309,13 @@
      div()
          .absolute()
          .top_0()
-@@ -59,6 +59,12 @@
+@@ -59,6 +59,13 @@
          .into_any_element()
  }
  
 +/// 手机上的底部面板：贴底居中，出现时从下面升上来。
 +/// `key` 区分同时开着的几块面板（主面板和盖在它上面的子面板）。
++#[track_caller]
 +pub(super) fn rise_at(key: &'static str, rel: Point<Pixels>, el: impl IntoElement) -> AnyElement {
 +    at(rel, Anchor::BottomCenter, crate::ios::rise(key, el))
 +}
@@ -1321,7 +1323,7 @@
  pub fn kind_icon(k: &BlockKind) -> &'static str {
      match k {
          BlockKind::Text => "type",
-@@ -123,19 +129,20 @@
+@@ -123,19 +130,20 @@
          .flex_none()
          .h(px(MENU_ROW_H))
          .mx(px(MENU_INSET))
@@ -1348,7 +1350,7 @@
          .when_some(right, |d, r| {
              if r == "›" {
                  d.child(icon("chevron-right", 14., Theme::icon()))
-@@ -150,16 +157,16 @@
+@@ -150,16 +158,16 @@
  fn swatch(id: impl Into<ElementId>, sel: bool, hairline: bool, inner: Div) -> Stateful<Div> {
      div()
          .id(id)
@@ -1369,7 +1371,7 @@
  }
  
  /// White square crossed by a grey diagonal: "no color".
-@@ -168,7 +175,7 @@
+@@ -168,7 +176,7 @@
  }
  
  fn color_title(t: &'static str) -> Div {
@@ -1378,7 +1380,7 @@
  }
  
  /// 在下方添加 ›: hovering opens the insert panel next to the handle menu.
-@@ -184,9 +191,34 @@
+@@ -184,9 +192,34 @@
                  cx.notify();
              }
          }))
@@ -1414,7 +1416,7 @@
  /// Split the basic grid into rows of 6, a plain 6-column grid, so items
  /// just flow with no forced breaks.
  fn grid_rows<T>(cells: Vec<(menus::SlashKind, T)>) -> Vec<Vec<T>> {
-@@ -308,6 +340,7 @@
+@@ -308,6 +341,7 @@
          self.callout_zone.borrow_mut().clear();
          let mut out = vec![];
          if self.read_only {
@@ -1422,7 +1424,7 @@
              return out;
          }
          let menu_el = match self.menu.clone() {
-@@ -338,6 +371,8 @@
+@@ -338,6 +372,8 @@
          out.extend(self.button_layers(window, cx));
          out.extend(self.reminder_layers(window, cx));
          out.extend(self.countdown_overlays(window, cx));
@@ -1431,7 +1433,7 @@
          out
      }
  
-@@ -358,6 +393,8 @@
+@@ -358,6 +394,8 @@
      /// bounds) so it never lags behind when the block changes height.
      /// `first_line` is the height of the block's first line box.
      pub(super) fn handle(&self, id: BlockId, first_line: f32, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1440,7 +1442,7 @@
          let kind = self.core.kind_of(id)?.clone();
          let add = self.is_empty_line(id);
          let (w, left) = match (add, &kind) {
-@@ -408,7 +445,7 @@
+@@ -408,7 +446,7 @@
                      }
                  }),
              );
@@ -1449,7 +1451,7 @@
      }
  
      // ---- slash / add menu
-@@ -439,12 +476,24 @@
+@@ -439,12 +477,24 @@
              }
              _ => return None,
          };
@@ -1476,7 +1478,7 @@
              .overflow_y_scroll()
              .track_scroll(&self.slash_scroll)
              .py(px(MENU_PAD_Y))
-@@ -553,12 +602,23 @@
+@@ -553,12 +603,23 @@
                      .rounded(px(crate::ui::ROW_RADIUS))
                      .cursor_pointer()
                      .when(n == selected, |d| d.bg(Theme::fill_hover()))
@@ -1503,7 +1505,7 @@
              );
          }
          if let Some(g) = grid.take() {
-@@ -572,18 +632,18 @@
+@@ -572,18 +633,18 @@
          }
          // An always-visible 8px thumb, rgba(31,35,41,.3), 3px in
          // from the right border and 2px from the top/bottom.
@@ -1529,7 +1531,7 @@
          let thumb = (content_h > view_h).then(|| {
              let track = view_h - 4.;
              let h = (track * view_h / content_h).max(20.);
-@@ -595,12 +655,13 @@
+@@ -595,12 +656,13 @@
              .id("slash-menu")
              .occlude()
              .relative()
@@ -1546,7 +1548,7 @@
          let (kind, row_top) = picker_at?;
          // The picker hangs off the list's right edge (over the scrollbar
          // gutter), centred on its row and kept inside the window.
-@@ -609,11 +670,11 @@
+@@ -609,11 +671,11 @@
          } else {
              (self.size_picker(kind, cx), picker_height(kind))
          };
@@ -1560,7 +1562,7 @@
          Some(())
      }
  
-@@ -625,7 +686,10 @@
+@@ -625,7 +687,10 @@
          let (title, rows, cols, def) = if table { (crate::settings::text("插入支持富文本的表格"), 9, 9, (0, 0)) } else { (crate::settings::text("选择栏数"), 1, 5, (1, 1)) };
          let (r, c) = self.size_pick;
          let disabled = r <= def.0 && c <= def.1;
@@ -1572,7 +1574,7 @@
          let mut grid = div()
              .id("size-grid")
              .mx(px(12.))
-@@ -670,6 +734,7 @@
+@@ -670,6 +735,7 @@
                          .border_2()
                          .border_color(border)
                          .when(ri <= def.0 && cj <= def.1, |d| d.cursor(CursorStyle::OperationNotAllowed))
@@ -1580,7 +1582,7 @@
                          .on_mouse_move(cx.listener(move |e, _: &MouseMoveEvent, _, cx| {
                              if e.size_pick != (ri, cj) {
                                  e.size_pick = (ri, cj);
-@@ -684,7 +749,7 @@
+@@ -684,7 +750,7 @@
          div()
              .id("size-picker")
              .occlude()
@@ -1589,7 +1591,7 @@
              .bg(crate::theme::raised(Theme::bg_body()))
              .border_1()
              .border_color(Theme::line_border())
-@@ -699,7 +764,7 @@
+@@ -699,7 +765,7 @@
                      .h(px(20.))
                      .flex()
                      .justify_between()
@@ -1598,7 +1600,7 @@
                      .line_height(px(20.))
                      .text_color(Theme::text_caption())
                      .child(title)
-@@ -708,6 +773,12 @@
+@@ -708,6 +774,24 @@
              .child(grid)
      }
  
@@ -1608,10 +1610,22 @@
 +        at(self.rel(point(r.left(), r.bottom() + px(4.))), Anchor::TopLeft, el)
 +    }
 +
++    /// 手机：子面板是叠在块菜单上面的另一张卡片。块菜单留在下面，点它只收起子面板、回到这一层；
++    /// 子面板收起时自己滑走（`ios::shot` 按升起它的这一处认出它）。
++    fn stack_sub(&self, r: Bounds<Pixels>, main: impl IntoElement, sub: AnyElement, cx: &mut Context<Self>) -> AnyElement {
++        let back = cx.listener(|e: &mut Editor, _: &MouseDownEvent, _, cx| {
++            cx.stop_propagation();
++            if let Some(Menu::Block { sub, .. }) = &mut e.menu { *sub = None; cx.notify(); }
++        });
++        let main = div().relative().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(main).child(div().absolute().inset_0().occlude().on_mouse_down(MouseButton::Left, back));
++        let sub = div().relative().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(sub);
++        div().child(self.place_handle_menu(r, main)).child(rise_at("sheet-block-sub", self.rel(crate::ios::sheet_point()), sub)).into_any_element()
++    }
++
      // ---- block menu
  
      fn block_menu(&self, block: BlockId, sub: Option<BlockSub>, cx: &mut Context<Self>) -> Option<AnyElement> {
-@@ -734,7 +805,14 @@
+@@ -734,7 +818,14 @@
                  }
              })
          };
@@ -1627,7 +1641,7 @@
          let mut turn = shape.turn_items();
          if self.markdown { turn.retain(|t| !matches!((t.kind)(), BlockKind::Callout { .. })); }
          if !turn.is_empty() {
-@@ -745,7 +823,10 @@
+@@ -745,7 +836,10 @@
                  }
                  _ => menus::same_kind(&kind, k),
              };
@@ -1639,7 +1653,7 @@
              for (i, it) in turn.iter().enumerate() {
                  let k = (it.kind)();
                  let active = current(&k);
-@@ -753,16 +834,16 @@
+@@ -753,16 +847,16 @@
                  grid = grid.child(
                      div()
                          .id(("turn", i))
@@ -1659,7 +1673,7 @@
                          .on_mouse_down(MouseButton::Left, act(BlockAct::Turn(k))),
                  );
              }
-@@ -774,11 +855,11 @@
+@@ -774,11 +868,11 @@
          let (indent_icon, indent_label) = if shape == menus::MenuShape::Text && !self.markdown { ("indent-align", crate::settings::text("缩进和对齐")) } else { ("indent-increase", crate::settings::text("缩进")) };
          m = m.child(
              row("bm-indent", indent_icon, indent_label, Some("›"), sub == Some(BlockSub::Indent))
@@ -1673,7 +1687,7 @@
          }
          let adding = matches!(sub, Some(BlockSub::Add(_)));
          m = m
-@@ -817,14 +898,10 @@
+@@ -817,14 +911,10 @@
                      }
                  };
                  Some(
@@ -1691,7 +1705,7 @@
                          .when(shape == menus::MenuShape::Text && !self.markdown, |d| {
                              d.child(align_row("al-l", "align-left", crate::settings::text("左对齐"), crate::shortcuts::hint("editor::AlignLeft", "⌘ + Shift + L"), Align::Left))
                                  .child(align_row("al-c", "align-center", crate::settings::text("居中对齐"), crate::shortcuts::hint("editor::AlignCenter", "⌘ + Shift + E"), Align::Center))
-@@ -842,16 +919,21 @@
+@@ -842,16 +932,22 @@
                  } else {
                      self.color_panel(Some(block), cx).into_any_element()
                  };
@@ -1703,7 +1717,8 @@
              }
              _ => None,
          };
-+        // 手机：子面板换下主面板（带一行返回），添加面板自己就是底部面板。
++        // 手机：子面板叠在主面板上面（带一行返回），添加面板自己就是底部面板。
++        if sheet.is_some() && let Some(sub_el) = sub_el { return Some(self.stack_sub(r, m, sub_el, cx)); }
 +        let swap = sheet.is_some() && sub.is_some();
          let el = div()
              .relative()
@@ -1716,7 +1731,7 @@
      }
  
      /// Top of the 在下方添加 row inside the handle menu (mirrors its layout).
-@@ -914,10 +996,12 @@
+@@ -914,10 +1010,12 @@
              ));
          }
          let title = color_title;
@@ -1731,7 +1746,7 @@
              .pt(px(4.))
              .px(px(10.))
              .pb(px(12.))
-@@ -930,14 +1014,14 @@
+@@ -930,14 +1028,14 @@
                  div()
                      .id("color-reset")
                      .mt(px(12.))
@@ -1749,7 +1764,7 @@
                      .cursor_pointer()
                      .hover(|s| s.bg(Theme::fill_hover()))
                      .child(crate::settings::text("恢复默认"))
-@@ -1016,7 +1100,7 @@
+@@ -1016,7 +1114,7 @@
              .child(div().h(px(40.)).px(px(10.)).flex().items_center().child(palette))
              .child(self.zone_probe())
              .children(drop);
@@ -1758,7 +1773,7 @@
      }
  
      /// Callout panel: 字体颜色 8 / 边框颜色 8 / 填充颜色 16, 随机, 恢复默认.
-@@ -1162,7 +1246,7 @@
+@@ -1162,7 +1260,7 @@
          let el = panel()
              .id("equation-editor")
              .occlude()
@@ -1767,7 +1782,7 @@
              .pt(px(16.))
              .px(px(16.))
              .pb(px(8.))
-@@ -1187,9 +1271,11 @@
+@@ -1187,9 +1285,11 @@
                      .text_size(px(12.))
                      .line_height(px(20.))
                      .text_color(Theme::text_placeholder())
@@ -1781,7 +1796,7 @@
      }
  
      // ---- code language picker
-@@ -1218,7 +1304,7 @@
+@@ -1218,7 +1318,7 @@
                      .justify_between()
                      .rounded(px(crate::ui::ROW_RADIUS))
                      .cursor_pointer()
@@ -1790,7 +1805,7 @@
                      .when(i == selected, |d| d.bg(Theme::fill_hover()))
                      .hover(|s| s.bg(Theme::fill_hover()))
                      .child(l)
-@@ -1238,7 +1324,7 @@
+@@ -1238,7 +1338,7 @@
          let el = menu()
              .id("lang-menu")
              .occlude()
@@ -1799,7 +1814,7 @@
              .py(px(MENU_PAD_Y))
              .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
              .child(
-@@ -1260,12 +1346,13 @@
+@@ -1260,12 +1360,13 @@
          // Under the language button, which sits ~267px left of the block's right
          // edge; above it when the list wouldn't fit below.
          let h = px(2. * MENU_PAD_Y + 38. + (langs.len().max(1) as f32 * MENU_ROW_H).min(288.) + 2.);
@@ -1816,7 +1831,7 @@
          };
          Some(at(self.rel(pos), corner, el))
      }
-@@ -1279,7 +1366,7 @@
+@@ -1279,7 +1380,7 @@
              _ => return None,
          };
          let sel = self.core.sel;
@@ -1825,7 +1840,7 @@
              return None;
          }
          if !self.focus.is_focused(window) {
-@@ -1297,32 +1384,41 @@
+@@ -1297,32 +1398,41 @@
          let viewport = self.list.viewport_bounds();
          let view_top = viewport.top();
          let pane_left = self.rel(point(viewport.left() + px(8.), px(0.))).x;
@@ -1873,7 +1888,7 @@
                  .on_mouse_down(
                      MouseButton::Left,
                      cx.listener(move |e, _, window, cx| {
-@@ -1341,22 +1437,23 @@
+@@ -1341,22 +1451,23 @@
              })
          };
          let hover = |m: Menu| cx.listener(move |e: &mut Editor, h: &bool, _, cx| e.tb_drop_over(m.clone(), 0, *h, cx));
@@ -1902,7 +1917,7 @@
                  .on_hover(cx.listener(move |e: &mut Editor, h: &bool, _, cx| e.tb_drop_over(m.clone(), 1, *h, cx)))
          };
          // The chevron flips while its dropdown is open.
-@@ -1371,25 +1468,27 @@
+@@ -1371,25 +1482,27 @@
          // x offsets of the dropdown buttons (padding 8, gap 8, separators 1).
          let x_turn = 8.;
          let x_align = x_turn + 44. + 8. + 1. + 8.;
@@ -1935,7 +1950,7 @@
                  btn("tb-align")
                      .w(px(44.))
                      .gap(px(6.))
-@@ -1406,9 +1505,9 @@
+@@ -1406,9 +1519,9 @@
              .child(mark_btn("tb-u", "underline", crate::settings::text("下划线"), crate::shortcuts::hint("editor::Underline", "⌘ + U"), Some(crate::settings::text("~文本~ 空格")), Mark::Underline, |m| m.underline))
              .child(
                  btn("tb-link")
@@ -1947,7 +1962,7 @@
                      .on_mouse_down(
                          MouseButton::Left,
                          cx.listener(|e, _, window, cx| {
-@@ -1419,12 +1518,12 @@
+@@ -1419,12 +1532,12 @@
              )
              .child(mark_btn("tb-code", "code", crate::settings::text("代码"), crate::shortcuts::hint("editor::InlineCode", "⌘ + Control + C"), Some(crate::settings::text("`代码`")), Mark::Code, |m| m.code))
              .when(!self.markdown, |d| d.child(color_btn))
@@ -1963,7 +1978,7 @@
                      .on_hover(hover(Menu::TbMore))
                      .on_mouse_down(
                          MouseButton::Left,
-@@ -1438,7 +1537,8 @@
+@@ -1438,7 +1551,8 @@
  
          let drop_el: Option<AnyElement> = match dropdown {
              Some(Menu::TurnInto) => {
@@ -1973,7 +1988,7 @@
                  for (i, it) in TURN_ITEMS.iter().enumerate() {
                      let k = (it.kind)();
                      if self.markdown && matches!(k, BlockKind::Callout { .. }) {
-@@ -1483,7 +1583,7 @@
+@@ -1483,7 +1597,7 @@
                  Some(drop(Menu::Align, x_align).child(list).into_any_element())
              }
              Some(Menu::Color) => Some(drop(Menu::Color, x_color).child(self.color_panel(None, cx)).into_any_element()),
@@ -1982,7 +1997,7 @@
              _ => None,
          };
          let el = popover()
-@@ -1493,7 +1593,8 @@
+@@ -1493,7 +1607,8 @@
              .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
              .child(bar)
              .children(drop_el);
@@ -1992,7 +2007,7 @@
      }
  }
  
-@@ -1523,10 +1624,12 @@
+@@ -1523,10 +1638,12 @@
      /// hover. Each half darkens over the button's own hover fill.
      fn color_split(&self, id: &'static str, open: bool, cx: &Context<Self>) -> Stateful<Div> {
          let (lt, lb) = self.last_color.clone();
@@ -2006,7 +2021,7 @@
              .flex()
              .rounded(px(4.))
              .overflow_hidden()
-@@ -1535,15 +1638,15 @@
+@@ -1535,15 +1652,15 @@
              .child(
                  div()
                      .id((id, 0usize))
@@ -2025,7 +2040,7 @@
                              .when_some(lb.as_ref().and_then(|c| theme::bg_color(&c.0)), |d, c| d.bg(c))
                              .flex()
                              .items_center()
-@@ -1569,7 +1672,7 @@
+@@ -1569,7 +1686,7 @@
                  div()
                      .id((id, 1usize))
                      .w(px(20.))
@@ -2034,7 +2049,7 @@
                      .flex()
                      .items_center()
                      .justify_center()
-@@ -1623,6 +1726,10 @@
+@@ -1623,6 +1740,10 @@
          let bottom = if range_top == 0 { table_top - px(22.) } else { rect.top() - px(15.) };
          let y = if bottom - px(TABLE_TB_H) >= viewport.top() { bottom - px(TABLE_TB_H) } else { rect.bottom() + px(15.) };
  
@@ -2045,7 +2060,7 @@
          let cell = self.core.first_selected_cell();
          let valign = cell.and_then(|c| c.valign.clone());
          let cur_bg = cell.and_then(|c| c.bg.clone());
-@@ -1639,12 +1746,14 @@
+@@ -1639,12 +1760,14 @@
          let btn = |id: &'static str| {
              div()
                  .id(id)
@@ -2063,7 +2078,7 @@
                  .cursor_pointer()
                  .hover(|s| s.bg(Theme::fill_hover_strong()))
          };
-@@ -1665,7 +1774,7 @@
+@@ -1665,7 +1788,7 @@
              })
          };
          let hover = |m: Menu| cx.listener(move |e: &mut Editor, h: &bool, _, cx| e.tb_drop_over(m.clone(), 0, *h, cx));
@@ -2072,7 +2087,7 @@
          let turn_above = (y - px(8.)).max(px(0.));
          let turn_up = turn_below < px(338.) && turn_above > turn_below;
          let turn_height = if turn_up { turn_above } else { turn_below }.min(px(338.));
-@@ -1673,9 +1782,10 @@
+@@ -1673,9 +1796,10 @@
              div()
                  .id("ttb-drop")
                  .absolute()
@@ -2086,7 +2101,7 @@
                  .on_hover(cx.listener(move |e: &mut Editor, h: &bool, _, cx| e.tb_drop_over(m.clone(), 1, *h, cx)))
          };
          // The chevron flips while its dropdown is open.
-@@ -1683,10 +1793,10 @@
+@@ -1683,10 +1807,10 @@
          let mark_btn = |id: &'static str, ic: &'static str, tip: &'static str, keys: &'static str, md: Option<&'static str>, mark: Mark, get: fn(&Marks) -> bool| {
              let active = self.mark_active(get);
              btn(id)
@@ -2099,7 +2114,7 @@
                  .on_mouse_down(
                      MouseButton::Left,
                      cx.listener(move |e, _, window, cx| {
-@@ -1699,9 +1809,9 @@
+@@ -1699,9 +1823,9 @@
  
          let merge_btn = if merged {
              btn("ttb-merge")
@@ -2111,7 +2126,7 @@
                  .on_mouse_down(
                      MouseButton::Left,
                      cx.listener(|e, _, window, cx| {
-@@ -1713,9 +1823,9 @@
+@@ -1713,9 +1837,9 @@
                  )
          } else if n_cells >= 2 {
              btn("ttb-merge")
@@ -2123,7 +2138,7 @@
                  .on_mouse_down(
                      MouseButton::Left,
                      cx.listener(|e, _, window, cx| {
-@@ -1728,11 +1838,11 @@
+@@ -1728,11 +1852,11 @@
          } else {
              div()
                  .id("ttb-merge")
@@ -2137,7 +2152,7 @@
          };
          let align_icon = match align {
              Align::Left => "align-left",
-@@ -1740,28 +1850,30 @@
+@@ -1740,28 +1864,30 @@
              Align::Right => "align-right",
          };
          let mut bar = div()
@@ -2173,7 +2188,7 @@
                      .child(chevron(Menu::TurnInto))
                      .on_hover(hover(Menu::TurnInto))
                      .on_mouse_down(MouseButton::Left, open(Menu::TurnInto)),
-@@ -1769,10 +1881,10 @@
+@@ -1769,10 +1895,10 @@
              .child(sep())
              .child(
                  btn("ttb-align")
@@ -2186,7 +2201,7 @@
                      .child(chevron(Menu::Align))
                      .on_hover(hover(Menu::Align))
                      .on_mouse_down(MouseButton::Left, open(Menu::Align)),
-@@ -1788,9 +1900,9 @@
+@@ -1788,9 +1914,9 @@
              let label = if s.kind == CellSelKind::Cols { crate::settings::text("删除列") } else { crate::settings::text("删除行") };
              bar = bar.child(sep()).child(
                  btn("ttb-del")
@@ -2198,7 +2213,7 @@
                      .on_hover(cx.listener(|e, hovered: &bool, _, cx| {
                          if e.tables.danger != *hovered {
                              e.tables.danger = *hovered;
-@@ -1816,7 +1928,8 @@
+@@ -1816,7 +1942,8 @@
          let x_color = x_align + 44. + 17. + 5. * 32.;
          let drop_el: Option<AnyElement> = match dropdown {
              Some(Menu::TurnInto) => {
@@ -2208,7 +2223,7 @@
                  for (i, it) in TURN_ITEMS.iter().enumerate() {
                      let k = (it.kind)();
                      if matches!(k, BlockKind::Callout { .. }) {
-@@ -1871,7 +1984,7 @@
+@@ -1871,7 +1998,7 @@
                  let list = menu()
                      .id("ttb-align-menu")
                      .occlude()
@@ -2217,7 +2232,7 @@
                      .py(px(MENU_PAD_Y))
                      .child(h("tta-l", "align-left", crate::settings::text("左对齐"), crate::shortcuts::hint("editor::AlignLeft", "⌘ + Shift + L"), Align::Left))
                      .child(h("tta-c", "align-center", crate::settings::text("居中对齐"), crate::shortcuts::hint("editor::AlignCenter", "⌘ + Shift + E"), Align::Center))
-@@ -1883,7 +1996,7 @@
+@@ -1883,7 +2010,7 @@
                  Some(drop(Menu::Align, x_align).child(list).into_any_element())
              }
              Some(Menu::Color) => Some(drop(Menu::Color, x_color).child(self.color_panel(None, cx)).into_any_element()),
@@ -2226,7 +2241,7 @@
              _ => None,
          };
          let el = popover()
-@@ -1893,7 +2006,8 @@
+@@ -1893,7 +2020,8 @@
              .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
              .child(bar)
              .children(drop_el);
@@ -2236,7 +2251,7 @@
      }
  
      /// 单元格背景颜色 (230 × 142): 2 × 8 swatches and 恢复默认.
-@@ -1938,7 +2052,7 @@
+@@ -1938,7 +2066,7 @@
                      .flex()
                      .items_center()
                      .justify_center()
@@ -2245,7 +2260,7 @@
                      .cursor_pointer()
                      .hover(|s| s.bg(Theme::fill_hover()))
                      .child(crate::settings::text("恢复默认"))
-@@ -1969,14 +2083,20 @@
+@@ -1969,14 +2097,20 @@
              row(id, ic, label, None, false).on_mouse_move(set_sub(None)).on_mouse_down(MouseButton::Left, act(a))
          };
          let toggle = |id: &'static str, ic: &'static str, label: &'static str, on: bool, a: BlockAct| plain(id, ic, label, a).child(switch(on));
@@ -2268,7 +2283,7 @@
              .child(separator_h().on_mouse_move(set_sub(None)))
              .child(plain("bm-cut", "scissors", crate::settings::text("剪切"), BlockAct::Cut))
              .child(plain("bm-copy", "copy", crate::settings::text("复制"), BlockAct::Copy))
-@@ -2000,23 +2120,21 @@
+@@ -2000,23 +2134,22 @@
                      row_tinted(id, ic, label, None, false, d, d).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                  }
              };
@@ -2287,7 +2302,8 @@
                  .child(indent_row("in-dec", "indent-decrease", crate::settings::text("减少缩进"), Some("Shift + Tab"), self.core.can_outdent(block), BlockAct::Outdent))
                  .into_any_element()
          });
-+        // 手机：子面板换下主面板（带一行返回），添加面板自己就是底部面板。
++        // 手机：子面板叠在主面板上面（带一行返回），添加面板自己就是底部面板。
++        if sheet.is_some() && let Some(sub_el) = sub_el { return Some(self.stack_sub(r, m, sub_el, cx)); }
 +        let swap = sheet.is_some() && sub.is_some();
          let el = div()
              .relative()
@@ -2727,17 +2743,19 @@
          cx.notify();
      }
  
-@@ -2198,7 +2210,8 @@
+@@ -2198,7 +2210,10 @@
      }
  
      pub fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
 -        window.focus(&self.focus);
++        // 手机：块菜单的子面板开着时，点面板外面只收起子面板，回到块菜单这一层。
++        if self.compact() && let Some(Menu::Block { sub: sub @ Some(BlockSub::Indent | BlockSub::Color), .. }) = &mut self.menu { *sub = None; cx.notify(); return; }
 +        self.touch_press(window);
 +        window.focus(&self.focus, cx);
          self.reminder_blur(window, cx);
          self.menu = None;
          self.menu_hovered = false;
-@@ -2269,6 +2282,34 @@
+@@ -2269,6 +2284,34 @@
          }
      }
  
@@ -2772,7 +2790,7 @@
      /// Mouse-up (or a move without the button) ends a text drag. Events can
      /// arrive before the frame that registers the window-level drag listeners,
      /// so the element-level handlers call this too.
-@@ -2280,6 +2321,7 @@
+@@ -2280,6 +2323,7 @@
              }
              self.link_ui.click = None;
              self.dragging = false;
@@ -2780,7 +2798,7 @@
              cx.notify();
          }
      }
-@@ -2359,7 +2401,7 @@
+@@ -2359,7 +2403,7 @@
  
      /// Click in the empty area below the content: focus a trailing empty paragraph.
      pub fn on_click_below(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -2789,7 +2807,7 @@
          if self.read_only {
              return;
          }
-@@ -2374,7 +2416,7 @@
+@@ -2374,7 +2418,7 @@
  
      /// Handle (⋮⋮) click: select the block and open its menu; "+" opens the add panel.
      pub fn open_block_menu(&mut self, block: BlockId, add: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -2798,7 +2816,7 @@
          self.slash = None;
          self.menu_hovered = false;
          if add {
-@@ -2448,7 +2490,7 @@
+@@ -2448,7 +2492,7 @@
              BlockAct::HeaderCol => self.core.table_toggle_header_col(block),
              BlockAct::DistributeCols => self.core.table_distribute(block),
          }
@@ -2807,7 +2825,7 @@
          self.changed(window, cx);
      }
  
-@@ -2546,6 +2588,24 @@
+@@ -2546,6 +2590,24 @@
  }
  
  impl EntityInputHandler for Editor {
@@ -2832,7 +2850,7 @@
      fn text_for_range(
          &mut self,
          range: Range<usize>,
-@@ -2574,8 +2634,8 @@
+@@ -2574,8 +2636,8 @@
          Some(to16(&t.text, r.start)..to16(&t.text, r.end))
      }
  
@@ -2843,7 +2861,7 @@
      }
  
      fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-@@ -2595,7 +2655,8 @@
+@@ -2595,7 +2657,8 @@
                  self.core.sel = Selection { anchor: Pos::new(head, r.start), head: Pos::new(head, r.end) };
              }
          }

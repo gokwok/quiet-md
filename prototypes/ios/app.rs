@@ -97,13 +97,15 @@ pub fn insets() -> Edges<Pixels> { LAYOUT.with(|l| l.get().1) }
 
 /// 手机上菜单不挂在按钮或手指旁边，而是从底部升起的动作面板：拇指够得着，也不会被手挡住。
 /// 宽屏照原样锚在 `pos`。
+#[track_caller]
 pub fn place(corner: Anchor, pos: Point<Pixels>) -> Sheet {
     let (compact, safe, viewport) = LAYOUT.with(|l| l.get());
-    if !compact { return Sheet { at: anchored().anchor(corner).position(pos).snap_to_window_with_margin(px(8.)), rise: false, kids: vec![] }; }
-    Sheet { at: anchored().anchor(Anchor::BottomCenter).position(point(viewport.width / 2., viewport.height - safe.bottom - px(8.))), rise: true, kids: vec![] }
+    let key = std::panic::Location::caller();
+    if !compact { return Sheet { at: anchored().anchor(corner).position(pos).snap_to_window_with_margin(px(8.)), rise: false, key, kids: vec![] }; }
+    Sheet { at: anchored().anchor(Anchor::BottomCenter).position(point(viewport.width / 2., viewport.height - safe.bottom - px(8.))), rise: true, key, kids: vec![] }
 }
-/// `place` 给出的浮层。手机上的动作面板出现时从下面升上来。
-pub struct Sheet { at: Anchored, rise: bool, kids: Vec<AnyElement> }
+/// `place` 给出的浮层。手机上的动作面板出现时从下面升上来，收起时滑出屏幕（`shot`，按调用的那一处认面板）。
+pub struct Sheet { at: Anchored, rise: bool, key: &'static std::panic::Location<'static>, kids: Vec<AnyElement> }
 impl ParentElement for Sheet {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) { self.kids.extend(elements); }
 }
@@ -111,13 +113,15 @@ impl IntoElement for Sheet {
     type Element = Anchored;
     fn into_element(self) -> Anchored {
         if !self.rise { return self.at.children(self.kids); }
-        self.at.child(div().relative().children(self.kids).with_animation("sheet-rise", Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t)))
+        self.at.child(div().relative().children(self.kids).child(shot::sheet_marker(self.key)).with_animation("sheet-rise", Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t)))
     }
 }
 
-/// 编辑器自己的底部面板（块菜单、添加面板、工具栏、链接和公式的面板）也从下面升上来，和 `Sheet` 同一条曲线。
+/// 编辑器自己的底部面板（块菜单、添加面板、工具栏、链接和公式的面板）也从下面升上来，和 `Sheet` 同一条曲线；
+/// 收起时一样滑出屏幕，按调用的那一处认面板（`rise_at` 也带着 `track_caller`）。
+#[track_caller]
 pub fn rise(key: &'static str, el: impl IntoElement) -> impl IntoElement {
-    div().relative().child(el).with_animation(key, Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t))
+    div().relative().child(el).child(shot::sheet_marker(std::panic::Location::caller())).with_animation(key, Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t))
 }
 
 /// 换页时谁在动。`Enter`：新页从右（往里走）或原地（标签页之间）淡入；`Back`：返回，旧页的快照往右滑走，
@@ -227,7 +231,8 @@ pub fn menu_w(wide: f32) -> Pixels {
 /// 动作面板下面压暗的一层。不接事件：点面板外关闭菜单仍由原来的处理负责。
 /// 深色下 `ui::scrim` 会跟着主题反相（发白），这里用不随主题变的黑。
 pub fn sheet_scrim() -> impl IntoElement {
-    div().absolute().inset_0().bg(crate::theme::rgbaf(0, 0, 0, if crate::theme::dark() { 0.5 } else { 0.25 }))
+    let alpha = if crate::theme::dark() { 0.5 } else { 0.25 };
+    div().absolute().inset_0().bg(crate::theme::rgbaf(0, 0, 0, alpha)).child(shot::scrim_marker(alpha))
         .with_animation("sheet-scrim", Animation::new(Duration::from_millis(220)), |d, t| d.opacity(t))
 }
 
