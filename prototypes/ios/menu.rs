@@ -35,7 +35,7 @@ pub fn begin(allowed: bool, window: &Window, cx: &mut Context<Workspace>) {
 
 impl Button {
     fn set_shown(&mut self, on: bool) {
-        if self.shown != on { self.shown = on; unsafe { let _: () = msg_send![self.view, setHidden: !on]; } }
+        if self.shown != on && super::shot::show(self.view, on) { self.shown = on; }
     }
 }
 
@@ -52,7 +52,7 @@ pub fn glass_button(key: &'static str, symbol: &'static str, color: Hsla, items:
 fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, Hsla)>, items: Vec<Item>, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
-    let parent = handle.ui_view.as_ptr() as *mut AnyObject;
+    let parent = super::shot::overlay(handle.ui_view.as_ptr() as *mut AnyObject);
     let dark = crate::theme::dark();
     BUTTONS.with(|b| unsafe {
         let mut buttons = b.borrow_mut();

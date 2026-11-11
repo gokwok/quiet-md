@@ -29,6 +29,7 @@ thread_local! { static ALLOWED: std::cell::Cell<bool> = const { std::cell::Cell:
 /// 抽屉、面板、对话框盖上来时必须让开。这一帧画完后，没被 `pane` 点到的也藏起
 /// （它的元素已经不在画面里）。
 pub fn begin(allowed: bool, window: &Window) {
+    super::shot::attach(window);
     ALLOWED.with(|a| a.set(allowed));
     PANES.with(|p| for pane in p.borrow_mut().iter_mut() { pane.seen = false; if !allowed { pane.set_shown(false); } });
     window.on_next_frame(|_, _| PANES.with(|p| for pane in p.borrow_mut().iter_mut() { if !pane.seen { pane.set_shown(false); } }));
@@ -36,11 +37,11 @@ pub fn begin(allowed: bool, window: &Window) {
 
 impl Pane {
     fn set_shown(&mut self, on: bool) {
-        if self.shown == on { return; }
+        if self.shown == on || !super::shot::show(self.view, on) { return; }
         self.shown = on;
         unsafe {
-            let _: () = msg_send![self.view, setHidden: !on];
-            // 露面时淡入，和 GPUI 那边换页、收面板的过渡接上；藏起是立刻的，免得压在新盖上来的东西上。
+            // 露面时淡入，和 GPUI 那边换页、收面板的过渡接上；藏起是立刻的，免得压在新盖上来的东西上
+            // （返回时离开的那一页的玻璃例外，见 `shot::show`）。
             if on {
                 let anim: *mut AnyObject = msg_send![AnyClass::get(c"CABasicAnimation").unwrap(), animationWithKeyPath: ns_string("opacity")];
                 let from: *mut AnyObject = msg_send![AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: 0f64];
@@ -115,7 +116,7 @@ unsafe fn ns_string(s: &str) -> *mut AnyObject {
 fn place(key: &'static str, look: Look, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
-    let parent = handle.ui_view.as_ptr() as *mut AnyObject;
+    let parent = super::shot::overlay(handle.ui_view.as_ptr() as *mut AnyObject);
     PANES.with(|p| unsafe {
         let mut panes = p.borrow_mut();
         let ix = match panes.iter().position(|pane| pane.key == key) {

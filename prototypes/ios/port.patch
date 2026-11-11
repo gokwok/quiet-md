@@ -144,7 +144,14 @@
                  }
              }
              Err(e) => self.status = SaveStatus::Failed(crate::localized_format!("新建失败：{}", "Could not create document: {}", crate::settings::diagnostic(&e.to_string()))),
-@@ -765,6 +773,7 @@
+@@ -760,11 +768,14 @@
+ 
+     /// Switch the main pane to 主页 or 回收站 (or back to the document).
+     pub fn show_view(&mut self, view: View, cx: &mut Context<Self>) {
++        // 手机：先拍下这一页，返回时它滑走。
++        crate::ios::shot::capture_page();
+         self.cancel_shortcut_recording(cx);
+         if view == View::Trash {
              self.trash = self.store.list_trash();
          }
          self.view = view;
@@ -152,7 +159,7 @@
          self.row_menu = None;
          self.trash_menu = None;
          self.theme_menu = None;
-@@ -804,7 +813,7 @@
+@@ -804,7 +815,7 @@
              f
          });
          let focus = field.focus_handle(cx);
@@ -161,7 +168,7 @@
          let subs = vec![
              cx.subscribe_in(&field, window, |w, _, ev: &TextFieldEvent, window, cx| match ev {
                  TextFieldEvent::Submit => w.finish_rename(true, window, cx),
-@@ -815,7 +824,8 @@
+@@ -815,7 +826,8 @@
          ];
          self.rename = Some(Rename { id: id.to_string(), field, _subs: subs });
          // From 主页 the row may be hidden: show it in the sidebar.
@@ -171,7 +178,7 @@
          self.reveal_in_tree(id);
          self.row_menu = None;
          cx.notify();
-@@ -850,7 +860,7 @@
+@@ -850,7 +862,7 @@
          }
          if refocus
              && let Some(ed) = &self.editor {
@@ -180,7 +187,7 @@
              }
          self.sync_sub_pages(cx);
          cx.notify();
-@@ -894,6 +904,8 @@
+@@ -894,6 +906,8 @@
          // caps that at SAVE_MAX_DELAY after the oldest unsaved edit.
          let left = SAVE_MAX_DELAY.saturating_sub(self.dirty_since.map_or(Duration::ZERO, |t| t.elapsed()));
          let delay = SAVE_DELAY.min(left);
@@ -189,7 +196,7 @@
          // Keep the list title live while typing; the body/snippet updates on save.
          if let (Some(id), Some(ed)) = (&self.current, &self.editor) {
              let title = ed.read(cx).core.doc.title.text.clone();
-@@ -1199,6 +1211,23 @@
+@@ -1199,6 +1213,23 @@
              crumbs.push(sep());
          }
          let record_more = self.more_btn_bounds.clone();
@@ -213,7 +220,7 @@
          div()
              .id("top-bar").relative()
              .h(px(HEADER_H))
-@@ -1209,7 +1238,12 @@
+@@ -1209,7 +1240,12 @@
              // Clear of the traffic lights, which sit over the note when the sidebar is closed.
              .pl(if self.sidebar_open { px(18.) } else { px(theme::TRAFFIC_LIGHTS_W) })
              .title_bar()
@@ -227,7 +234,7 @@
                  d.child(
                      div()
                          .id("open-sidebar")
-@@ -1259,7 +1293,7 @@
+@@ -1259,7 +1295,7 @@
                              .child(
                                  div()
                                      .min_w_0()
@@ -236,7 +243,7 @@
                                      .line_height(px(20.))
                                      .font_weight(FontWeight::SEMIBOLD)
                                      .text_color(Theme::text())
-@@ -1281,6 +1315,11 @@
+@@ -1281,6 +1317,11 @@
                      .h(px(HEADER_ACTIONS_H)).flex_none()
                      .flex()
                      .items_center()
@@ -248,7 +255,7 @@
                      .when(self.current.is_some(), |d| {
                          d.child(
                              // No tooltip while its dropdown is open; the menu hangs
-@@ -1297,7 +1336,7 @@
+@@ -1297,7 +1338,7 @@
                                  })),
                          )
                      })
@@ -257,7 +264,7 @@
                          seg("doc-search", "search")
                              .tip_label(crate::shortcuts::keys(crate::settings::text("搜索(⌘ + J)")).into(), TipSide::Below)
                              .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(FocusSearch), cx))),
-@@ -1305,23 +1344,40 @@
+@@ -1305,23 +1346,40 @@
                      .child(
                          // Straight to a new document: no 新建 menu, as 导入 is rare.
                          seg("doc-new", "plus").tip(crate::settings::tr("新建文档", "New document"), None).on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx))),
@@ -303,7 +310,7 @@
          let row_menu = self.render_row_menu(window, cx);
          let resize = self.sidebar_open.then(|| self.render_resize_handle(window, cx));
          let resize_overlay = self.render_resize_overlay(cx);
-@@ -1346,7 +1402,8 @@
+@@ -1346,7 +1404,8 @@
                  .h_full()
                  .flex()
                  .flex_col()
@@ -313,7 +320,7 @@
                  .child(
                      div()
                          .flex_1()
-@@ -1362,6 +1419,9 @@
+@@ -1362,6 +1421,9 @@
                          )
                          .children(self.render_shortcuts(cx)),
                  )
@@ -323,14 +330,14 @@
                  .into_any_element(),
              View::Home => self.render_home(window, cx),
              View::Folder => self.render_folder(window, cx),
-@@ -1375,13 +1435,15 @@
+@@ -1375,13 +1437,15 @@
          // surface beside it; the change of value is the only line between
          // them (no gutter, radius, border or shadow).
          // A document sits on its theme's page colour.
 -        let page = if self.view == View::Doc { crate::editor_theme::Theme::bg_body() } else { Theme::bg_body() };
 -        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).child(main)
 +        let page = if self.view == View::Doc { crate::editor_theme::Theme::bg_body() } else if matches!(self.view, View::Home | View::Folder) { crate::ios::home_bg() } else { Theme::bg_body() };
-+        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).pt(if matches!(self.view, View::Doc | View::Home | View::Folder) && crate::ios::floating() { px(0.) } else { safe.top }).pb(if !crate::ios::floating() { safe.bottom } else { match self.view { View::Home | View::Folder => px(0.), View::Settings if crate::ios::settings_detail() => safe.bottom, View::Trash | View::Settings => crate::ios::tab_bar_h(), _ => safe.bottom } }).pr(safe.right).when(!self.sidebar_open, |d| d.pl(safe.left)).child(crate::ios::page(main, self.view))
++        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).pt(if matches!(self.view, View::Doc | View::Home | View::Folder) && crate::ios::floating() { px(0.) } else { safe.top }).pb(if !crate::ios::floating() { safe.bottom } else { match self.view { View::Home | View::Folder => px(0.), View::Settings if crate::ios::settings_detail() => safe.bottom, View::Trash | View::Settings => crate::ios::tab_bar_h(), _ => safe.bottom } }).pr(safe.right).when(!self.sidebar_open, |d| d.pl(safe.left)).child(crate::ios::page(main, self.view, self.folder_current.as_deref().filter(|_| self.view == View::Folder).map(|id| (id, self.ancestors(id).len()))))
              // Files from the Finder dropped on 主页 or a folder's page are imported there.
              .when(matches!(self.view, View::Home | View::Folder), |d| d
                  .on_drag_move(cx.listener(|w, ev: &DragMoveEvent<ExternalPaths>, _, cx| w.file_drag_move(ev, cx)))
@@ -342,7 +349,7 @@
          div()
              .id("workspace")
              .key_context("Workspace")
-@@ -1405,6 +1467,8 @@
+@@ -1405,6 +1469,8 @@
              // whichever window macOS considers active.
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
              .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
@@ -351,7 +358,7 @@
              .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
                  crate::quick_note::persist(cx);
                  if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
-@@ -1421,7 +1485,7 @@
+@@ -1421,7 +1487,7 @@
              .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
              .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
              .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
@@ -360,7 +367,7 @@
                  cx.notify();
              }))
              .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
-@@ -1458,7 +1522,7 @@
+@@ -1458,7 +1524,7 @@
              }))
              // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
              .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
@@ -369,7 +376,7 @@
                  if ev.keystroke.key == "escape" && w.has_home_drag() {
                      w.cancel_home_drag(cx); cx.stop_propagation(); return;
                  }
-@@ -1490,10 +1554,14 @@
+@@ -1490,10 +1556,14 @@
                  if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
                  cx.stop_propagation();
              }))
@@ -2870,7 +2877,15 @@
                          w.trash = w.store.list_trash();
 --- a/src/folders.rs
 +++ b/src/folders.rs
-@@ -61,7 +61,7 @@
+@@ -49,6 +49,7 @@
+     pub(crate) fn open_folder(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+         let target = id.to_string();
+         if !self.save_before(cx, move |w, window, cx| { w.open_folder(&target, window, cx); }) { return false; }
++        crate::ios::shot::capture_page();
+         self.editor = None;
+         self.current = None;
+         if self.folder_current.as_deref() != Some(id) { self.reset_folder_scroll(); }
+@@ -61,7 +62,7 @@
          self.doc_menu = false;
          self.expanded.insert(id.to_string());
          self.reveal_in_tree(id);
@@ -2879,7 +2894,7 @@
          cx.notify();
          true
      }
-@@ -142,25 +142,42 @@
+@@ -142,25 +143,42 @@
                  .on_click(cx.listener(move |w, _, window, cx| w.new_child(&doc, window, cx))))
              .child(self.view_switch(cx).no_drag().ml(px(12.)));
          let children = self.level_entries(Some(&id));

@@ -11,6 +11,7 @@ pub mod glass;
 pub mod hub;
 pub mod keybar;
 pub mod menu;
+pub mod shot;
 
 pub fn run() {
     crate::logging::init();
@@ -119,21 +120,60 @@ pub fn rise(key: &'static str, el: impl IntoElement) -> impl IntoElement {
     div().relative().child(el).with_animation(key, Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t))
 }
 
-thread_local! { static PAGE: std::cell::Cell<(Option<View>, usize, f32)> = const { std::cell::Cell::new((None, 0, 0.)) }; }
-/// 手机上换页的过渡：进文档、进文件夹从右边滑入，返回从左边滑入，标签页之间只淡入。
-pub fn page(main: AnyElement, view: View) -> AnyElement {
-    let depth = |v: View| -> i32 { match v { View::Doc => 2, View::Folder => 1, _ => 0 } };
-    let (epoch, dir) = PAGE.with(|p| {
-        let (last, mut epoch, mut dir) = p.get();
-        if last != Some(view) {
-            if let Some(last) = last { epoch += 1; dir = (depth(view) - depth(last)).signum() as f32; }
-            p.set((Some(view), epoch, dir));
+/// 换页时谁在动。`Enter`：新页从右（往里走）或原地（标签页之间）淡入；`Back`：返回，旧页的快照往右滑走，
+/// 这一页带视差从左边回来（从已经滑过的比例开始）；`Follow`：跟手返回，跟着手指；`Return`：跟手返回没过半，
+/// 滑回去；`Still`：取消后恢复原来那页，不动。
+#[derive(Clone, Copy, PartialEq)]
+enum Motion { Enter(f32), Back(f32), Follow, Return(f32), Still }
+/// 一页是哪一页：同一摞（主页、文件夹、文档是一摞；回收站、设置各是一摞）里越往里 `depth` 越大，
+/// 文件夹再按它是哪一个分开。
+#[derive(Clone, Copy, PartialEq)]
+struct PageKey { stack: u8, depth: i32, folder: u64 }
+thread_local! { static PAGE: std::cell::Cell<(Option<PageKey>, usize, Motion)> = const { std::cell::Cell::new((None, 0, Motion::Still)) }; }
+// 跟手返回时手指滑过的比例；没在跟手时为空。
+thread_local! { static GESTURE: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) }; }
+// 下一次换页是跟手返回取消后的恢复。
+thread_local! { static RESTORING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// 换页的过渡：进文档、进文件夹从右边滑入淡入；返回时旧页往右滑走（`shot`），这一页带视差回来；标签页之间只淡入。
+/// `folder`：文件夹页是哪一个、在第几层。
+pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>) -> AnyElement {
+    let key = match view {
+        View::Doc => PageKey { stack: 0, depth: 100, folder: 0 },
+        View::Folder => PageKey { stack: 0, depth: 2 + folder.map_or(0, |f| f.1) as i32, folder: folder.map_or(0, |f| { use std::hash::{Hash, Hasher}; let mut h = std::hash::DefaultHasher::new(); f.0.hash(&mut h); h.finish() }) },
+        View::Home => PageKey { stack: 0, depth: (home_page() != HomePage::Hub) as i32, folder: 0 },
+        View::Settings => PageKey { stack: 1, depth: settings_detail() as i32, folder: 0 },
+        View::Trash => PageKey { stack: 2, depth: 0, folder: 0 },
+    };
+    let restoring = RESTORING.with(|r| r.replace(false));
+    let (epoch, motion) = PAGE.with(|p| {
+        let (last, mut epoch, mut motion) = p.get();
+        if last != Some(key) {
+            if let Some(last) = last {
+                epoch += 1;
+                let dir = if last.stack == key.stack { (key.depth - last.depth).signum() as f32 } else { 0. };
+                motion = if restoring { Motion::Still } else if GESTURE.with(|g| g.get()).is_some() { Motion::Follow }
+                    else if dir < 0. && shot::slide_out(0.) { Motion::Back(0.) } else { Motion::Enter(dir) };
+            }
+            p.set((Some(key), epoch, motion));
         }
-        (epoch, dir)
+        (epoch, motion)
     });
-    let page = div().flex_1().min_w_0().h_full().flex().relative().child(main);
+    // 拍了快照却不是返回（或者没换成页，比如被「先保存」拦下了）：拿掉。
+    if shot::page_pending() && !matches!(motion, Motion::Follow | Motion::Return(_)) { shot::drop_page(); }
+    let page = div().flex_1().min_w_0().h_full().flex().relative().child(main)
+        // 旧页滑走的这段时间里一直出帧：只属于这一页的玻璃要等它走完才露面。
+        .child(canvas(|_, window, _| if shot::sliding() { window.request_animation_frame() }, |_, _, _, _| {}).absolute().size_0());
     if !is_compact() || epoch == 0 { return page.into_any_element(); }
-    page.with_animation(("page", epoch), Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()), move |d, t| d.left(px(dir * (1. - t) * 72.)).opacity(t)).into_any_element()
+    let w = f32::from(LAYOUT.with(|l| l.get().2.width));
+    let off = move |p: f32| px(-shot::PARALLAX * w * (1. - p));
+    let slide = |span: f32| Animation::new(shot::slide_time(span)).with_easing(shot::ease_out_cubic);
+    match motion {
+        Motion::Enter(dir) => page.with_animation(("page", epoch), Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()), move |d, t| d.left(px(dir * (1. - t) * 72.)).opacity(t)).into_any_element(),
+        Motion::Back(from) => page.with_animation(("page", epoch), slide(1. - from), move |d, t| d.left(off(from + (1. - from) * t))).into_any_element(),
+        Motion::Return(from) => page.with_animation(("page", epoch), slide(from), move |d, t| d.left(off(from * (1. - t)))).into_any_element(),
+        Motion::Follow => page.left(off(GESTURE.with(|g| g.get()).unwrap_or(0.))).into_any_element(),
+        Motion::Still => page.into_any_element(),
+    }
 }
 
 /// 跟着滚动走的一块：在绘制阶段按滚动的偏移摆放。偏移在渲染之后还会变（惯性滚动是在
@@ -157,9 +197,10 @@ impl Element for Follow {
 thread_local! { static SETTINGS_DETAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// 手机上设置是两级：先是一页分类的列表，点进去才是那一类的设置。这里记着现在在不在第二级。
 pub fn settings_detail() -> bool { SETTINGS_DETAIL.with(|d| d.get()) }
-/// 进出第二级，带上换页的滑入。
+/// 进出第二级。回第一级时先拍下这一页（`ios::page` 把它滑走）。
 pub fn set_settings_detail(on: bool) {
-    if SETTINGS_DETAIL.with(|d| d.replace(on)) != on { PAGE.with(|p| { let (view, epoch, _) = p.get(); p.set((view, epoch + 1, if on { 1. } else { -1. })); }); }
+    if settings_detail() && !on { shot::capture_page(); }
+    SETTINGS_DETAIL.with(|d| d.set(on));
 }
 
 thread_local! { static KEYBOARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -232,9 +273,10 @@ pub fn large_title(title: impl Into<SharedString>) -> impl IntoElement {
 pub enum HomePage { Hub, All, Folders }
 thread_local! { static HOME_PAGE: std::cell::Cell<HomePage> = const { std::cell::Cell::new(HomePage::Hub) }; }
 pub fn home_page() -> HomePage { HOME_PAGE.with(|p| p.get()) }
-/// 换页，带上滑入：回首页从左边来，往里走从右边来。
+/// 换页。回首页时先拍下这一页（`ios::page` 把它滑走）。
 pub fn set_home_page(page: HomePage) {
-    if HOME_PAGE.with(|p| p.replace(page)) != page { PAGE.with(|p| { let (view, epoch, _) = p.get(); p.set((view, epoch + 1, if page == HomePage::Hub { -1. } else { 1. })); }); }
+    if home_page() != page && page == HomePage::Hub { shot::capture_page(); }
+    HOME_PAGE.with(|p| p.set(page));
 }
 
 /// 浏览页（所有文档、文件夹、某个文件夹里）是同一套：左上返回，右上「选择」（进批量管理）和「…」
@@ -332,6 +374,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         "tab-trash" => if w.view != View::Trash { w.show_view(View::Trash, cx) },
         "tab-settings" => { set_settings_detail(false); if w.view != View::Settings { w.show_view(View::Settings, cx) } }
         "new-doc" => { glass::haptic(); w.new_doc(window, cx); }
+        "page-restore" => restore(w, window, cx),
         // 系统的编辑菜单（`editmenu.rs`）：交给编辑器。
         _ if id.starts_with("edit-") => if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| ed.touch_menu_action(id, window, cx)); },
         _ if id.starts_with("browse-sort-") => if let Ok(index) = id["browse-sort-".len()..].parse() { w.pick_home_sort(index, cx); },
@@ -464,9 +507,62 @@ pub fn long_press_layer() -> impl IntoElement {
     }).absolute().size_0()
 }
 
-/// 左缘右滑：文档、文件夹和回收站回主页，设置返回，主页拉出抽屉。
+/// 跟手返回取消后要回到哪一页。
+#[derive(Clone)]
+enum Restore { Doc, Folder(String), Home(HomePage), Settings }
+thread_local! { static RESTORE: std::cell::RefCell<Option<Restore>> = const { std::cell::RefCell::new(None) }; }
+
+/// 左缘右滑：文档、文件夹和回收站回主页，设置返回，主页拉出抽屉。文档、文件夹、主页的子页和设置的第二级
+/// 跟着手指：一动就切到下面那一页，旧页的快照跟着手指走（`shot::follow`）；松手过半就滑走，没过半滑回来、
+/// 再恢复原来那页。
 pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &mut Context<Workspace>) {
-    if ev.phase != BackGesturePhase::Committed { return; }
+    let following = GESTURE.with(|g| g.get()).is_some();
+    match ev.phase {
+        BackGesturePhase::Progressed if following => {
+            GESTURE.with(|g| g.set(Some(ev.progress)));
+            shot::follow(ev.progress);
+            cx.notify();
+            return;
+        }
+        BackGesturePhase::Progressed => {
+            if ev.progress <= 0. || !floating() || w.search_open || w.batch.is_some() { return; }
+            let restore = match w.view {
+                View::Doc => Restore::Doc,
+                View::Folder => match w.folder_current.clone() { Some(id) => Restore::Folder(id), None => return },
+                View::Home if home_page() != HomePage::Hub => Restore::Home(home_page()),
+                View::Settings if settings_detail() => Restore::Settings,
+                _ => return,
+            };
+            // 切到下面那一页：这几条路都会先拍下这一页。
+            pop(w, window, cx);
+            if !shot::page_pending() { return; }
+            RESTORE.with(|r| *r.borrow_mut() = Some(restore));
+            GESTURE.with(|g| g.set(Some(ev.progress)));
+            shot::follow(ev.progress);
+            cx.notify();
+            return;
+        }
+        BackGesturePhase::Committed if following => {
+            let p = GESTURE.with(|g| g.take()).unwrap_or(0.);
+            RESTORE.with(|r| r.borrow_mut().take());
+            // 快照没了（不该发生）：这一页直接回到原位，不停在半路。
+            let motion = if shot::slide_out(p) { Motion::Back(p) } else { Motion::Still };
+            PAGE.with(|s| { let (key, epoch, _) = s.get(); s.set((key, epoch + 1, motion)); });
+            cx.notify();
+            return;
+        }
+        BackGesturePhase::Cancelled if following => {
+            let p = GESTURE.with(|g| g.take()).unwrap_or(0.);
+            // 快照没了就没有滑回去的动画来接恢复：直接恢复。
+            if !shot::page_pending() { return restore(w, window, cx); }
+            PAGE.with(|s| { let (key, epoch, _) = s.get(); s.set((key, epoch + 1, Motion::Return(p))); });
+            shot::slide_back(p, "page-restore");
+            cx.notify();
+            return;
+        }
+        BackGesturePhase::Committed => {}
+        _ => return,
+    }
     if w.search_open { return w.close_search(window, cx); }
     match w.view {
         View::Doc | View::Folder | View::Trash => w.show_view(View::Home, cx),
@@ -475,6 +571,30 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
         View::Settings => w.close_settings(cx),
         // 有标签栏时主页不拉抽屉。
         View::Home => { w.drawer = compact(window) && !floating(); cx.notify(); }
+    }
+}
+/// 跟手返回切到下面那一页：和各页左上角的返回一样（文件夹回上一级）。
+fn pop(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    match w.view {
+        View::Folder => match w.folder_current.as_ref().and_then(|id| w.entries.iter().find(|e| &e.id == id)).and_then(|e| e.meta.parent.clone()) {
+            Some(parent) => { w.open(&parent, window, cx); }
+            None => w.show_view(View::Home, cx),
+        },
+        View::Home => { set_home_page(HomePage::Hub); cx.notify(); }
+        View::Settings => { set_settings_detail(false); cx.notify(); }
+        _ => w.show_view(View::Home, cx),
+    }
+}
+/// 跟手返回取消、快照滑回原处之后：恢复原来那页，快照随后淡掉。
+fn restore(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(to) = RESTORE.with(|r| r.borrow_mut().take()) else { return shot::fade_page(); };
+    shot::fade_page();
+    RESTORING.with(|r| r.set(true));
+    match to {
+        Restore::Doc => w.show_view(View::Doc, cx),
+        Restore::Folder(id) => { w.open(&id, window, cx); }
+        Restore::Home(page) => { set_home_page(page); cx.notify(); }
+        Restore::Settings => { set_settings_detail(true); cx.notify(); }
     }
 }
 
