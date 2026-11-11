@@ -5,6 +5,8 @@ use gpui::{prelude::FluentBuilder as _, *};
 use crate::app::{View, Workspace};
 use crate::theme::Theme;
 
+pub mod editmenu;
+pub mod files;
 pub mod glass;
 pub mod hub;
 pub mod keybar;
@@ -110,6 +112,11 @@ impl IntoElement for Sheet {
         if !self.rise { return self.at.children(self.kids); }
         self.at.child(div().relative().children(self.kids).with_animation("sheet-rise", Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t)))
     }
+}
+
+/// 编辑器自己的底部面板（块菜单、添加面板、工具栏、链接和公式的面板）也从下面升上来，和 `Sheet` 同一条曲线。
+pub fn rise(key: &'static str, el: impl IntoElement) -> impl IntoElement {
+    div().relative().child(el).with_animation(key, Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t))
 }
 
 thread_local! { static PAGE: std::cell::Cell<(Option<View>, usize, f32)> = const { std::cell::Cell::new((None, 0, 0.)) }; }
@@ -254,6 +261,11 @@ fn browse_menu_items(w: &Workspace) -> Vec<menu::Item> {
     items.push(menu::Item { id: "browse-grid", title: crate::settings::tr("宫格视图", "Grid").into(), symbol: "square.grid.2x2", checked: w.home.grid, group: 1 });
     items.push(menu::Item { id: "browse-list", title: crate::settings::tr("列表视图", "List").into(), symbol: "list.bullet", checked: !w.home.grid, group: 1 });
     items.extend(w.sort_choices().into_iter().zip(SORTS).map(|((title, checked), id)| menu::Item { id, title: title.into(), symbol: "", checked, group: 2 }));
+    // 桌面版标题栏「导入」菜单里的三项。
+    let tr = crate::settings::tr;
+    items.push(menu::Item { id: "browse-import-md", title: tr("导入 Markdown 文件…", "Import Markdown Files…").into(), symbol: "square.and.arrow.down", checked: false, group: 3 });
+    items.push(menu::Item { id: "browse-import-folder", title: tr("导入文件夹…", "Import Folder…").into(), symbol: "folder", checked: false, group: 3 });
+    items.push(menu::Item { id: "browse-import-xml", title: tr("导入 DocxXML…", "Import DocxXML…").into(), symbol: "doc", checked: false, group: 3 });
     items
 }
 /// 浏览页开头跟着内容滚走的一段：大标题和搜索。
@@ -307,6 +319,12 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         "hub-new-folder" => w.new_folder(None, window, cx),
         "hub-fold" => { FOLDERS_FOLDED.with(|f| f.set(!f.get())); cx.notify(); }
         "browse-new-folder" => { let parent = if w.view == View::Folder { w.folder_current.clone() } else { None }; w.new_folder(parent, window, cx); }
+        "browse-import-md" | "browse-import-folder" | "browse-import-xml" => {
+            use crate::transfer::ImportKind;
+            let kind = match id { "browse-import-md" => ImportKind::Markdown, "browse-import-folder" => ImportKind::Folder, _ => ImportKind::DocxXml };
+            let parent = if w.view == View::Folder { w.folder_current.clone() } else { None };
+            w.open_import_kind(kind, parent, window, cx);
+        }
         "browse-grid" => w.set_home_grid(true, cx),
         "browse-list" => w.set_home_grid(false, cx),
         // 底栏和新建按钮：玻璃自己接的触摸。
@@ -314,6 +332,8 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         "tab-trash" => if w.view != View::Trash { w.show_view(View::Trash, cx) },
         "tab-settings" => { set_settings_detail(false); if w.view != View::Settings { w.show_view(View::Settings, cx) } }
         "new-doc" => { glass::haptic(); w.new_doc(window, cx); }
+        // 系统的编辑菜单（`editmenu.rs`）：交给编辑器。
+        _ if id.starts_with("edit-") => if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| ed.touch_menu_action(id, window, cx)); },
         _ if id.starts_with("browse-sort-") => if let Ok(index) = id["browse-sort-".len()..].parse() { w.pick_home_sort(index, cx); },
         _ => {}
     }
@@ -400,6 +420,10 @@ thread_local! { static OVERLAY: std::cell::Cell<bool> = const { std::cell::Cell:
 pub fn set_overlay(on: bool) { OVERLAY.with(|o| o.set(on)); }
 pub fn overlay() -> bool { OVERLAY.with(|o| o.get()) }
 
+thread_local! { static LONG_PRESS_TAKEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// 这次长按已经有人用了（编辑器把块提起来拖）：不要再补一次右键，那会让正文拿到焦点、弹出键盘。
+pub fn take_long_press() { LONG_PRESS_TAKEN.with(|t| t.set(true)); }
+
 /// 长按当右键：侧栏的行、主页的卡片和回收站的行，菜单原本都挂在右键上。
 pub fn long_press_layer() -> impl IntoElement {
     canvas(|_, _, _| {}, |_, _, window, _| {
@@ -431,6 +455,7 @@ pub fn long_press_layer() -> impl IntoElement {
             let position = ev.position;
             // 当前事件还在分发，右键放到它结束之后。
             window.defer(cx, move |window, cx| {
+                if LONG_PRESS_TAKEN.with(|t| t.replace(false)) { return; }
                 let modifiers = Modifiers::default();
                 window.dispatch_event(PlatformInput::MouseDown(MouseDownEvent { button: MouseButton::Right, position, modifiers, click_count: 1, first_mouse: false }), cx);
                 window.dispatch_event(PlatformInput::MouseUp(MouseUpEvent { button: MouseButton::Right, position, modifiers, click_count: 1 }), cx);
@@ -453,28 +478,14 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
     }
 }
 
-/// 系统的文件选择器在 gpui-pre-ios 0.3.12 里还没有实现，调用只会返回错误。
-/// 所有选文件、存文件的入口都经过这两个函数：先如实告诉使用者，日后接上原生选择器也只改这里。
-pub fn prompt_for_paths(cx: &mut App, options: PathPromptOptions) -> impl Future<Output = Result<anyhow::Result<Option<Vec<std::path::PathBuf>>>, impl std::fmt::Debug + use<>>> + use<> {
-    files_unavailable(cx);
-    cx.prompt_for_paths(options)
-}
-
-pub fn prompt_for_new_path(cx: &mut App, directory: &std::path::Path, name: Option<&str>) -> impl Future<Output = Result<anyhow::Result<Option<std::path::PathBuf>>, impl std::fmt::Debug + use<>>> + use<> {
-    files_unavailable(cx);
-    cx.prompt_for_new_path(directory, name)
-}
-
-fn files_unavailable(cx: &mut App) {
-    let Some(handle) = cx.windows().first().copied() else { return };
-    cx.defer(move |cx| {
-        let _ = handle.update(cx, |_, window, cx| {
-            let title = crate::settings::tr("iOS 版暂不支持选择文件", "Choosing files is not available on iOS yet");
-            let detail = crate::settings::tr("导入、导出和插入文件暂不可用。", "Import, export and file insertion are unavailable.");
-            drop(window.prompt(PromptLevel::Info, title, Some(detail), &[crate::settings::tr("好", "OK")], cx));
-        });
-    });
-}
+/// 选文件、存文件都经过这里（上游 gpui-pre-ios 0.3.12 没有实现，见 `files.rs`）。
+pub fn prompt_for_paths(_: &mut App, options: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open(options, false) }
+/// 同上，只让选图片（插入图片、上传封面）。
+pub fn prompt_for_images(_: &mut App, options: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open(options, true) }
+/// 给出的是沙盒里的临时路径：调用方写完后要调 `exported`，系统的面板才把它存到使用者选的地方。
+pub fn prompt_for_new_path(_: &mut App, _: &std::path::Path, name: Option<&str>) -> files::Reply<Option<std::path::PathBuf>> { files::new_path(name) }
+/// `prompt_for_new_path` 给的路径写好了。
+pub fn exported(path: &std::path::Path) { files::export(path) }
 
 /// 抽屉：侧栏从左侧滑入盖在内容上，点右侧的遮罩收起。
 pub fn drawer(sidebar: AnyElement, safe: Edges<Pixels>, cx: &mut Context<Workspace>) -> AnyElement {

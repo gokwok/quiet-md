@@ -27,6 +27,7 @@ thread_local! { static TARGET: RefCell<Option<(AsyncApp, AnyWindowHandle, WeakEn
 /// 顺便记下回到 GPUI 的路：菜单项的回调来自系统，手里没有 `App`。
 pub fn begin(allowed: bool, window: &Window, cx: &mut Context<Workspace>) {
     ALLOWED.with(|a| a.set(allowed));
+    super::files::attach(window);
     TARGET.with(|t| if t.borrow().is_none() { *t.borrow_mut() = Some((cx.to_async(), window.window_handle(), cx.weak_entity())); });
     BUTTONS.with(|b| for button in b.borrow_mut().iter_mut() { button.seen = false; if !allowed { button.set_shown(false); } });
     window.on_next_frame(|_, _| BUTTONS.with(|b| for button in b.borrow_mut().iter_mut() { if !button.seen { button.set_shown(false); } }));
