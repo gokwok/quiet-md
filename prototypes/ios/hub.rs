@@ -25,6 +25,13 @@ fn row(id: SharedString, icon: impl IntoElement, title: String, count: Option<us
         .child(crate::ui::icon("chevron-right", 14., Theme::text_caption()))
 }
 
+/// 一组行：比底色亮一档的圆角块，行与行之间一道细线，外面不描边（走查 V2；设置页的 `settings::group` 带描边）。
+fn group(rows: Vec<AnyElement>) -> Div {
+    let n = rows.len();
+    div().w_full().flex().flex_col().rounded(px(12.)).bg(crate::theme::raised(Theme::bg_body())).overflow_hidden()
+        .children(rows.into_iter().enumerate().map(move |(i, r)| div().w_full().flex().flex_col().when(i + 1 < n, |d| d.border_b_1().border_color(crate::ui::list_line())).child(r)))
+}
+
 /// 长按出这一项的菜单，和主页的卡片一样挂在右键上。
 fn with_menu(row: Stateful<Div>, e: &Entry, cx: &mut Context<Workspace>) -> Stateful<Div> {
     let id = e.id.clone();
@@ -78,10 +85,10 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         .child(super::large_title(tr("主页", "Home")))
         .child(div().mb(px(16.)).child(super::lead_search(tr("搜索文档", "Search documents"), cx)))
         .child(favourites)
-        .child(div().mt(px(20.)).px(px(16.)).child(crate::settings::group(None, vec![all])))
+        .child(div().mt(px(20.)).px(px(16.)).child(group(vec![all])))
         .child(folders_head)
-        .when(!folder_rows.is_empty() && !super::folders_folded(), |d| d.child(div().px(px(16.)).child(crate::settings::group(None, folder_rows))))
-        .when(!recent_rows.is_empty(), |d| d.child(section(tr("最近打开", "Recently opened"))).child(div().px(px(16.)).child(crate::settings::group(None, recent_rows))));
+        .when(!folder_rows.is_empty() && !super::folders_folded(), |d| d.child(div().px(px(16.)).child(group(folder_rows))))
+        .when(!recent_rows.is_empty(), |d| d.child(section(tr("最近打开", "Recently opened"))).child(div().px(px(16.)).child(group(recent_rows))));
     div().flex_1().min_w_0().h_full().relative()
         .child(div().id("hub").size_full().overflow_y_scroll().child(content))
         .child(super::top_fade(super::home_bg()))

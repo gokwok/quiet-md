@@ -236,6 +236,9 @@ pub fn sheet_scrim() -> impl IntoElement {
         .with_animation("sheet-scrim", Animation::new(Duration::from_millis(220)), |d, t| d.opacity(t))
 }
 
+/// 底部面板不要描边：手机上只靠填充色、阴影和下面的明暗分开（走查 V2），桌面照旧。
+pub fn sheet_plane<E: Styled>(e: E) -> E { if is_compact() { e.border_0() } else { e } }
+
 /// 手机上有 Liquid Glass 时，外壳的按钮是悬浮在内容之上的玻璃，内容从它们下面滚过。
 pub fn floating() -> bool { is_compact() && glass::supported() }
 
@@ -423,7 +426,7 @@ pub fn icon_picker(cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let grid = div().px(px(12.)).py(px(8.)).flex().flex_wrap().children(FOLDER_ICONS.iter().enumerate().map(|(i, em)|
         div().id(("folder-icon", i)).w(px(cell.floor())).h(px(48.)).flex().items_center().justify_center().rounded(px(10.)).text_size(px(26.))
             .active(|s| s.bg(Theme::fill_pressed())).child(*em).on_click(cx.listener(set(Some(em.to_string()), id.clone())))));
-    let panel = crate::editor_ui::popover().id("folder-icons").occlude().w(menu_w(0.)).py(px(crate::ui::MENU_PAD_Y))
+    let panel = sheet_plane(crate::editor_ui::popover()).id("folder-icons").occlude().w(menu_w(0.)).py(px(crate::ui::MENU_PAD_Y))
         .on_mouse_down_out(cx.listener(|_, _, _, cx| { pick_icon(None); cx.notify(); }))
         .child(div().px(px(20.)).pt(px(8.)).pb(px(4.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text_caption()).child(crate::settings::tr("文件夹图标", "Folder icon")))
         .child(grid)
