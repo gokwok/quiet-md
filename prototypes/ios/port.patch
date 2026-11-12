@@ -380,7 +380,7 @@
                          seg("doc-search", "search")
                              .tip_label(crate::shortcuts::keys(crate::settings::text("搜索(⌘ + J)")).into(), TipSide::Below)
                              .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(FocusSearch), cx))),
-@@ -1305,23 +1412,54 @@
+@@ -1305,23 +1412,55 @@
                      .child(
                          // Straight to a new document: no 新建 menu, as 导入 is rare.
                          seg("doc-new", "plus").tip(crate::settings::tr("新建文档", "New document"), None).on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx))),
@@ -419,9 +419,10 @@
 +        crate::ios::shot::set_inert(alert);
 +        let glass = compact && (!covered || alert) && !crate::ios::sheet_open() && self.rename.is_none() && crate::ios::new_folder_parent().is_none() && !self.home.sort_menu && self.create_menu.is_none() && self.import_menu.is_none() && self.theme_menu.is_none() && self.trash_menu.is_none();
 +        crate::ios::glass::begin(glass, window);
-+        // 有背景的文档：纸滚到顶栏下面之后，顶栏是一条毛玻璃带。
-+        let veiled = glass && crate::ios::glass::supported() && self.view == View::Doc && crate::ios::style::of(self).is_some_and(|s| s.background.is_some())
-+            && self.editor.as_ref().is_some_and(|e| e.read(cx).paper_top() < crate::ios::chrome_top());
++        // 首页和文档共用顶部玻璃；首页的滚动阈值在绘制时读取，和惯性滚动同步。
++        let veiled = glass && crate::ios::glass::supported() && ((self.view == View::Home && crate::ios::home_page() == crate::ios::HomePage::Hub && self.batch.is_none())
++            || (self.view == View::Doc && self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled()
++                || (crate::ios::style::of(self).is_some_and(|s| s.background.is_some()) && e.read(cx).paper_top() < crate::ios::chrome_top()))));
 +        crate::ios::veil::begin(veiled, window);
 +        crate::ios::alert::begin(window);
 +        crate::ios::card::begin(window);
@@ -440,7 +441,7 @@
          let row_menu = self.render_row_menu(window, cx);
          let resize = self.sidebar_open.then(|| self.render_resize_handle(window, cx));
          let resize_overlay = self.render_resize_overlay(cx);
-@@ -1346,7 +1484,8 @@
+@@ -1346,7 +1485,8 @@
                  .h_full()
                  .flex()
                  .flex_col()
@@ -450,7 +451,7 @@
                  .child(
                      div()
                          .flex_1()
-@@ -1358,10 +1497,19 @@
+@@ -1358,10 +1498,19 @@
                                  .flex_1()
                                  .min_w_0()
                                  .h_full()
@@ -466,11 +467,11 @@
                  )
 +                .children(crate::ios::keybar::render(self, window, cx))
 +                // 悬浮的顶栏画在正文之后，才接得到点击。
-+                .when(crate::ios::floating(), |d| d.children((!crate::ios::style::banded() && !self.editor.as_ref().is_some_and(|e| e.read(cx).cover_on_top())).then(|| crate::ios::top_fade(crate::editor_theme::Theme::bg_body(), self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled())))).children(crate::ios::veil::on().then(|| div().absolute().top_0().left_0().right_0().h(px(crate::ios::chrome_top())).child(crate::ios::veil::slot(crate::ios::style::chrome_ink().is_some_and(|(ink, _)| ink.l > 0.5))))).child(self.top_bar(cx)))
++                .when(crate::ios::floating(), |d| d.children((!crate::ios::veil::on() && !crate::ios::style::banded() && !self.editor.as_ref().is_some_and(|e| e.read(cx).cover_on_top())).then(|| crate::ios::top_fade(crate::editor_theme::Theme::bg_body(), self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled())))).children(crate::ios::veil::on().then(|| div().absolute().top_0().left_0().right_0().h(px(crate::ios::chrome_top())).child(crate::ios::veil::slot(crate::ios::style::chrome_ink().map_or(crate::theme::dark(), |(ink, _)| ink.l > 0.5))))).child(self.top_bar(cx)))
                  .into_any_element(),
              View::Home => self.render_home(window, cx),
              View::Folder => self.render_folder(window, cx),
-@@ -1375,13 +1523,20 @@
+@@ -1375,13 +1524,20 @@
          // surface beside it; the change of value is the only line between
          // them (no gutter, radius, border or shadow).
          // A document sits on its theme's page colour.
@@ -494,7 +495,7 @@
          div()
              .id("workspace")
              .key_context("Workspace")
-@@ -1405,6 +1560,9 @@
+@@ -1405,6 +1561,9 @@
              // whichever window macOS considers active.
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
              .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
@@ -504,7 +505,7 @@
              .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
                  crate::quick_note::persist(cx);
                  if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
-@@ -1421,7 +1579,7 @@
+@@ -1421,7 +1580,7 @@
              .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
              .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
              .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
@@ -513,7 +514,7 @@
                  cx.notify();
              }))
              .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
-@@ -1458,7 +1616,7 @@
+@@ -1458,7 +1617,7 @@
              }))
              // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
              .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
@@ -522,7 +523,7 @@
                  if ev.keystroke.key == "escape" && w.has_home_drag() {
                      w.cancel_home_drag(cx); cx.stop_propagation(); return;
                  }
-@@ -1490,10 +1648,16 @@
+@@ -1490,10 +1649,16 @@
                  if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
                  cx.stop_propagation();
              }))

@@ -1,4 +1,4 @@
-//! 有背景的文档页顶上那条毛玻璃带（照 Craft）：纸滚到顶栏下面时，从这条带子后面透出来，是糊的。
+//! 首页和文档共用的顶部 Liquid Glass：内容从下面滚过，系统负责折射、反光和深浅色适配。
 //!
 //! GPUI 没有模糊，所以是原生浮层最底下的一块系统材质；浮层盖在 GPUI 上面，顶栏中间的小字标题会被它糊掉，
 //! 所以标题也跟着搬到这块材质上，用系统的标签写。每帧有占位才显示（`slot`、`title`），没有就收起。
@@ -10,10 +10,10 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-struct Veil { view: *mut AnyObject, title: *mut AnyObject, sub: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, text: (String, String), shown: bool }
+struct Veil { view: *mut AnyObject, glass: *mut AnyObject, title: *mut AnyObject, sub: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, text: (String, String), shown: bool }
 thread_local! { static VEIL: RefCell<Option<Veil>> = const { RefCell::new(None) }; }
 thread_local! { static SEEN: Cell<(bool, bool)> = const { Cell::new((false, false)) }; }
-// 这一帧用不用这条带子（有背景、有玻璃、纸已经滚到顶栏下面）。标题看它决定画在哪边。
+// 这一帧允许显示带子。首页在绘制时读滚动位置，文档由正文的位置决定。
 thread_local! { static ON: Cell<bool> = const { Cell::new(false) }; }
 
 pub fn on() -> bool { ON.with(|o| o.get()) }
@@ -22,6 +22,12 @@ pub fn on() -> bool { ON.with(|o| o.get()) }
 pub fn begin(on: bool, window: &Window) {
     ON.with(|o| o.set(on));
     SEEN.with(|s| s.set((false, false)));
+    if !on { VEIL.with(|v| if let Some(veil) = v.borrow_mut().as_mut() { unsafe {
+        let layer: *mut AnyObject = msg_send![veil.view, layer];
+        let _: () = msg_send![layer, removeAllAnimations];
+        let _: () = msg_send![veil.view, setAlpha: 0f64];
+        veil.shown = false;
+    } }); }
     window.on_next_frame(|_, _| {
         let (band, title) = SEEN.with(|s| s.get());
         VEIL.with(|v| if let Some(veil) = v.borrow_mut().as_mut() { unsafe {
@@ -46,7 +52,26 @@ pub fn slot(dark: bool) -> impl IntoElement {
 
 /// 标题的占位（顶栏中间那一格）：两行小字写在带子上。
 pub fn title(title: SharedString, folder: Option<SharedString>, ink: Hsla, sub: Hsla) -> impl IntoElement {
-    canvas(move |bounds, _, _| write(bounds, &title, folder.as_deref().unwrap_or(""), ink, sub), |_, _, _, _| {}).w_full().h(px(34.))
+    canvas(move |bounds, _, _| write(bounds, &title, folder.as_deref().unwrap_or(""), ink, sub, false), |_, _, _, _| {}).w_full().h(px(34.))
+}
+
+/// 首页的滚动标题。绘制时读取偏移，惯性滚动和玻璃的位置在同一帧更新。
+pub fn home_header(scroll: &ScrollHandle, title: SharedString) -> impl IntoElement {
+    let scroll = scroll.clone();
+    canvas(move |bounds, window, _| {
+        if !on() { return; }
+        let offset = -scroll.offset().y;
+        VEIL.with(|v| if let Some(veil) = v.borrow_mut().as_mut() { unsafe {
+            if offset <= px(1.) && veil.shown { veil.shown = false; fade(veil.view, 0.); }
+            if offset < px(68.) && !veil.text.0.is_empty() { veil.text = Default::default(); fade(veil.title, 0.); fade(veil.sub, 0.); }
+        } });
+        if offset <= px(1.) { return; }
+        place(bounds, crate::theme::dark(), window);
+        if offset >= px(68.) {
+            let frame = Bounds::new(point(bounds.left() + px(72.), bounds.top() + super::insets().top + px(9.)), size(bounds.size.width - px(144.), px(34.)));
+            write(frame, &title, "", crate::theme::Theme::text(), crate::theme::Theme::text_caption(), true);
+        }
+    }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
 }
 
 fn place(frame: Bounds<Pixels>, dark: bool, window: &Window) {
@@ -57,16 +82,25 @@ fn place(frame: Bounds<Pixels>, dark: bool, window: &Window) {
     VEIL.with(|v| unsafe {
         let mut slot = v.borrow_mut();
         if slot.is_none() {
-            let (Some(effect_view), Some(blur), Some(label)) = (AnyClass::get(c"UIVisualEffectView"), AnyClass::get(c"UIBlurEffect"), AnyClass::get(c"UILabel")) else { return; };
-            // 7 = UIBlurEffectStyleSystemThinMaterial：下面的颜色透得出来，字看不清。
-            let effect: *mut AnyObject = msg_send![blur, effectWithStyle: 7isize];
-            let view: *mut AnyObject = msg_send![effect_view, alloc];
-            let view: *mut AnyObject = msg_send![view, initWithEffect: effect];
+            let (Some(effect_view), Some(glass), Some(label)) = (AnyClass::get(c"UIVisualEffectView"), AnyClass::get(c"UIGlassEffect"), AnyClass::get(c"UILabel")) else { return; };
+            // Regular 在正文经过时保持标题可读，同时由系统提供折射与高光；不再叠普通模糊。
+            let effect: *mut AnyObject = msg_send![glass, effectWithStyle: 0isize];
+            let _: () = msg_send![effect, setInteractive: false];
+            let material: *mut AnyObject = msg_send![effect_view, alloc];
+            let material: *mut AnyObject = msg_send![material, initWithEffect: effect];
+            let view: *mut AnyObject = msg_send![AnyClass::get(c"UIView").unwrap(), new];
+            let _: () = msg_send![view, setClipsToBounds: true];
+            let _: () = msg_send![view, addSubview: material];
             let _: () = msg_send![view, setUserInteractionEnabled: false];
+            if let (Some(corners), Some(radius)) = (AnyClass::get(c"UICornerConfiguration"), AnyClass::get(c"UICornerRadius")) {
+                let edge: *mut AnyObject = msg_send![radius, fixedRadius: 28f64];
+                let config: *mut AnyObject = msg_send![corners, configurationWithUniformRadius: edge];
+                let _: () = msg_send![material, setCornerConfiguration: config];
+            }
             let _: () = msg_send![view, setAlpha: 0f64];
             // 垫在浮层最底下：玻璃按钮在它上面。
             let _: () = msg_send![parent, insertSubview: view, atIndex: 0isize];
-            let content: *mut AnyObject = msg_send![view, contentView];
+            let content = view;
             let make = |size: f64, weight: f64| {
                 let l: *mut AnyObject = msg_send![label, new];
                 let font: *mut AnyObject = msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: size, weight: weight];
@@ -75,20 +109,23 @@ fn place(frame: Bounds<Pixels>, dark: bool, window: &Window) {
                 let _: () = msg_send![content, addSubview: l];
                 l
             };
-            *slot = Some(Veil { view, title: make(15., 0.3), sub: make(11., 0.), frame: Bounds::default(), dark: None, text: Default::default(), shown: false });
+            *slot = Some(Veil { view, glass: material, title: make(15., 0.3), sub: make(11., 0.), frame: Bounds::default(), dark: None, text: Default::default(), shown: false });
         }
         let veil = slot.as_mut().unwrap();
         if veil.frame != frame {
             veil.frame = frame;
             let rect = CGRect::new(CGPoint::new(f64::from(frame.origin.x), f64::from(frame.origin.y)), CGSize::new(f64::from(frame.size.width), f64::from(frame.size.height)));
             let _: () = msg_send![veil.view, setFrame: rect];
+            // 裁掉屏幕外的顶边和两侧折射，只保留底边；文字保持在原本的坐标里。
+            let glass = CGRect::new(CGPoint::new(-40., -80.), CGSize::new(rect.size.width + 80., rect.size.height + 80.));
+            let _: () = msg_send![veil.glass, setFrame: glass];
         }
         if veil.dark != Some(dark) { veil.dark = Some(dark); let _: () = msg_send![veil.view, setOverrideUserInterfaceStyle: if dark { 2isize } else { 1isize }]; }
         if !veil.shown { veil.shown = true; fade(veil.view, 1.); }
     });
 }
 
-fn write(frame: Bounds<Pixels>, title: &str, folder: &str, ink: Hsla, sub: Hsla) {
+fn write(frame: Bounds<Pixels>, title: &str, folder: &str, ink: Hsla, sub: Hsla, centered: bool) {
     SEEN.with(|s| s.set((s.get().0, true)));
     VEIL.with(|v| unsafe {
         let mut slot = v.borrow_mut();
@@ -99,6 +136,8 @@ fn write(frame: Bounds<Pixels>, title: &str, folder: &str, ink: Hsla, sub: Hsla)
         let (ty, sy) = if folder.is_empty() { (y + 7., y + 27.) } else { (y, y + 20.) };
         let _: () = msg_send![veil.title, setFrame: CGRect::new(CGPoint::new(x, ty), CGSize::new(w, 20.))];
         let _: () = msg_send![veil.sub, setFrame: CGRect::new(CGPoint::new(x, sy), CGSize::new(w, 14.))];
+        let _: () = msg_send![veil.title, setTextAlignment: if centered { 1isize } else { 0isize }];
+        let _: () = msg_send![veil.sub, setTextAlignment: if centered { 1isize } else { 0isize }];
         let _: () = msg_send![veil.title, setTextColor: super::glass::ui_color(ink)];
         let _: () = msg_send![veil.sub, setTextColor: super::glass::ui_color(sub)];
         if veil.text.0 != title || veil.text.1 != folder {

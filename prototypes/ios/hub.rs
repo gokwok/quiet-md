@@ -11,6 +11,7 @@ use crate::theme::Theme;
 const RECENT: usize = 5;
 /// 收藏卡片的宽度；高度按主页网格里卡片的比例。
 const CARD_W: f32 = 148.;
+thread_local! { static SCROLL: ScrollHandle = ScrollHandle::new(); }
 
 fn section(title: &'static str) -> Div {
     div().mt(px(24.)).mb(px(4.)).px(px(24.)).text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::BOLD).text_color(Theme::text()).child(title)
@@ -29,7 +30,7 @@ fn row(id: SharedString, icon: impl IntoElement, title: String, count: Option<us
 fn group(rows: Vec<AnyElement>) -> Div {
     let n = rows.len();
     div().w_full().flex().flex_col()
-        .children(rows.into_iter().enumerate().map(move |(i, r)| div().w_full().flex().flex_col().child(r).when(i + 1 < n, |d| d.child(div().mx(px(16.)).h(px(1.)).bg(crate::ui::list_line())))))
+        .children(rows.into_iter().enumerate().map(move |(i, r)| div().w_full().flex().flex_col().child(r).when(i + 1 < n, |d| d.child(div().ml(px(50.)).mr(px(16.)).h(px(1.)).bg(crate::ui::list_line())))))
 }
 
 /// 长按出这一项的菜单，和主页的卡片一样挂在右键上。
@@ -42,6 +43,7 @@ fn with_menu(w: &Workspace, row: Stateful<Div>, e: &Entry, cx: &mut Context<Work
 }
 
 pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let scroll = SCROLL.with(Clone::clone);
     // 最近收藏的在前。
     let mut starred: Vec<Entry> = w.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.starred > 0).cloned().collect();
     starred.sort_by(|a, b| b.meta.starred.cmp(&a.meta.starred));
@@ -86,7 +88,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         .child(div().flex_1())
         .child(div().relative().size(px(40.)).flex().items_center().justify_center().child(crate::ui::icon("ellipsis", 20., Theme::text_caption()))
             .child(super::menu::button("hub-folders-more", super::hub_menu_items())));
-    let content = div().w_full().flex().flex_col().pt(super::insets().top + px(12.)).pb(px(super::dock_bottom()))
+    let content = div().w_full().flex().flex_col().pt(px(super::chrome_top() + 12.)).pb(px(super::dock_bottom()))
         .child(super::large_title(tr("主页", "Home")))
         .child(div().mb(px(16.)).child(super::lead_search(tr("搜索文档", "Search documents"), cx)))
         .child(favourites)
@@ -95,7 +97,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         .when(!folder_rows.is_empty() && !super::folders_folded(), |d| d.child(div().px(px(8.)).child(group(folder_rows))))
         .when(!recent_rows.is_empty(), |d| d.child(section(tr("最近打开", "Recently opened"))).child(div().px(px(8.)).child(group(recent_rows))));
     div().flex_1().min_w_0().h_full().relative()
-        .child(div().id("hub").size_full().overflow_y_scroll().child(content))
-        .child(super::top_fade(super::home_bg(), false))
+        .child(div().id("hub").size_full().overflow_y_scroll().track_scroll(&scroll).child(content))
+        .child(super::veil::home_header(&scroll, tr("主页", "Home").into()))
         .into_any_element()
 }
