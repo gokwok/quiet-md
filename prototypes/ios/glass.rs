@@ -209,6 +209,8 @@ fn place(key: &'static str, look: Look, window: &Window) {
                 let _: () = msg_send![pane.tabs[i], setImage: icon_image(name, *size)];
             }
             let _: () = msg_send![pane.tabs[i], setTintColor: ui_color(*color)];
+            // 4 = UIViewContentModeCenter：SF Symbols 不是正方形，照原样居中。
+            if name.starts_with("sf:") { let _: () = msg_send![pane.tabs[i], setContentMode: 4isize]; }
             let s = f64::from(*size);
             let _: () = msg_send![pane.tabs[i], setFrame: CGRect::new(CGPoint::new(4. + cell * i as f64 + (cell - s) / 2., (h - s) / 2.), CGSize::new(s, s))];
         }
@@ -247,6 +249,12 @@ pub(super) unsafe fn ui_color(color: Hsla) -> *mut AnyObject {
 
 /// 把资源里的 SVG 图标画成模板图：UIKit 不认 SVG，颜色由 `tintColor` 给。
 unsafe fn icon_image(name: &str, size: f32) -> *mut AnyObject {
+    // `sf:名字`：系统的 SF Symbols（原生玻璃上的图标，不占图标名额）。
+    if let Some(name) = name.strip_prefix("sf:") { unsafe {
+        let config: *mut AnyObject = msg_send![AnyClass::get(c"UIImageSymbolConfiguration").unwrap(), configurationWithPointSize: f64::from(size) * 0.82, weight: 5isize];
+        let image: *mut AnyObject = msg_send![AnyClass::get(c"UIImage").unwrap(), systemImageNamed: ns_string(name), withConfiguration: config];
+        return if image.is_null() { image } else { msg_send![image, imageWithRenderingMode: 2isize] };
+    } }
     const SCALE: f32 = 3.;
     let Ok(Some(bytes)) = AssetSource::load(&crate::assets::Assets, &if name.contains('/') { format!("{name}.svg") } else { format!("icons/{name}.svg") }) else { return std::ptr::null_mut(); };
     let source = String::from_utf8_lossy(&bytes).replace("currentColor", "#fff");

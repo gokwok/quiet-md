@@ -80,6 +80,27 @@ pub fn present(rect: Bounds<Pixels>, items: Vec<Item>, window: &Window) {
     }
 }
 
+/// 系统键盘自己的「粘贴」、三指的剪切 / 复制 / 粘贴手势，发的是响应链上的 `cut:` `copy:` `paste:`。GPUI 的视图
+/// 没有实现它们：补上，走和编辑菜单同一条路。每帧调用，只装一次。
+pub fn responder_actions(window: &Window) {
+    thread_local! { static DONE: Cell<bool> = const { Cell::new(false) }; }
+    if DONE.with(|d| d.get()) { return; }
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
+    let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
+    let view = handle.ui_view.as_ptr() as *mut AnyObject;
+    extern "C-unwind" fn cut(_: *mut AnyObject, _: objc2::runtime::Sel, _: *mut AnyObject) { super::menu::chosen("edit-cut") }
+    extern "C-unwind" fn copy(_: *mut AnyObject, _: objc2::runtime::Sel, _: *mut AnyObject) { super::menu::chosen("edit-copy") }
+    extern "C-unwind" fn paste(_: *mut AnyObject, _: objc2::runtime::Sel, _: *mut AnyObject) { super::menu::chosen("edit-paste") }
+    type Act = extern "C-unwind" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject);
+    unsafe {
+        let class = objc2::ffi::object_getClass(view) as *mut AnyClass;
+        for (sel, imp) in [(objc2::sel!(cut:), cut as Act), (objc2::sel!(copy:), copy as Act), (objc2::sel!(paste:), paste as Act)] {
+            objc2::ffi::class_addMethod(class, sel, std::mem::transmute::<Act, objc2::runtime::Imp>(imp), c"v@:@".as_ptr());
+        }
+    }
+    DONE.with(|d| d.set(true));
+}
+
 /// 不该再显示了（选区没了、开了别的菜单）。
 pub fn dismiss() {
     if SHOWN.with(|s| s.borrow_mut().take()).is_none() { return; }

@@ -18,7 +18,14 @@ fn button(id: &'static str, name: &'static str) -> Stateful<Div> {
 pub fn render(ws: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let editor = ws.editor.as_ref()?;
     let ed = editor.read(cx);
-    if !super::keyboard_up(window) || ed.read_only || !ed.focus.is_focused(window) { return None; }
+    if ed.read_only || !ed.focus.is_focused(window) { return None; }
+    // 选中了文字：这一条让给选区工具栏（`Editor::toolbar` 升在同一个位置）。
+    if ed.selection_bar() { return None; }
+    // 选着单元格：让给表格工具栏。
+    if ed.compact() && ed.core.cell_sel.is_some() { return None; }
+    let in_table = ed.caret_cell().is_some();
+    // 没有软键盘（接着硬键盘）：贴在屏幕底边，下面让出 Home 指示条。
+    let foot = if super::keyboard_up(window) { px(0.) } else { super::safe(window).bottom };
     let in_title = ed.core.sel.head.block == crate::editor::core::TITLE;
     let act = |id: &'static str, name: &'static str, action: fn() -> Box<dyn Action>| {
         button(id, name).on_click(move |_, window, cx| window.dispatch_action(action(), cx))
@@ -38,6 +45,8 @@ pub fn render(ws: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> O
             .child(sep())
             .child(menu("kb-add", "plus", true))
             .child(menu("kb-block", "grip-vertical", false))
+            // 光标在表格里：选择单元格（再选行、列，合并、底色、删除都在升起的表格工具栏上）。
+            .when(in_table, |d| { let editor = editor.clone(); d.child(button("kb-cells", "table").on_click(move |_, _, cx| editor.update(cx, |ed, cx| ed.cell_select_start(cx)))) })
             .child(sep())
             .child(act("kb-h1", "heading-1", || Box::new(k::TurnH1)))
             .child(act("kb-h2", "heading-2", || Box::new(k::TurnH2)))
@@ -58,7 +67,7 @@ pub fn render(ws: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> O
         window.focus(&w.focus, cx);
         cx.notify();
     }));
-    Some(div().id("keybar").flex_none().h(px(HEIGHT)).w_full().flex().items_center()
+    Some(div().id("keybar").flex_none().h(px(HEIGHT) + foot).pb(foot).w_full().flex().items_center()
         .bg(Theme::bg_body()).border_t_1().border_color(Theme::line_divider())
         // 按在工具条上不抢编辑器的焦点。
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())

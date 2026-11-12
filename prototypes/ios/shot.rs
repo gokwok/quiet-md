@@ -59,10 +59,20 @@ pub fn overlay(metal: *mut AnyObject) -> *mut AnyObject {
         let view: *mut AnyObject = msg_send![view, initWithFrame: frame];
         // 2 | 16：宽高跟着父视图。
         let _: () = msg_send![view, setAutoresizingMask: 18usize];
+        // 系统菜单从按钮往上找视图控制器来呈现：这一层不在 GPUI 那个控制器的视图里，自己带一个（一直留着）。
+        // 不能挂成根控制器的子控制器（视图直接在窗口里，UIKit 的层级检查会抛异常），所以是游离的：
+        // 能弹，系统日志里有一条「detached view controller」的警告。
+        let vc: *mut AnyObject = msg_send![AnyClass::get(c"UIViewController").unwrap(), new];
+        let _: () = msg_send![vc, setView: view];
         let _: () = msg_send![sup, insertSubview: view, aboveSubview: metal];
         OVERLAY.with(|o| o.set(view));
         view
     }
+}
+/// 弹着确认框时，玻璃和系统菜单的按钮照旧画着（页面看上去没变），但不接触摸：整层关掉交互，触摸落回 GPUI 的遮罩上。
+pub fn set_inert(on: bool) {
+    let view = OVERLAY.with(|o| o.get());
+    if !view.is_null() { unsafe { let _: () = msg_send![view, setUserInteractionEnabled: !on]; } }
 }
 fn pass_class() -> &'static AnyClass {
     static CLASS: std::sync::OnceLock<&'static AnyClass> = std::sync::OnceLock::new();
@@ -211,6 +221,29 @@ pub fn slide_back(from: f32, restore: &'static str) {
         });
     });
 }
+// 跟手返回取消后还盖着的快照，和它还要再等几帧。
+thread_local! { static PARKED: RefCell<Option<(Retained<AnyObject>, Option<Retained<AnyObject>>)>> = const { RefCell::new(None) }; }
+thread_local! { static PARK_FRAMES: Cell<u32> = const { Cell::new(0) }; }
+/// 跟手返回取消、原来那页正要恢复：快照先原样盖着，等那一页实际画过 `frames` 帧（`parked_tick`）再淡。
+/// 按时间等不行：真机上文档页重新排版、图片重新解码可能比固定的几十毫秒慢，快照先淡掉就会闪出下面那页。
+pub fn park_page(frames: u32) {
+    let Some(snap) = PAGE_SHOT.with(|s| s.borrow_mut().take()) else { return; };
+    PARKED.with(|p| *p.borrow_mut() = Some((snap, DIM.with(|d| d.borrow_mut().take()))));
+    PARK_FRAMES.with(|f| f.set(frames));
+}
+/// 每帧调用：还盖着快照就数一帧，数完淡掉。返回真表示还要接着出帧。
+pub fn parked_tick() -> bool {
+    if PARKED.with(|p| p.borrow().is_none()) { return false; }
+    let left = PARK_FRAMES.with(|f| { let n = f.get().saturating_sub(1); f.set(n); n });
+    if left > 0 { return true; }
+    if let Some((snap, dim)) = PARKED.with(|p| p.borrow_mut().take()) {
+        drop_page();
+        PAGE_SHOT.with(|s| *s.borrow_mut() = Some(snap));
+        DIM.with(|d| *d.borrow_mut() = dim);
+        fade_page();
+    }
+    false
+}
 /// 原来那页已经恢复（这一帧会画出来）：快照稍后淡掉、拿走。
 pub fn fade_page() {
     let Some(snap) = PAGE_SHOT.with(|s| s.borrow_mut().take()) else { return; };
@@ -271,22 +304,35 @@ pub fn settle() -> impl IntoElement {
 /// 面板的圆角：剪快照用。外壳的菜单是 12，编辑器的是 6，按大的剪，角上不会露出底下的东西。
 const SHEET_RADIUS: f64 = 12.;
 
-fn sink(b: Bounds<Pixels>) {
-    let (Some(metal), Some(sup)) = (metal(), superview()) else { return; };
+/// 屏幕上 `b` 那一块的快照（还没放进任何视图，位置就是 `b`）。长按浮起的预览也用它。
+pub fn snapshot(b: Bounds<Pixels>) -> Option<Retained<AnyObject>> {
+    let metal = metal()?;
     let (x, y, w, h) = (f64::from(b.origin.x), f64::from(b.origin.y), f64::from(b.size.width), f64::from(b.size.height));
-    if w < 1. || h < 1. { return; }
+    if w < 1. || h < 1. { return None; }
     unsafe {
         let snap: Option<Retained<AnyObject>> = msg_send![metal, snapshotViewAfterScreenUpdates: false];
-        let Some(snap) = snap else { return; };
+        let snap = snap?;
         let full: CGRect = msg_send![metal, frame];
         let _: () = msg_send![&*snap, setFrame: CGRect::new(CGPoint::new(-x, -y), full.size)];
         let clip: Retained<AnyObject> = msg_send![AnyClass::get(c"UIView").unwrap(), new];
         let _: () = msg_send![&*clip, setUserInteractionEnabled: false];
         let _: () = msg_send![&*clip, setClipsToBounds: true];
         let _: () = msg_send![&*clip, setFrame: CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))];
+        let _: () = msg_send![&*clip, addSubview: &*snap];
+        Some(clip)
+    }
+}
+/// 快照放进去的那一层（GPUI 视图的父视图，坐标和 GPUI 的一样）。
+pub fn container() -> Option<*mut AnyObject> { superview() }
+
+fn sink(b: Bounds<Pixels>) {
+    let (Some(metal), Some(sup)) = (metal(), superview()) else { return; };
+    let Some(clip) = snapshot(b) else { return; };
+    let y = f64::from(b.origin.y);
+    unsafe {
+        let full: CGRect = msg_send![metal, frame];
         let layer: *mut AnyObject = msg_send![&*clip, layer];
         let _: () = msg_send![layer, setCornerRadius: SHEET_RADIUS];
-        let _: () = msg_send![&*clip, addSubview: &*snap];
         let _: () = msg_send![sup, insertSubview: &*clip, aboveSubview: metal];
         let drop = full.size.height - y;
         let done = RcBlock::new(move || { let _: () = msg_send![&*clip, removeFromSuperview]; });

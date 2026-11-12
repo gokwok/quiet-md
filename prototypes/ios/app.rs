@@ -5,13 +5,22 @@ use gpui::{prelude::FluentBuilder as _, *};
 use crate::app::{View, Workspace};
 use crate::theme::Theme;
 
+pub mod alert;
+pub mod appicon;
+pub mod card;
 pub mod editmenu;
 pub mod files;
 pub mod glass;
 pub mod hub;
 pub mod keybar;
 pub mod menu;
+pub mod panel;
 pub mod shot;
+pub mod style;
+pub mod search;
+pub mod toast;
+pub mod veil;
+pub mod stylepanel;
 
 pub fn run() {
     crate::logging::init();
@@ -77,7 +86,7 @@ pub fn keyboard_up(window: &Window) -> bool { window.insets().ime.bottom > px(0.
 
 /// 浮层能用到的最低处：窗口高度减去 Home 指示条或键盘，键盘弹出时再减去工具条。
 pub fn visible_height(window: &Window) -> Pixels {
-    let bar = if keyboard_up(window) { px(keybar::HEIGHT) } else { px(0.) };
+    let bar = if editing() { px(keybar::HEIGHT) } else { px(0.) };
     window.viewport_size().height - safe(window).bottom - bar
 }
 
@@ -93,6 +102,7 @@ pub fn set_layout(compact: bool, safe: Edges<Pixels>, viewport: Size<Pixels>) {
     }
 }
 pub fn is_compact() -> bool { LAYOUT.with(|l| l.get().0) }
+pub fn layout() -> (bool, Edges<Pixels>, Size<Pixels>) { LAYOUT.with(|l| l.get()) }
 pub fn insets() -> Edges<Pixels> { LAYOUT.with(|l| l.get().1) }
 
 /// 手机上菜单不挂在按钮或手指旁边，而是从底部升起的动作面板：拇指够得着，也不会被手挡住。
@@ -102,7 +112,7 @@ pub fn place(corner: Anchor, pos: Point<Pixels>) -> Sheet {
     let (compact, safe, viewport) = LAYOUT.with(|l| l.get());
     let key = std::panic::Location::caller();
     if !compact { return Sheet { at: anchored().anchor(corner).position(pos).snap_to_window_with_margin(px(8.)), rise: false, key, kids: vec![] }; }
-    Sheet { at: anchored().anchor(Anchor::BottomCenter).position(point(viewport.width / 2., viewport.height - safe.bottom - px(8.))), rise: true, key, kids: vec![] }
+    Sheet { at: anchored().anchor(Anchor::BottomCenter).position(point(viewport.width / 2., viewport.height - safe.bottom - px(SHEET_INSET))), rise: true, key, kids: vec![] }
 }
 /// `place` 给出的浮层。手机上的动作面板出现时从下面升上来，收起时滑出屏幕（`shot`，按调用的那一处认面板）。
 pub struct Sheet { at: Anchored, rise: bool, key: &'static std::panic::Location<'static>, kids: Vec<AnyElement> }
@@ -166,7 +176,7 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>) -> AnyE
     if shot::page_pending() && !matches!(motion, Motion::Follow | Motion::Return(_)) { shot::drop_page(); }
     let page = div().flex_1().min_w_0().h_full().flex().relative().child(main)
         // 旧页滑走的这段时间里一直出帧：只属于这一页的玻璃要等它走完才露面。
-        .child(canvas(|_, window, _| if shot::sliding() { window.request_animation_frame() }, |_, _, _, _| {}).absolute().size_0());
+        .child(canvas(|_, window, _| { let parked = shot::parked_tick(); if parked || shot::sliding() { window.request_animation_frame() } }, |_, _, _, _| {}).absolute().size_0());
     if !is_compact() || epoch == 0 { return page.into_any_element(); }
     let w = f32::from(LAYOUT.with(|l| l.get().2.width));
     let off = move |p: f32| px(-shot::PARALLAX * w * (1. - p));
@@ -212,6 +222,11 @@ thread_local! { static KEYBOARD: std::cell::Cell<bool> = const { std::cell::Cell
 pub fn set_keyboard(up: bool) { KEYBOARD.with(|k| k.set(up)); }
 pub fn keyboard_shown() -> bool { KEYBOARD.with(|k| k.get()) }
 
+thread_local! { static EDITING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// 正文有焦点就是在编辑，不管软键盘出没出来（接着硬键盘时没有软键盘）：工具条和「完成」跟着它，不跟着键盘。
+pub fn set_editing(on: bool) { EDITING.with(|e| e.set(on)); }
+pub fn editing() -> bool { EDITING.with(|e| e.get()) }
+
 /// 打字时文档页右上角的「完成」：一块主色的玻璃，点了收起键盘。
 pub fn done_button() -> Stateful<Div> {
     div().id("doc-done").flex_none().size(px(44.)).rounded_full().occlude()
@@ -221,12 +236,15 @@ pub fn done_button() -> Stateful<Div> {
 /// 底部面板贴底居中的那个点（窗口坐标）。
 pub fn sheet_point() -> Point<Pixels> {
     let (_, safe, viewport) = LAYOUT.with(|l| l.get());
-    point(viewport.width / 2., viewport.height - safe.bottom - px(8.))
+    point(viewport.width / 2., viewport.height - safe.bottom - px(SHEET_INSET))
 }
-/// 动作面板占满屏宽（两侧各留 8）；宽屏用菜单自己的宽度。
+/// 底部面板是浮着的卡片：四周留这么多，圆角 `SHEET_RADIUS`（走查 V6；先不加抓手，也不上玻璃）。
+pub const SHEET_INSET: f32 = 12.;
+pub const SHEET_RADIUS: f32 = 24.;
+/// 动作面板占满屏宽（两侧各留 `SHEET_INSET`）；宽屏用菜单自己的宽度。
 pub fn menu_w(wide: f32) -> Pixels {
     let (compact, _, viewport) = LAYOUT.with(|l| l.get());
-    if compact { viewport.width - px(16.) } else { px(wide) }
+    if compact { viewport.width - px(SHEET_INSET * 2.) } else { px(wide) }
 }
 /// 动作面板下面压暗的一层。不接事件：点面板外关闭菜单仍由原来的处理负责。
 /// 深色下 `ui::scrim` 会跟着主题反相（发白），这里用不随主题变的黑。
@@ -237,7 +255,7 @@ pub fn sheet_scrim() -> impl IntoElement {
 }
 
 /// 底部面板不要描边：手机上只靠填充色、阴影和下面的明暗分开（走查 V2），桌面照旧。
-pub fn sheet_plane<E: Styled>(e: E) -> E { if is_compact() { e.border_0() } else { e } }
+pub fn sheet_plane<E: Styled>(e: E) -> E { if is_compact() { e.border_0().rounded(px(SHEET_RADIUS)) } else { e } }
 
 /// 手机上有 Liquid Glass 时，外壳的按钮是悬浮在内容之上的玻璃，内容从它们下面滚过。
 pub fn floating() -> bool { is_compact() && glass::supported() }
@@ -251,11 +269,79 @@ pub fn glass_button(id: &'static str, icon: &'static str, size: f32) -> Stateful
 
 /// 文档页悬浮的那排按钮占的高度（状态栏 + 一行按钮）：正文的开头让到它下面，滚动时从它底下穿过。
 pub fn chrome_top() -> f32 { if floating() { f32::from(insets().top) + crate::app::HEADER_H } else { 0. } }
+/// 同上，给文档的正文用：文档有背景时纸的上沿已经让到顶栏下面（`style::banded`），正文不用再让。
+pub fn doc_top() -> f32 { chrome_top() + if style::banded() { style::GAP } else { 0. } }
+
+/// 手机上的滚动条：和系统的一样细，只在内容滚动时出现，停下不久淡出，不接触摸（桌面那条常驻、能拖）。
+/// `seen` 记着上次画时滚到哪、最后一次变化的时刻；`top`、`bottom` 是悬浮的外壳占去的两头。
+pub fn scroll_thumb(seen: &std::cell::Cell<Option<(Pixels, Option<std::time::Instant>)>>, bounds: Bounds<Pixels>, offset: Pixels, content: Pixels, top: f32, bottom: f32, window: &mut Window) {
+    const HOLD: f32 = 0.7;
+    const FADE: f32 = 0.25;
+    let moved = match seen.get() {
+        Some((last, at)) => if (last - offset).abs() > px(0.5) { Some(std::time::Instant::now()) } else { at },
+        None => None,
+    };
+    seen.set(Some((offset, moved)));
+    let (Some(at), view) = (moved, bounds.size.height) else { return };
+    let t = at.elapsed().as_secs_f32();
+    if t >= HOLD + FADE || content <= view + px(1.) { return; }
+    window.request_animation_frame();
+    let track = (view - px(top + bottom + 8.)).max(px(1.));
+    let h = (track * (view / content)).max(px(36.)).min(track);
+    let y = bounds.top() + px(top + 4.) + (track - h) * (offset / (content - view)).clamp(0., 1.);
+    let alpha = if t < HOLD { 1. } else { 1. - (t - HOLD) / FADE };
+    window.paint_quad(fill(Bounds::new(point(bounds.right() - px(6.), y), size(px(3.), h)), Theme::scrollbar_thumb().opacity(alpha)).corner_radii(px(1.5)));
+}
 
 /// 状态栏下面的一道渐隐：正文滚到状态栏底下时，时间和电量仍然看得清。
-pub fn top_fade(page: Hsla) -> impl IntoElement {
-    div().absolute().top_0().left_0().right_0().h(insets().top + px(28.))
-        .bg(linear_gradient(180., linear_color_stop(page, 0.55), linear_color_stop(page.opacity(0.), 1.)))
+/// 标题滚到顶栏底下之后（`titled`），顶栏中间有小字标题，渐隐加高到盖住整排按钮。
+pub fn top_fade(page: Hsla, titled: bool) -> impl IntoElement {
+    div().absolute().top_0().left_0().right_0().h(insets().top + px(if titled { crate::app::HEADER_H + 24. } else { 28. }))
+        .bg(linear_gradient(180., linear_color_stop(page, if titled { 0.8 } else { 0.55 }), linear_color_stop(page.opacity(0.), 1.)))
+}
+
+/// 文档页顶栏中间的小字标题：正文的标题滚到顶栏底下后淡入，下面一行是所在的文件夹。
+pub fn doc_title(title: SharedString, folder: Option<SharedString>) -> AnyElement {
+    let (ink, sub) = style::chrome_ink().unwrap_or((Theme::text(), Theme::text_caption()));
+    // 有毛玻璃带时标题写在带子上（原生的），这里只留位置。
+    if veil::on() { return veil::title(title, folder, ink, sub).into_any_element(); }
+    div().id("doc-title").w_full().flex().flex_col().items_start()
+        .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(15.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(title))
+        .children(folder.map(|f| div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).line_height(px(14.)).text_color(sub).child(f)))
+        .with_animation("doc-title-in", Animation::new(Duration::from_millis(180)), |d, t| d.opacity(t)).into_any_element()
+}
+
+/// 手机上的提示：顶上两颗按钮之间的一条玻璃（`toast.rs`）。文档页右边有两颗按钮，让得多一些。
+/// `busy`：右上角有两颗钮的页（文档页、浏览页），右边多让一些。
+pub fn toast_slot(msg: SharedString, danger: bool, busy: bool) -> AnyElement {
+    div().absolute().top(insets().top - px(4.)).left(px(72.)).right(px(if busy { 140. } else { 72. })).h(px(52.)).child(toast::slot(msg, danger)).into_any_element()
+}
+
+thread_local! { static HISTORY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// 文档页底部那条「撤销 / 粘贴 / 重做」开着。
+pub fn history_open() -> bool { HISTORY.with(|h| h.get()) }
+pub fn close_history() { HISTORY.with(|h| h.set(false)); }
+
+/// 阅读状态下文档页底部的两组玻璃钮（照 Craft）：左边一条是 撤销… / 样式 / 编辑，右边一颗「+」挂着插入菜单。
+/// 编辑就是原来右下角那支铅笔：在文末新起一行并开始写。点了「撤销…」之后换成中间一条 撤销 / 粘贴 / 重做，右上角是「完成」。
+pub fn dock() -> impl IntoElement {
+    use menu::Item;
+    let ink = style::chrome_ink().map_or(Theme::text(), |_| Theme::text());
+    let row = div().id("doc-dock").absolute().left_0().right_0().bottom(dock_inset()).h(px(48.));
+    if history_open() {
+        let (_, _, viewport) = layout();
+        return row.child(div().id("doc-history").absolute().left((viewport.width - px(216.)) / 2.).top_0().w(px(216.)).h_full().rounded_full().occlude()
+            .child(glass::tab_pane("doc-history", vec![("sf:arrow.uturn.backward", 22., ink), ("sf:doc.on.clipboard", 22., ink), ("sf:arrow.uturn.forward", 22., ink)], None, vec!["doc-undo", "doc-paste", "doc-redo"])));
+    }
+    row
+        .child(div().id("doc-tools").absolute().left(px(20.)).top_0().w(px(160.)).h_full().rounded_full().occlude()
+            .child(glass::tab_pane("doc-tools", vec![("sf:arrow.uturn.backward.circle", 24., ink), ("sf:paintbrush", 23., ink), ("sf:pencil", 24., ink)], None, vec!["doc-history", "doc-style", "doc-append"])))
+        .child(div().id("doc-add").absolute().right(px(20.)).top_0().size(px(48.)).rounded_full().occlude()
+            .child(menu::glass_button("doc-add", "plus", ink, vec![
+                Item::new("doc-add-more", crate::settings::tr("更多", "More"), "ellipsis", 0),
+                Item::new("doc-add-file", crate::settings::tr("文件", "File"), "folder", 1),
+                Item::new("doc-add-image", crate::settings::tr("图库", "Photos"), "photo.on.rectangle", 2),
+            ])))
 }
 
 /// 主页底部那排玻璃离屏幕下沿的距离（Home 指示条之上），和列表末尾为它们留出的高度。
@@ -269,10 +355,11 @@ pub const LEAD_SEARCH_H: f32 = 52.;
 /// 大标题下面的搜索条，和首页的是同一条。
 pub fn lead_search(label: &'static str, cx: &mut Context<Workspace>) -> impl IntoElement { div().h(px(LEAD_SEARCH_H)).pt(px(4.)).child(search_bar_with(label, cx)) }
 /// 主页的底色。悬浮版式下是窗口的浅灰，白色的卡片从上面浮出来；否则照旧是页面的白。
-pub fn home_bg() -> Hsla { if floating() { Theme::window() } else { Theme::bg_body() } }
+/// 深色下浏览页是纯黑，比文档页的深灰暗一档：两种页面一眼能分开（走查 V3）。
+pub fn home_bg() -> Hsla { if !floating() { Theme::bg_body() } else if crate::theme::dark() { crate::theme::rgbaf(0, 0, 0, 1.) } else { Theme::window() } }
 /// 跟着内容滚走的大标题。
 pub fn large_title(title: impl Into<SharedString>) -> impl IntoElement {
-    div().h(px(56.)).px(px(24.)).flex().items_center().text_size(px(30.)).line_height(px(38.)).font_weight(FontWeight::BOLD).text_color(Theme::text())
+    div().h(px(56.)).px(px(24.)).flex().items_center().text_size(px(26.)).line_height(px(34.)).font_weight(FontWeight::BOLD).text_color(Theme::text())
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.into()))
 }
 
@@ -306,48 +393,57 @@ fn browse_menu_items(w: &Workspace) -> Vec<menu::Item> {
     const SORTS: [&str; 5] = ["browse-sort-0", "browse-sort-1", "browse-sort-2", "browse-sort-3", "browse-sort-4"];
     let mut items = vec![];
     if w.view == View::Folder || home_page() == HomePage::Folders {
-        items.push(menu::Item { id: "browse-new-folder", title: crate::settings::tr("新建文件夹", "New folder").into(), symbol: "folder.badge.plus", checked: false, group: 0 });
+        items.push(menu::Item::new("browse-new-folder", crate::settings::tr("新建文件夹", "New folder"), "folder.badge.plus", 0));
     }
-    items.push(menu::Item { id: "browse-grid", title: crate::settings::tr("宫格视图", "Grid").into(), symbol: "square.grid.2x2", checked: w.home.grid, group: 1 });
-    items.push(menu::Item { id: "browse-list", title: crate::settings::tr("列表视图", "List").into(), symbol: "list.bullet", checked: !w.home.grid, group: 1 });
-    items.extend(w.sort_choices().into_iter().zip(SORTS).map(|((title, checked), id)| menu::Item { id, title: title.into(), symbol: "", checked, group: 2 }));
+    items.push(menu::Item::new("browse-grid", crate::settings::tr("宫格视图", "Grid"), "square.grid.2x2", 1).checked(w.home.grid));
+    items.push(menu::Item::new("browse-list", crate::settings::tr("列表视图", "List"), "list.bullet", 1).checked(!w.home.grid));
+    items.extend(w.sort_choices().into_iter().zip(SORTS).map(|((title, checked), id)| menu::Item::new(id, title, "", 2).checked(checked)));
     // 桌面版标题栏「导入」菜单里的三项。
     let tr = crate::settings::tr;
-    items.push(menu::Item { id: "browse-import-md", title: tr("导入 Markdown 文件…", "Import Markdown Files…").into(), symbol: "square.and.arrow.down", checked: false, group: 3 });
-    items.push(menu::Item { id: "browse-import-folder", title: tr("导入文件夹…", "Import Folder…").into(), symbol: "folder", checked: false, group: 3 });
-    items.push(menu::Item { id: "browse-import-xml", title: tr("导入 DocxXML…", "Import DocxXML…").into(), symbol: "doc", checked: false, group: 3 });
+    items.push(menu::Item::new("browse-import-md", tr("导入 Markdown 文件…", "Import Markdown Files…"), "square.and.arrow.down", 3));
+    items.push(menu::Item::new("browse-import-folder", tr("导入文件夹…", "Import Folder…"), "folder", 3));
+    items.push(menu::Item::new("browse-import-xml", tr("导入 DocxXML…", "Import DocxXML…"), "doc", 3));
     items
 }
 /// 浏览页开头跟着内容滚走的一段：大标题和搜索。
-pub fn browse_lead(title: impl Into<SharedString>, cx: &mut Context<Workspace>) -> AnyElement {
-    div().pt(px(chrome_top())).child(large_title(title)).child(lead_search(crate::settings::tr("搜索", "Search"), cx)).into_any_element()
+pub fn browse_lead(title: impl Into<SharedString>, cx: &mut Context<Workspace>) -> AnyElement { browse_lead_with(title, None, cx) }
+/// 同上，大标题下面多一行说明（文件夹的描述）。
+pub fn browse_lead_with(title: impl Into<SharedString>, note: Option<String>, cx: &mut Context<Workspace>) -> AnyElement {
+    div().pt(px(chrome_top())).child(large_title(title))
+        .children(note.map(|n| div().px(px(24.)).pb(px(8.)).text_size(px(14.)).line_height(px(20.)).text_color(Theme::text_caption()).child(n)))
+        .child(lead_search(crate::settings::tr("搜索", "Search"), cx)).into_any_element()
 }
+/// 文件夹图标的颜色：它自己选的那个（`Meta::folder_color`，文档里的颜色名），没选就是平常的图标色。
+pub fn folder_tint(e: &crate::store::Entry) -> Hsla { e.meta.folder_color.as_deref().and_then(crate::theme::callout_border_swatch).unwrap_or_else(Theme::icon) }
 /// 浏览页的骨架：内容在下，状态栏的渐隐和那排玻璃在上。
 pub fn browse_page(body: AnyElement, chrome: impl IntoElement) -> AnyElement {
-    div().flex_1().min_w_0().size_full().flex().flex_col().relative().child(body).child(top_fade(home_bg())).child(chrome).into_any_element()
+    div().flex_1().min_w_0().size_full().flex().flex_col().relative().child(body).child(top_fade(home_bg(), false)).child(chrome).into_any_element()
 }
 /// 没有内容的浏览页：开头那一段照旧，下面一句话。
 pub fn browse_empty(lead: AnyElement, text: &'static str) -> AnyElement {
     div().flex_1().min_h_0().flex().flex_col().child(lead).child(div().pt(px(80.)).text_center().text_size(px(15.)).text_color(Theme::text_caption()).child(text)).into_any_element()
 }
-/// 批量管理时的浏览页：顶上换成一行固定的工具条（全选、已选几项、创建副本、移动到、删除、完成）。
+/// 批量管理时的浏览页（照 Craft）：顶上左边「全选」和已选几项，右边一颗主色的 ✓ 收起；动作在底部，标签栏的位置换成一条玻璃动作栏
+/// （创建副本 / 移动到 / 删除）。全选和计数是我们多出来的，留着。
 pub fn batch_page(w: &Workspace, ids: Vec<String>, body: AnyElement, cx: &mut Context<Workspace>) -> AnyElement {
-    use crate::sidebar::{Check, checkbox};
     let n = w.batch.as_ref().map_or(0, |s| s.len());
     let all = n > 0 && w.batch.as_ref().is_some_and(|s| ids.iter().all(|id| s.contains(id)));
-    let act = |id: &'static str, glyph: &'static str| div().id(id).flex_none().size(px(44.)).flex().items_center().justify_center().rounded(px(10.))
-        .child(crate::ui::icon(glyph, 20., if n > 0 { Theme::icon() } else { Theme::text_disabled() }));
-    let bar = div().h(px(crate::app::HEADER_H)).flex_none().pl(px(12.)).pr(px(8.)).flex().items_center()
-        .child(div().id("batch-all").flex_none().size(px(44.)).flex().items_center().justify_center().group("batch-all")
-            .child(checkbox(if all { Check::On } else if n > 0 { Check::Partial } else { Check::Off }, false, "batch-all"))
+    let label = if all { crate::settings::tr("取消全选", "Deselect all") } else { crate::settings::tr("全选", "Select all") };
+    let bar = div().h(px(crate::app::HEADER_H)).flex_none().px(px(16.)).flex().items_center().gap(px(10.))
+        .child(div().id("batch-all").flex_none().h(px(44.)).w(px(if crate::settings::english() { 116. } else if all { 96. } else { 64. })).rounded_full().occlude()
+            .child(glass::pane("batch-all", None, None, Some((label.into(), Theme::text()))))
+            .on_mouse_down(MouseButton::Left, |_, _, _| glass::pulse("batch-all"))
             .on_click(cx.listener(move |w, _, _, cx| { w.batch = Some(if all { vec![] } else { ids.clone() }); cx.notify(); })))
-        .child(div().flex_1().min_w_0().text_size(px(16.)).child(crate::localized_format!("已选 {n} 项", "Selected: {n}")))
-        .child(act("batch-copy", "copy").when(n > 0, |d| d.active(|s| s.bg(Theme::fill_pressed())).on_click(cx.listener(|w, _, _, cx| w.batch_copy(cx)))))
-        .child(act("batch-move", "folder-input").when(n > 0, |d| d.active(|s| s.bg(Theme::fill_pressed())).on_click(cx.listener(|w, _, window, cx| w.batch_move(window, cx)))))
-        .child(act("batch-delete", "bin").when(n > 0, |d| d.active(|s| s.bg(Theme::fill_pressed())).on_click(cx.listener(|w, _, _, cx| w.ask_batch_delete(cx)))))
-        .child(div().id("batch-done").flex_none().h(px(44.)).px(px(10.)).flex().items_center().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::primary())
-            .child(crate::settings::tr("完成", "Done")).on_click(cx.listener(|w, _, _, cx| { w.batch = None; w.row_menu = None; cx.notify(); })));
-    div().flex_1().min_w_0().size_full().flex().flex_col().pt(insets().top).pb(insets().bottom).child(bar).child(body).into_any_element()
+        .child(div().flex_1().min_w_0().text_center().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(crate::localized_format!("已选 {n} 项", "Selected: {n}")))
+        // 和左边那颗一样宽的位置里靠右放 ✓：中间的字才在正中。
+        .child(div().flex_none().w(px(if crate::settings::english() { 116. } else if all { 96. } else { 64. })).flex().justify_end()
+            .child(done_button().on_click(cx.listener(|w, _, _, cx| { w.batch = None; w.row_menu = None; cx.notify(); }))));
+    // 没选东西时三格是灰的，点了也不做事（`menu_action` 里看 `batch` 空不空）。
+    let ink = if n > 0 { Theme::text() } else { Theme::text_disabled() };
+    let (_, _, viewport) = layout();
+    let actions = div().id("batch-bar").absolute().left((viewport.width - px(204.)) / 2.).w(px(204.)).bottom(dock_inset()).h(px(48.)).rounded_full().occlude()
+        .child(glass::tab_pane("batch-bar", vec![("sf:plus.square.on.square", 22., ink), ("sf:folder", 22., ink), ("sf:trash", 22., if n > 0 { Theme::danger() } else { ink })], None, vec!["batch-copy", "batch-move", "batch-delete"]));
+    div().flex_1().min_w_0().size_full().flex().flex_col().relative().pt(insets().top).child(bar).child(body).child(actions).into_any_element()
 }
 
 thread_local! { static FOLDERS_FOLDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -359,10 +455,94 @@ pub fn sheet_open() -> bool { icon_picking() }
 pub fn hub_menu_items() -> Vec<menu::Item> {
     let folded = folders_folded();
     vec![
-        menu::Item { id: "hub-new-folder", title: crate::settings::tr("新建文件夹", "New folder").into(), symbol: "folder.badge.plus", checked: false, group: 0 },
-        menu::Item { id: "hub-fold", title: if folded { crate::settings::tr("展开文件夹", "Expand folders") } else { crate::settings::tr("折叠文件夹", "Collapse folders") }.into(), symbol: if folded { "arrow.up.left.and.arrow.down.right" } else { "arrow.down.right.and.arrow.up.left" }, checked: false, group: 0 },
+        menu::Item::new("hub-new-folder", crate::settings::tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
+        menu::Item::new("hub-fold", if folded { crate::settings::tr("展开文件夹", "Expand folders") } else { crate::settings::tr("折叠文件夹", "Collapse folders") }, if folded { "arrow.up.left.and.arrow.down.right" } else { "arrow.down.right.and.arrow.up.left" }, 0),
+        menu::Item::new("browse-import-md", crate::settings::tr("导入 Markdown 文件…", "Import Markdown Files…"), "square.and.arrow.down", 1),
+        menu::Item::new("browse-import-folder", crate::settings::tr("导入文件夹…", "Import Folder…"), "folder", 1),
     ]
 }
+/// 文档页「…」的系统菜单：和桌面的文档菜单同样的项、顺序和文案，子菜单就地展开。
+pub fn doc_menu_items(w: &Workspace) -> Vec<menu::Item> {
+    use crate::settings::text;
+    use crate::store::PageWidth;
+    use menu::Item;
+    let entry = w.current.as_ref().and_then(|id| w.entries.iter().find(|e| &e.id == id));
+    let pinned = entry.is_some_and(|e| e.meta.pinned);
+    let starred = entry.is_some_and(|e| e.meta.starred > 0);
+    let width = entry.map(|e| e.meta.width).unwrap_or_default();
+    let refs_shown = !entry.is_some_and(|e| e.meta.refs_hidden);
+    let mut download = vec![];
+    if crate::printing::SUPPORTED { download.push(Item::new("doc-pdf", "PDF", "", 0)); }
+    download.push(Item::new("doc-md", "Markdown", "", 0));
+    let mut items = vec![
+        Item::new("", text("页宽设置"), "arrow.left.and.right", 0).kids(vec![
+            Item::new("doc-width-standard", text("默认"), "", 0).checked(width == PageWidth::Standard),
+            Item::new("doc-width-wide", text("较宽"), "", 0).checked(width == PageWidth::Wide),
+            Item::new("doc-width-full", text("全宽"), "", 0).checked(width == PageWidth::Full),
+        ]),
+        Item::new("doc-find", text("查找和替换"), "magnifyingglass", 1),
+        Item::new("doc-style", crate::settings::tr("样式", "Style"), "paintpalette", 1),
+        Item::new("doc-text-size", crate::settings::tr("文字大小", "Text size"), "textformat.size", 1),
+        Item::new("doc-move", text("移动到"), "folder", 2),
+        Item::new("doc-pin", if pinned { text("从“置顶”移除") } else { text("添加到“置顶”") }, if pinned { "pin.slash" } else { "pin" }, 2),
+        Item::new("doc-star", if starred { text("取消收藏") } else { text("添加到收藏") }, if starred { "star.slash" } else { "star" }, 2),
+        Item::new("doc-copy", text("创建副本"), "plus.square.on.square", 3),
+        Item::new("", text("下载为"), "square.and.arrow.up", 3).kids(download),
+    ];
+    if crate::printing::SUPPORTED { items.push(Item::new("doc-print", text("打印"), "printer", 4)); }
+    items.push(Item::new("doc-info", text("文档信息"), "info.circle", 5));
+    items.push(Item::new("", text("更多"), "ellipsis.circle", 6).kids(vec![Item::new("doc-refs", text("显示引用列表"), "", 0).checked(refs_shown)]));
+    items.push(Item::new("doc-delete", text("删除"), "trash", 6).danger());
+    items
+}
+
+/// 长按卡片、行出的系统上下文菜单：项、顺序和文案照桌面右键菜单（`render_row_menu`、`folder_row_menu`）。
+/// 「本地文件」不在这里（仍是动作面板），也就不放占位。
+pub fn row_context(w: &Workspace, id: &str, radius: f32) -> Option<AnyElement> {
+    if !floating() { return None; }
+    use crate::settings::{text, tr};
+    use menu::Item;
+    let e = w.entries.iter().find(|e| e.id == id)?;
+    let title = crate::settings::display_title(&e.title);
+    let items = if e.meta.folder.is_some() {
+        vec![
+            Item::new("ctx-new-doc", tr("新建文档", "New document"), "doc.badge.plus", 0),
+            Item::new("ctx-new-folder", tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
+            Item::new("ctx-rename", tr("重命名", "Rename"), "pencil", 0),
+            Item::new("ctx-icon", tr("更改图标", "Change icon"), "face.smiling", 0),
+            Item::new("ctx-move", tr("移动到", "Move to"), "folder", 0),
+            Item::new("ctx-delete", tr("删除", "Delete"), "trash", 1).danger(),
+        ]
+    } else if e.meta.local() {
+        return None;
+    } else {
+        let (pinned, starred) = (e.meta.pinned, e.meta.starred > 0);
+        let mut download = vec![];
+        if crate::printing::SUPPORTED { download.push(Item::new("ctx-pdf", "PDF", "", 0)); }
+        download.push(Item::new("ctx-md", "Markdown", "", 0));
+        vec![
+            Item::new("ctx-copy", text("创建副本"), "plus.square.on.square", 0),
+            Item::new("ctx-move", text("移动到"), "folder", 0),
+            Item::new("ctx-pin", if pinned { text("从“置顶”移除") } else { text("添加到“置顶”") }, if pinned { "pin.slash" } else { "pin" }, 0),
+            Item::new("ctx-star", if starred { text("取消收藏") } else { tr("收藏", "Add to favorites") }, if starred { "star.slash" } else { "star" }, 0),
+            Item::new("", text("下载"), "square.and.arrow.up", 1).kids(download),
+            Item::new("ctx-rename", text("重命名"), "pencil", 1),
+            Item::new("ctx-delete", text("删除"), "trash", 2).danger(),
+        ]
+    };
+    Some(menu::context(SharedString::from(id.to_string()), title, radius, items).into_any_element())
+}
+/// 回收站的行：恢复、彻底删除。
+pub fn trash_context(id: &str, title: SharedString) -> Option<AnyElement> {
+    if !floating() { return None; }
+    use crate::settings::text;
+    let items = vec![
+        menu::Item::new("ctx-restore", text("恢复"), "arrow.uturn.backward", 0),
+        menu::Item::new("ctx-purge", text("彻底删除"), "trash", 0).danger(),
+    ];
+    Some(menu::context(SharedString::from(id.to_string()), title, 10., items).into_any_element())
+}
+
 /// 系统菜单里的一项被点了（`menu.rs` 把它送回工作区）。
 pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     match id {
@@ -375,14 +555,81 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
             let parent = if w.view == View::Folder { w.folder_current.clone() } else { None };
             w.open_import_kind(kind, parent, window, cx);
         }
+        // 批量管理底部的动作栏：没选东西时不做事。
+        "batch-copy" | "batch-move" | "batch-delete" if w.batch.as_ref().is_none_or(|s| s.is_empty()) => {}
+        "batch-copy" => w.batch_copy(cx),
+        "batch-move" => w.batch_move(window, cx),
+        "batch-delete" => w.ask_batch_delete(cx),
         "browse-grid" => w.set_home_grid(true, cx),
         "browse-list" => w.set_home_grid(false, cx),
         // 底栏和新建按钮：玻璃自己接的触摸。
         "tab-home" => { set_home_page(HomePage::Hub); if w.view != View::Home { w.show_view(View::Home, cx) } else { cx.notify() } }
         "tab-trash" => if w.view != View::Trash { w.show_view(View::Trash, cx) },
         "tab-settings" => { set_settings_detail(false); if w.view != View::Settings { w.show_view(View::Settings, cx) } }
-        "new-doc" => { glass::haptic(); w.new_doc(window, cx); }
+        "new-doc" | "fab-new-doc" => { glass::haptic(); w.new_doc(window, cx); }
+        // 原生的新建文件夹卡片（`card.rs`）。
+        "new-folder-create" => w.finish_new_folder(true, window, cx),
+        "new-folder-cancel" => w.finish_new_folder(false, window, cx),
+        // 系统提示框（`alert.rs`）的两颗按钮。
+        "confirm-ok" => w.confirm_ok(window, cx),
+        "confirm-cancel" => { w.confirm = None; w.after_save = None; cx.notify(); }
+        "fab-new-folder" => { let parent = if w.view == View::Folder { w.folder_current.clone() } else { None }; w.new_folder(parent, window, cx); }
+        // 文档页底部的铅笔：在文末新起一行开始写。
+        "doc-append" => if let Some(editor) = w.editor.clone() { glass::haptic(); editor.update(cx, |ed, cx| ed.append_line(window, cx)); },
+        "doc-history" => { glass::haptic(); HISTORY.with(|h| h.set(true)); cx.notify(); }
+        "doc-undo" | "doc-redo" => if let Some(editor) = w.editor.clone() { glass::haptic(); editor.update(cx, |ed, cx| ed.history_step(id == "doc-redo", window, cx)); },
+        "doc-paste" => if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| ed.paste_at_end(window, cx)); },
+        // 「+」：都是在文末新起一行，再往里放东西。
+        "doc-add-more" | "doc-add-file" | "doc-add-image" => if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| ed.append_with(id, window, cx)); },
         "page-restore" => restore(w, window, cx),
+        // 文档页「…」：对当前文档。
+        _ if id.starts_with("doc-") => {
+            let Some(cur) = w.current.clone() else { return };
+            use crate::store::PageWidth;
+            match id {
+                "doc-width-standard" => w.set_page_width(PageWidth::Standard, cx),
+                "doc-width-wide" => w.set_page_width(PageWidth::Wide, cx),
+                "doc-width-full" => w.set_page_width(PageWidth::Full, cx),
+                "doc-find" => w.find_in_doc(false, window, cx),
+                "doc-text-size" => { style::set_sizing(true); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
+                "doc-style" => { stylepanel::open(); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
+                "doc-move" => w.open_move(vec![cur], window, cx),
+                "doc-pin" => w.toggle_pin(&cur, cx),
+                "doc-star" => w.toggle_star(&cur, cx),
+                "doc-copy" => w.duplicate_doc(&cur, window, cx),
+                "doc-pdf" => w.export_pdf(&cur, window, cx),
+                "doc-md" => w.open_export_md(&cur, cx),
+                "doc-print" => w.print_doc(&cur, window, cx),
+                "doc-info" => w.open_doc_info(window, cx),
+                "doc-refs" => { let shown = !w.entries.iter().find(|e| e.id == cur).is_some_and(|e| e.meta.refs_hidden); w.ask_refs(!shown, cx); }
+                "doc-delete" => w.ask_delete(&cur, cx),
+                _ => {}
+            }
+        }
+        // 长按出的上下文菜单：对长按的那一项。
+        _ if id.starts_with("ctx-") => {
+            let target = menu::context_target().map(|t| t.to_string()).unwrap_or_default();
+            match id {
+                "ctx-batch-copy" => w.batch_copy(cx),
+                "ctx-batch-move" => w.batch_move(window, cx),
+                "ctx-batch-delete" => w.ask_batch_delete(cx),
+                _ if target.is_empty() => {}
+                "ctx-copy" => w.duplicate_doc(&target, window, cx),
+                "ctx-move" => w.open_move(vec![target], window, cx),
+                "ctx-pin" => w.toggle_pin(&target, cx),
+                "ctx-star" => w.toggle_star(&target, cx),
+                "ctx-pdf" => w.export_pdf(&target, window, cx),
+                "ctx-md" => w.open_export_md(&target, cx),
+                "ctx-rename" => w.start_rename(&target, window, cx),
+                "ctx-delete" => w.ask_delete(&target, cx),
+                "ctx-new-doc" => w.new_child(&target, window, cx),
+                "ctx-new-folder" => w.new_folder(Some(target), window, cx),
+                "ctx-icon" => { pick_icon(Some(target)); cx.notify(); }
+                "ctx-restore" => { w.confirm = Some(crate::app::Confirm::Restore(target)); cx.notify(); }
+                "ctx-purge" => { w.confirm = Some(crate::app::Confirm::Purge(target)); cx.notify(); }
+                _ => {}
+            }
+        }
         // 系统的编辑菜单（`editmenu.rs`）：交给编辑器。
         _ if id.starts_with("edit-") => if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| ed.touch_menu_action(id, window, cx)); },
         _ if id.starts_with("browse-sort-") => if let Ok(index) = id["browse-sort-".len()..].parse() { w.pick_home_sort(index, cx); },
@@ -390,9 +637,39 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
     }
 }
 
+/// 手机上的确认框：系统提示框的样子，居中的圆角卡片，标题、一段说明，下面两颗等宽的胶囊按钮（取消在左）。
+/// 文案和桌面的确认框是同一份，危险的动作字是红的。
+pub fn alert(title: String, body: String, action: &'static str, danger: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let button = |id: &'static str, label: &'static str, color: Hsla| div().id(id).flex_1().h(px(46.)).rounded_full().flex().items_center().justify_center()
+        .bg(Theme::fill_hover()).active(|s| s.bg(Theme::fill_pressed())).text_size(px(16.)).font_weight(FontWeight::MEDIUM).text_color(color).child(label);
+    sheet_plane(crate::editor_ui::popover()).shadow(crate::theme::shadow_dialog()).rounded(px(30.)).id("confirm-dialog").occlude().relative().w(px(296.)).p(px(16.)).flex().flex_col()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(div().px(px(12.)).pt(px(6.)).text_size(px(16.)).line_height(px(22.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(title))
+        .when(!body.is_empty(), |d| d.child(div().px(px(12.)).mt(px(4.)).text_size(px(13.)).line_height(px(19.)).text_color(Theme::text_caption()).child(body)))
+        .child(div().mt(px(16.)).flex().gap(px(8.))
+            .child(button("confirm-cancel", crate::settings::text("取消"), Theme::text()).on_click(cx.listener(|w, _, _, cx| { w.confirm = None; w.after_save = None; cx.notify(); })))
+            .child(button("confirm-ok", action, if danger { Theme::danger() } else { Theme::primary() }).on_click(cx.listener(|w, _, window, cx| w.confirm_ok(window, cx)))))
+}
+
+thread_local! { static NEW_FOLDER: std::cell::RefCell<Option<Option<String>>> = const { std::cell::RefCell::new(None) }; }
+/// 正在填、还没建出来的新文件夹建在哪一层（`Some(None)` 是根目录）。手机上新建文件夹先在卡片（`card.rs`）里填好，点「创建」才真的建，
+/// 建好就进到里面；关掉卡片什么也不留下（桌面是先建一个「未命名文件夹」再就地改名）。
+pub fn new_folder_parent() -> Option<Option<String>> { NEW_FOLDER.with(|n| n.borrow().clone()) }
+pub fn set_new_folder(parent: Option<Option<String>>) { NEW_FOLDER.with(|n| *n.borrow_mut() = parent); }
+
 /// 手机上的重命名：没有侧栏，名字在屏幕上方的一张卡片里改。回车或点别处保存。
+/// 新建文件夹是另一张原生的卡片（`card.rs`），也从这里挂出来。
 pub fn rename_dialog(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     if !floating() { return None; }
+    // 新建文件夹：卡片是原生的（`card.rs`），这里只有压暗的遮罩和它的占位。点遮罩是取消。
+    if new_folder_parent().is_some() {
+        return Some(div().id("rename-scrim").absolute().inset_0().occlude().on_click(cx.listener(|w, _, window, cx| w.finish_new_folder(false, window, cx)))
+            .child(sheet_scrim())
+            // 贴在键盘上面（`insets().bottom` 在键盘弹出时就是键盘的高度）。
+            .child(div().id("new-folder-card").absolute().bottom(insets().bottom + px(12.)).left(px(16.)).right(px(16.)).h(px(card::HEIGHT)).occlude()
+                .on_click(|_, _, cx| cx.stop_propagation()).child(card::slot()))
+            .into_any_element());
+    }
     let field = w.rename.as_ref()?.field.clone();
     Some(div().id("rename-scrim").absolute().inset_0().occlude().on_click(cx.listener(|w, _, window, cx| window.focus(&w.focus, cx)))
         .child(sheet_scrim())
@@ -451,17 +728,25 @@ pub fn tab_bar_h() -> Pixels { dock_inset() + px(56.) }
 /// 大标题下的搜索条：点了打开搜索。
 pub fn search_bar(cx: &mut Context<Workspace>) -> impl IntoElement { search_bar_with(crate::settings::tr("搜索文档", "Search documents"), cx) }
 pub fn search_bar_with(label: &'static str, cx: &mut Context<Workspace>) -> impl IntoElement {
-    div().id("home-search-bar").flex_none().mx(px(20.)).mt(px(4.)).h(px(40.)).px(px(12.)).flex().items_center().gap(px(8.))
+    div().id("home-search-bar").relative().flex_none().mx(px(20.)).mt(px(4.)).h(px(40.)).px(px(12.)).flex().items_center().gap(px(8.))
         .rounded(px(12.)).bg(Theme::fill_hover()).active(|s| s.bg(Theme::fill_pressed()))
         .child(crate::ui::icon("search", 17., Theme::text_caption()))
         .child(div().text_size(px(16.)).text_color(Theme::text_caption()).child(label))
-        .on_click(cx.listener(|w, _, window, cx| w.open_search(window, cx)))
+        // 记下自己画在哪：点了以后搜索页的输入框从这儿滑上去。
+        .child(canvas(|bounds, _, _| search::bar_at(bounds), |_, _, _, _| {}).absolute().inset_0())
+        .on_click(cx.listener(|w, _, window, cx| { search::opened(); w.open_search(window, cx) }))
 }
 
 /// 右下角的悬浮新建按钮，在拇指的位置。有 Liquid Glass 时是和搜索并排的一块玻璃，GPUI 这边只留点击区。
-pub fn new_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+/// 在文件夹这一层（文件夹列表、某个文件夹里）它是一个小菜单：新建文档 / 新建文件夹，都建在眼前这一层；别处点了直接新建文档。
+pub fn new_button(view: View, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let pick = view == View::Folder || (view == View::Home && home_page() == HomePage::Folders);
     div().id("home-fab").absolute().right(px(20.)).rounded_full().flex().items_center().justify_center()
-        .map(|d| if floating() { d.bottom(dock_inset()).size(px(48.)).child(glass::tap_pane("fab", ("plus", 24., Theme::text()), "new-doc")) }
+        .map(|d| if floating() && pick { d.bottom(dock_inset()).size(px(48.)).child(menu::glass_button("fab-menu", "plus", Theme::text(), vec![
+                menu::Item::new("fab-new-doc", crate::settings::tr("新建文档", "New document"), "doc.badge.plus", 0),
+                menu::Item::new("fab-new-folder", crate::settings::tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
+            ])) }
+            else if floating() { d.bottom(dock_inset()).size(px(48.)).child(glass::tap_pane("fab", ("plus", 24., Theme::text()), "new-doc")) }
             else { d.bottom(px(16.)).size(px(56.)).bg(Theme::primary()).shadow(crate::theme::shadow_dialog()).active(|s| s.bg(crate::theme::c(crate::theme::craft::B700))).child(crate::ui::icon("plus", 26., gpui::white())) })
         .occlude().on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx)))
 }
@@ -485,6 +770,11 @@ pub fn long_press_layer() -> impl IntoElement {
                 window.dispatch_event(PlatformInput::MouseMove(MouseMoveEvent { position: point(px(-100.), px(-100.)), pressed_button: None, modifiers: Modifiers::default() }), cx);
             });
         });
+        // TRACE-TOUCH（临时）：看按下落在哪。
+        if std::env::var_os("QUIET_MD_IOS_TRACE").is_some() {
+            window.on_mouse_event(|ev: &MouseDownEvent, phase, _, _| if phase == DispatchPhase::Capture { eprintln!("TRACE down {:?} {:?}", ev.button, ev.position); });
+            window.on_mouse_event(|ev: &MouseUpEvent, phase, _, _| if phase == DispatchPhase::Capture { eprintln!("TRACE up {:?} {:?}", ev.button, ev.position); });
+        }
         // 长按结束、手指抬起时，手势识别还会补一次点按（左键按下加松开）：在正文之外它会被当成点击（打开文档）。
         // 长按开始时记下「各吞一次」，十秒内有效；结束阶段的事件不一定送到这里，所以不依赖它。
         thread_local! { static EAT: std::cell::Cell<(bool, bool, Option<std::time::Instant>)> = const { std::cell::Cell::new((false, false, None)) }; }
@@ -501,6 +791,8 @@ pub fn long_press_layer() -> impl IntoElement {
         });
         window.on_mouse_event(|ev: &LongPressEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || ev.phase != TouchPhase::Started { return; }
+            // 这一块有系统的上下文菜单（卡片、行）：交给系统，这里不补右键，也不吃掉之后的点按。
+            if menu::context_at(ev.position) { return; }
             if overlay() { EAT.with(|e| e.set((true, true, Some(std::time::Instant::now())))); }
             glass::haptic();
             let position = ev.position;
@@ -515,12 +807,22 @@ pub fn long_press_layer() -> impl IntoElement {
     }).absolute().size_0()
 }
 
+thread_local! { static DOC_FROM: std::cell::Cell<View> = const { std::cell::Cell::new(View::Home) }; }
+/// 从别的页进文档时记下是哪一页（文档里点链接去另一篇不改）。
+pub fn entered_doc(from: View) { DOC_FROM.with(|f| f.set(from)); }
+/// 文档页的返回：回到进来的那一页。从文件夹进的回那个文件夹（滚动位置还在），文件夹没了就回主页；
+/// 从主页进的回主页，首页、「所有文档」「文件夹」哪一页由 `home_page` 记着。
+pub fn doc_back(w: &mut Workspace, cx: &mut Context<Workspace>) {
+    let folder = DOC_FROM.with(|f| f.get()) == View::Folder && w.folder_current.as_ref().is_some_and(|id| w.entries.iter().any(|e| &e.id == id && e.meta.folder.is_some()));
+    w.show_view(if folder { View::Folder } else { View::Home }, cx);
+}
+
 /// 跟手返回取消后要回到哪一页。
 #[derive(Clone)]
 enum Restore { Doc, Folder(String), Home(HomePage), Settings }
 thread_local! { static RESTORE: std::cell::RefCell<Option<Restore>> = const { std::cell::RefCell::new(None) }; }
 
-/// 左缘右滑：文档、文件夹和回收站回主页，设置返回，主页拉出抽屉。文档、文件夹、主页的子页和设置的第二级
+/// 左缘右滑：文档回进来的那一页，文件夹和回收站回主页，设置返回，主页拉出抽屉。文档、文件夹、主页的子页和设置的第二级
 /// 跟着手指：一动就切到下面那一页，旧页的快照跟着手指走（`shot::follow`）；松手过半就滑走，没过半滑回来、
 /// 再恢复原来那页。
 pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &mut Context<Workspace>) {
@@ -533,7 +835,7 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
             return;
         }
         BackGesturePhase::Progressed => {
-            if ev.progress <= 0. || !floating() || w.search_open || w.batch.is_some() { return; }
+            if ev.progress <= 0. || !floating() || w.search_open || w.batch.is_some() || w.rename.is_some() || new_folder_parent().is_some() { return; }
             let restore = match w.view {
                 View::Doc => Restore::Doc,
                 View::Folder => match w.folder_current.clone() { Some(id) => Restore::Folder(id), None => return },
@@ -573,7 +875,8 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
     }
     if w.search_open { return w.close_search(window, cx); }
     match w.view {
-        View::Doc | View::Folder | View::Trash => w.show_view(View::Home, cx),
+        View::Doc => doc_back(w, cx),
+        View::Folder | View::Trash => w.show_view(View::Home, cx),
         View::Home if home_page() != HomePage::Hub => { set_home_page(HomePage::Hub); cx.notify(); }
         View::Settings if settings_detail() => { set_settings_detail(false); cx.notify(); }
         View::Settings => w.close_settings(cx),
@@ -590,13 +893,15 @@ fn pop(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
         },
         View::Home => { set_home_page(HomePage::Hub); cx.notify(); }
         View::Settings => { set_settings_detail(false); cx.notify(); }
+        View::Doc => doc_back(w, cx),
         _ => w.show_view(View::Home, cx),
     }
 }
 /// 跟手返回取消、快照滑回原处之后：恢复原来那页，快照随后淡掉。
 fn restore(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(to) = RESTORE.with(|r| r.borrow_mut().take()) else { return shot::fade_page(); };
-    shot::fade_page();
+    // 快照先盖着，等原来那页画出来几帧再淡（`shot::park_page`）。
+    shot::park_page(8);
     RESTORING.with(|r| r.set(true));
     match to {
         Restore::Doc => w.show_view(View::Doc, cx),
@@ -607,9 +912,9 @@ fn restore(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) 
 }
 
 /// 选文件、存文件都经过这里（上游 gpui-pre-ios 0.3.12 没有实现，见 `files.rs`）。
-pub fn prompt_for_paths(_: &mut App, options: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open(options, false) }
-/// 同上，只让选图片（插入图片、上传封面）。
-pub fn prompt_for_images(_: &mut App, options: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open(options, true) }
+pub fn prompt_for_paths(_: &mut App, options: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open(options) }
+/// 选一张图片（插入图片、上传封面）：照片图库或文件。
+pub fn prompt_for_images(_: &mut App, _: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open_image() }
 /// 给出的是沙盒里的临时路径：调用方写完后要调 `exported`，系统的面板才把它存到使用者选的地方。
 pub fn prompt_for_new_path(_: &mut App, _: &std::path::Path, name: Option<&str>) -> files::Reply<Option<std::path::PathBuf>> { files::new_path(name) }
 /// `prompt_for_new_path` 给的路径写好了。
