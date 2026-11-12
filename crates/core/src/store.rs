@@ -45,6 +45,18 @@ pub struct Meta {
     /// A folder's own icon (an emoji). A document keeps its icon in its file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_icon: Option<String>,
+    /// 文档样式: this document's own look (text colour, font, paper, background, dividers) over the app theme.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<DocStyle>,
+    /// 文字大小: this document's own text size, a step 1–8 (0: the app's size; 3 is the same as unset).
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub text_size: u8,
+    /// A folder's one-line description, shown under its title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_note: Option<String>,
+    /// A folder's colour: one of the document colour names (`red`, `blue`, …); tints its folder glyph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_color: Option<String>,
     /// 阅读模式, remembered per document like the page width.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reading: bool,
@@ -79,7 +91,7 @@ impl Default for Meta {
             folder: None, root_order: None, created: 0, modified: 0, pinned: false, opened: 0,
             width: PageWidth::default(), catalogue_closed: true,
             parent: None, order: 0, starred: 0, reading: false,
-            info: InfoRow::default(), refs_hidden: false, folder_icon: None,
+            info: InfoRow::default(), refs_hidden: false, folder_icon: None, folder_note: None, folder_color: None, style: None, text_size: 0,
             markdown: false, path: None, name: None,
         }
     }
@@ -120,6 +132,56 @@ impl Meta {
         let placed = if self.parent.is_none() { self.root_order.unwrap_or(0) } else { self.order };
         (placed > 0, placed, std::cmp::Reverse(self.modified))
     }
+}
+
+fn is_zero_u8(n: &u8) -> bool { *n == 0 }
+
+/// One document's own look. Colours are `#rrggbb` as the user picked them; an unset field keeps the app theme's value.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DocStyle {
+    /// Colour of the text, headings and title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// `serif`, `mono`, `rounded` (unset: the theme's family).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    /// Colour of the page itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paper: Option<String>,
+    /// What shows around the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Backdrop>,
+    /// 淡化: the background is washed towards the page colour (unset: 沉浸式, shown as it is).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub faded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub divider: Option<DividerStyle>,
+    /// The gallery style this came from, while nothing was changed since.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+}
+
+impl DocStyle {
+    pub fn is_plain(&self) -> bool { *self == DocStyle::default() }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Backdrop {
+    Color { color: String },
+    /// `dir`: 0 top to bottom, 1 left to right, 2 and 3 the two diagonals.
+    Gradient { from: String, to: String, #[serde(default)] dir: u8 },
+    /// `src`: a built-in picture (`builtin:<name>`) or a file under the library's `assets`.
+    Image { src: String, #[serde(default)] blur: bool },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum DividerStyle {
+    /// 和纸胶带: a strip of `pattern` (a built-in pattern name, or `image:<src>`) in `color`.
+    Tape { pattern: String, #[serde(default, skip_serializing_if = "Option::is_none")] color: Option<String> },
+    /// 涂鸦: a hand-drawn stroke.
+    Doodle,
 }
 
 /// Three page widths: 默认 (820px column), 较宽 (1020px), 全宽.
@@ -935,6 +997,15 @@ impl Store {
         self.save_index()
     }
 
+    /// A document's own look; a plain one is stored as none.
+    pub fn set_style(&mut self, id: &str, style: Option<DocStyle>) -> Result<()> {
+        let _lock = self.begin_write()?;
+        if let Some(m) = self.index.get_mut(id) {
+            m.style = style.filter(|s| !s.is_plain());
+        }
+        self.save_index()
+    }
+
     pub fn update_meta(&mut self, id: &str, f: impl FnOnce(&mut Meta)) -> Result<()> {
         let _lock = self.begin_write()?;
         if let Some(m) = self.index.get_mut(id) {
@@ -1025,6 +1096,16 @@ impl Store {
         let _lock = self.begin_write()?;
         if let Some(m) = self.index.get_mut(id).filter(|m| m.folder.is_some()) {
             m.folder_icon = icon;
+        }
+        self.save_index()
+    }
+
+    /// A folder's description and colour; `None` clears either.
+    pub fn set_folder_look(&mut self, id: &str, note: Option<String>, color: Option<String>) -> Result<()> {
+        let _lock = self.begin_write()?;
+        if let Some(m) = self.index.get_mut(id).filter(|m| m.folder.is_some()) {
+            m.folder_note = note;
+            m.folder_color = color;
         }
         self.save_index()
     }
