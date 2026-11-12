@@ -332,10 +332,22 @@ fn save_json<T: Serialize>(path: &std::path::Path, v: &T) -> Result<()> {
 pub fn image_path(src: &str) -> Option<PathBuf> {
     let p = PathBuf::from(src.strip_prefix("file://").unwrap_or(src));
     if p.is_absolute() {
-        return Some(p);
+        return Some(rehome(&Store::root_dir(), p));
     }
     // Relative to the library (`assets/…`); not a URI or a cloud token.
     (!src.is_empty() && !src.contains(':') && src.contains('/')).then(|| Store::root_dir().join(p))
+}
+
+/// An absolute source written while the library lived somewhere else (the folder was moved; on iOS the
+/// app's container gets a new path with every install): if the file is gone but the same
+/// `assets/…` exists in this library, that one. Paths inside the library are returned untouched, unchecked.
+pub fn rehome(root: &std::path::Path, p: PathBuf) -> PathBuf {
+    if p.starts_with(root) || p.exists() { return p; }
+    let mut tail = None;
+    for (i, c) in p.components().enumerate() { if c.as_os_str() == "assets" { tail = Some(i); } }
+    let Some(i) = tail else { return p };
+    let moved = root.join(p.components().skip(i).collect::<PathBuf>());
+    if moved.is_file() { moved } else { p }
 }
 
 /// Export only files belonging to this library, including after symlink resolution.
@@ -346,7 +358,7 @@ pub fn export_path(src: &str) -> Option<PathBuf> {
 pub fn export_path_in(root: &std::path::Path, src: &str) -> Option<PathBuf> {
     let root = root.canonicalize().ok()?;
     let raw = std::path::Path::new(src.strip_prefix("file://").unwrap_or(src));
-    let path = if raw.is_absolute() { raw.to_path_buf() } else { root.join(raw) }.canonicalize().ok()?;
+    let path = if raw.is_absolute() { rehome(&root, raw.to_path_buf()) } else { root.join(raw) }.canonicalize().ok()?;
     (path.starts_with(root) && path.is_file()).then_some(path)
 }
 
@@ -1254,6 +1266,20 @@ mod tests {
         std::fs::create_dir_all(lib.0.join("target")).unwrap();
         assert!(write_atomic(&lib.0.join("target"), b"new").is_err());
         assert_eq!(std::fs::read_dir(&lib.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn sources_from_a_moved_library_resolve_here() {
+        let lib = Lib::new("rehome");
+        std::fs::create_dir_all(lib.0.join("assets/sub")).unwrap();
+        std::fs::write(lib.0.join("assets/sub/a.jpg"), b"1").unwrap();
+        let old = PathBuf::from("/var/gone/Documents/Quiet.md/assets/sub/a.jpg");
+        assert_eq!(rehome(&lib.0, old.clone()), lib.0.join("assets/sub/a.jpg"));
+        assert!(export_path_in(&lib.0, &old.to_string_lossy()).is_some());
+        // Not in this library either: left as written.
+        let missing = PathBuf::from("/var/gone/Documents/Quiet.md/assets/b.jpg");
+        assert_eq!(rehome(&lib.0, missing.clone()), missing);
+        assert_eq!(rehome(&lib.0, PathBuf::from("/var/gone/a.jpg")), PathBuf::from("/var/gone/a.jpg"));
     }
 
     #[test]
