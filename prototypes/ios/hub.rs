@@ -11,10 +11,13 @@ use crate::theme::Theme;
 const RECENT: usize = 5;
 /// 收藏卡片的宽度；高度按主页网格里卡片的比例。
 const CARD_W: f32 = 148.;
+pub const TOP_GAP: f32 = 12.;
+pub const SECTION_TITLE_SIZE: f32 = 18.;
+pub const SECTION_TITLE_LINE: f32 = 24.;
 thread_local! { static SCROLL: ScrollHandle = ScrollHandle::new(); }
 
 fn section(title: &'static str) -> Div {
-    div().mt(px(24.)).mb(px(4.)).px(px(24.)).text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::BOLD).text_color(Theme::text()).child(title)
+    div().mt(px(24.)).mb(px(4.)).px(px(24.)).text_size(px(SECTION_TITLE_SIZE)).line_height(px(SECTION_TITLE_LINE)).font_weight(FontWeight::BOLD).text_color(Theme::text()).child(title)
 }
 
 /// 一行去处：图标、名字、右边的数目和箭头。
@@ -82,13 +85,13 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
 
     // 「文件夹」一栏的标题：点了进文件夹页；右边的「…」是系统菜单（上面盖着透明的原生按钮）：新建文件夹、折叠 / 展开这一栏。
     let folders_head = div().relative().mt(px(16.)).mb(px(0.)).pl(px(24.)).pr(px(12.)).h(px(40.)).flex().items_center()
-        .child(div().id("hub-folders").h_full().flex().items_center().gap(px(6.)).text_size(px(18.)).font_weight(FontWeight::BOLD).text_color(Theme::text())
+        .child(div().id("hub-folders").h_full().flex().items_center().gap(px(6.)).text_size(px(SECTION_TITLE_SIZE)).font_weight(FontWeight::BOLD).text_color(Theme::text())
             .child(tr("文件夹", "Folders")).child(crate::ui::icon("chevron-right", 14., Theme::text_caption()))
             .on_click(cx.listener(|_, _, _, cx| { super::set_home_page(super::HomePage::Folders); cx.notify(); })))
         .child(div().flex_1())
         .child(div().relative().size(px(40.)).flex().items_center().justify_center().child(crate::ui::icon("ellipsis", 20., Theme::text_caption()))
             .child(super::menu::button("hub-folders-more", super::hub_menu_items())));
-    let content = div().w_full().flex().flex_col().pt(px(super::chrome_top() + 12.)).pb(px(super::dock_bottom()))
+    let content = div().w_full().flex().flex_col().pt(px(super::chrome_top() + TOP_GAP)).pb(px(super::dock_bottom()))
         .child(super::large_title(tr("主页", "Home")))
         .child(div().mb(px(16.)).child(super::lead_search(tr("搜索文档", "Search documents"), cx)))
         .child(favourites)

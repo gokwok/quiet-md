@@ -357,9 +357,12 @@ pub fn lead_search(label: &'static str, cx: &mut Context<Workspace>) -> impl Int
 /// 主页的底色。悬浮版式下是窗口的浅灰，白色的卡片从上面浮出来；否则照旧是页面的白。
 /// 深色下浏览页是纯黑，比文档页的深灰暗一档：两种页面一眼能分开（走查 V3）。
 pub fn home_bg() -> Hsla { if !floating() { Theme::bg_body() } else if crate::theme::dark() { crate::theme::rgbaf(0, 0, 0, 1.) } else { Theme::window() } }
+pub const LARGE_TITLE_H: f32 = 56.;
+pub const LARGE_TITLE_LINE: f32 = 34.;
+pub const LARGE_TITLE_SIZE: f32 = 26.;
 /// 跟着内容滚走的大标题。
 pub fn large_title(title: impl Into<SharedString>) -> impl IntoElement {
-    div().h(px(56.)).px(px(24.)).flex().items_center().text_size(px(26.)).line_height(px(34.)).font_weight(FontWeight::BOLD).text_color(Theme::text())
+    div().h(px(LARGE_TITLE_H)).px(px(24.)).flex().items_center().text_size(px(LARGE_TITLE_SIZE)).line_height(px(LARGE_TITLE_LINE)).font_weight(FontWeight::BOLD).text_color(Theme::text())
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.into()))
 }
 
