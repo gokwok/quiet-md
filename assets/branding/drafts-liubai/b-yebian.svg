@@ -1,0 +1,8 @@
+<!-- 本项目绘制：留白 应用图标草稿「页边」 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/>
+</svg>

@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="1240" viewBox="0 0 1560 1240"><defs><clipPath id="q"><rect width="1024" height="1024" rx="230"/></clipPath></defs>
+<rect width="1560" height="620" fill="#FFFFFF"/><rect y="620" width="1560" height="620" fill="#1C1C1E"/>
+<g transform="translate(60,50) scale(0.29296875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#F4F1EA"/>
+<rect x="168" y="176" width="300" height="76" rx="38" fill="#262523"/>
+<rect x="168" y="304" width="430" height="52" rx="26" fill="#8E8A83"/>
+<rect x="168" y="396" width="270" height="52" rx="26" fill="#8E8A83"/></g>
+<g transform="translate(60,400) scale(0.1171875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#F4F1EA"/>
+<rect x="168" y="176" width="300" height="76" rx="38" fill="#262523"/>
+<rect x="168" y="304" width="430" height="52" rx="26" fill="#8E8A83"/>
+<rect x="168" y="396" width="270" height="52" rx="26" fill="#8E8A83"/></g>
+<g transform="translate(205,400) scale(0.05859375)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#F4F1EA"/>
+<rect x="168" y="176" width="300" height="76" rx="38" fill="#262523"/>
+<rect x="168" y="304" width="430" height="52" rx="26" fill="#8E8A83"/>
+<rect x="168" y="396" width="270" height="52" rx="26" fill="#8E8A83"/></g>
+<g transform="translate(285,400) scale(0.0283203125)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#F4F1EA"/>
+<rect x="168" y="176" width="300" height="76" rx="38" fill="#262523"/>
+<rect x="168" y="304" width="430" height="52" rx="26" fill="#8E8A83"/>
+<rect x="168" y="396" width="270" height="52" rx="26" fill="#8E8A83"/></g>
+<text x="60" y="570" font-family="PingFang SC" font-size="26" fill="#333">A · 一角</text>
+<g transform="translate(435,50) scale(0.29296875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/></g>
+<g transform="translate(435,400) scale(0.1171875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/></g>
+<g transform="translate(580,400) scale(0.05859375)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/></g>
+<g transform="translate(660,400) scale(0.0283203125)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/></g>
+<text x="435" y="570" font-family="PingFang SC" font-size="26" fill="#333">B · 页边</text>
+<g transform="translate(810,50) scale(0.29296875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g></g>
+<g transform="translate(810,400) scale(0.1171875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g></g>
+<g transform="translate(955,400) scale(0.05859375)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g></g>
+<g transform="translate(1035,400) scale(0.0283203125)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g></g>
+<text x="810" y="570" font-family="PingFang SC" font-size="26" fill="#333">C · 白</text>
+<g transform="translate(1185,50) scale(0.29296875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/></g>
+<g transform="translate(1185,400) scale(0.1171875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/></g>
+<g transform="translate(1330,400) scale(0.05859375)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/></g>
+<g transform="translate(1410,400) scale(0.0283203125)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/></g>
+<text x="1185" y="570" font-family="PingFang SC" font-size="26" fill="#333">D · 角标</text>
+<g transform="translate(60,670) scale(0.29296875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#F4F1EA"/>
+<rect x="168" y="176" width="300" height="76" rx="38" fill="#262523"/>
+<rect x="168" y="304" width="430" height="52" rx="26" fill="#8E8A83"/>
+<rect x="168" y="396" width="270" height="52" rx="26" fill="#8E8A83"/></g>
+<g transform="translate(60,1020) scale(0.1171875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#F4F1EA"/>
+<rect x="168" y="176" width="300" height="76" rx="38" fill="#262523"/>
+<rect x="168" y="304" width="430" height="52" rx="26" fill="#8E8A83"/>
+<rect x="168" y="396" width="270" height="52" rx="26" fill="#8E8A83"/></g>
+<g transform="translate(205,1020) scale(0.05859375)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#F4F1EA"/>
+<rect x="168" y="176" width="300" height="76" rx="38" fill="#262523"/>
+<rect x="168" y="304" width="430" height="52" rx="26" fill="#8E8A83"/>
+<rect x="168" y="396" width="270" height="52" rx="26" fill="#8E8A83"/></g>
+<g transform="translate(285,1020) scale(0.0283203125)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#F4F1EA"/>
+<rect x="168" y="176" width="300" height="76" rx="38" fill="#262523"/>
+<rect x="168" y="304" width="430" height="52" rx="26" fill="#8E8A83"/>
+<rect x="168" y="396" width="270" height="52" rx="26" fill="#8E8A83"/></g>
+<text x="60" y="1190" font-family="PingFang SC" font-size="26" fill="#DDD">A · 一角</text>
+<g transform="translate(435,670) scale(0.29296875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/></g>
+<g transform="translate(435,1020) scale(0.1171875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/></g>
+<g transform="translate(580,1020) scale(0.05859375)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/></g>
+<g transform="translate(660,1020) scale(0.0283203125)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#262523"/>
+<rect x="236" y="236" width="900" height="900" rx="104" fill="#F4F1EA"/>
+<rect x="356" y="364" width="250" height="72" rx="36" fill="#262523"/>
+<rect x="356" y="488" width="380" height="50" rx="25" fill="#8E8A83"/>
+<rect x="356" y="578" width="230" height="50" rx="25" fill="#8E8A83"/></g>
+<text x="435" y="1190" font-family="PingFang SC" font-size="26" fill="#DDD">B · 页边</text>
+<g transform="translate(810,670) scale(0.29296875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g></g>
+<g transform="translate(810,1020) scale(0.1171875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g></g>
+<g transform="translate(955,1020) scale(0.05859375)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g></g>
+<g transform="translate(1035,1020) scale(0.0283203125)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g></g>
+<text x="810" y="1190" font-family="PingFang SC" font-size="26" fill="#DDD">C · 白</text>
+<g transform="translate(1185,670) scale(0.29296875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/></g>
+<g transform="translate(1185,1020) scale(0.1171875)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/></g>
+<g transform="translate(1330,1020) scale(0.05859375)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/></g>
+<g transform="translate(1410,1020) scale(0.0283203125)" clip-path="url(#q)"><rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/></g>
+<text x="1185" y="1190" font-family="PingFang SC" font-size="26" fill="#DDD">D · 角标</text>
+</svg>

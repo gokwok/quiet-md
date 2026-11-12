@@ -1,0 +1,6 @@
+<!-- 本项目绘制：留白 应用图标草稿「角标」 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<rect width="1024" height="1024" fill="#2F5D50"/>
+<path d="M236 560V316a80 80 0 0 1 80-80H560" fill="none" stroke="#F4F1EA" stroke-width="88" stroke-linecap="round"/>
+<circle cx="452" cy="452" r="62" fill="#F4F1EA"/>
+</svg>

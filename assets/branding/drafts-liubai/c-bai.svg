@@ -1,0 +1,7 @@
+<!-- 本项目绘制：留白 应用图标草稿「白」 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<rect width="1024" height="1024" fill="#D8502F"/>
+<g fill="none" stroke="#F4F1EA" stroke-width="76" stroke-linecap="round" stroke-linejoin="round">
+<rect x="312" y="356" width="400" height="420" rx="44"/>
+<path d="M312 566H712"/><path d="M512 356L470 236"/></g>
+</svg>
