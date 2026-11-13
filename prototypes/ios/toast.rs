@@ -47,8 +47,8 @@ unsafe fn slide(view: *mut AnyObject, on: bool) {
             let _: () = msg_send![addr as *mut AnyObject, setTransform: shift(if on { 0. } else { -14. })];
         });
         let none: Option<&block2::Block<dyn Fn(objc2::runtime::Bool)>> = None;
-        // 弹一下落定（阻尼 0.8）。
-        let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.32f64, delay: 0f64, usingSpringWithDamping: 0.8f64, initialSpringVelocity: 0f64, options: 0usize, animations: &*body, completion: none];
+        // 弹一下落定（阻尼 0.8）。2 = UIViewAnimationOptionAllowUserInteraction：落下来的那 0.32 秒里点「撤销」也算数。
+        let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.32f64, delay: 0f64, usingSpringWithDamping: 0.8f64, initialSpringVelocity: 0f64, options: 2usize, animations: &*body, completion: none];
     }
 }
 

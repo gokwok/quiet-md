@@ -408,6 +408,9 @@ pub struct Core {
     pub sel: Selection,
     /// Set while whole blocks are selected (Esc, handle click, ⌘A, ⇧↑ at a block edge).
     pub block_sel: Option<BlockSel>,
+    /// Blocks picked one at a time (touch: each block's circle), not one run. They count only while
+    /// `block_sel` is still the first-to-last range they were picked under; any other selection outdates them.
+    pub(super) pick: Option<(BlockSel, Vec<BlockId>)>,
     /// Set while table cells are selected (a cell drag, a row / column bar
     /// click). The caret stays collapsed in the anchor cell meanwhile.
     pub cell_sel: Option<super::table_ops::CellSel>,
@@ -438,6 +441,7 @@ impl Core {
             doc,
             sel: Selection::caret(Pos::new(start, 0)),
             block_sel: None,
+            pick: None,
             cell_sel: None,
             pending_marks: None,
             undo: Default::default(),
@@ -1690,9 +1694,14 @@ impl Core {
         for id in ids {
             let Some(p) = self.path(id) else { continue };
             let adjacent = last.as_ref().is_some_and(|l| {
-                l.len() == p.len()
-                    && l[..l.len() - 1] == p[..p.len() - 1]
-                    && seg_index(*l.last().unwrap()) + 1 == seg_index(*p.last().unwrap())
+                let (a, b) = (*l.last().unwrap(), *p.last().unwrap());
+                // Same list: same parent, and for table cells the same cell (picked blocks can sit in different cells).
+                let same_list = match (a, b) {
+                    (Seg::Child(_), Seg::Child(_)) => true,
+                    (Seg::Cell(r1, c1, _), Seg::Cell(r2, c2, _)) => (r1, c1) == (r2, c2),
+                    _ => false,
+                };
+                l.len() == p.len() && l[..l.len() - 1] == p[..p.len() - 1] && same_list && seg_index(a) + 1 == seg_index(b)
             });
             if adjacent {
                 groups.last_mut().unwrap().push(id);
@@ -2233,6 +2242,7 @@ impl Core {
 
     pub fn clear_block_sel(&mut self) {
         self.block_sel = None;
+        self.pick = None;
     }
 
     /// Enter block-selection mode on a single block (Esc, handle click).
@@ -2246,7 +2256,41 @@ impl Core {
 
     fn select_range(&mut self, anchor: BlockId, head: BlockId) {
         self.block_sel = Some(BlockSel { anchor, head });
+        self.pick = None;
         self.cell_sel = None;
+    }
+
+    /// The blocks picked one at a time, while they are the selection.
+    fn picked(&self) -> Option<&[BlockId]> {
+        self.pick.as_ref().filter(|(tag, _)| self.block_sel == Some(*tag)).map(|(_, ids)| ids.as_slice())
+    }
+
+    /// Adds `id` to the block selection, or takes it out, without the blocks in between (touch: a block's
+    /// circle). Not in block mode: selects just `id`. Taking out the last one leaves block mode.
+    pub fn toggle_pick(&mut self, id: BlockId) {
+        if id == TITLE || matches!(self.kind_of(id), None | Some(BlockKind::Grid | BlockKind::Column { .. })) {
+            return;
+        }
+        let mut ids = self.block_sel_ids();
+        if ids.is_empty() {
+            return self.select_block(id);
+        }
+        // A folded heading's hidden section rides along with it (`range_ids`), so compare picks by their visible ends.
+        let shown: HashSet<BlockId> = self.block_order(true).into_iter().collect();
+        ids.retain(|b| shown.contains(b));
+        if let Some(i) = ids.iter().position(|b| *b == id) {
+            ids.remove(i);
+        } else {
+            ids.push(id);
+        }
+        let order = self.block_order(false);
+        ids.sort_by_key(|b| order.iter().position(|x| x == b));
+        let ids = self.topmost_in(&ids, &path_index(&self.doc.blocks));
+        let (Some(&first), Some(&last)) = (ids.first(), ids.last()) else { return self.clear_block_sel() };
+        let tag = BlockSel { anchor: first, head: last };
+        self.block_sel = Some(tag);
+        self.cell_sel = None;
+        self.pick = Some((tag, ids));
     }
 
     /// Blocks in document order. With `visible`, content hidden by folded
@@ -2356,8 +2400,18 @@ impl Core {
     /// folded heading also takes the blocks it hides.
     pub fn block_sel_ids(&self) -> Vec<BlockId> {
         let Some(bs) = self.block_sel else { return vec![] };
+        let Some(picked) = self.picked() else { return self.range_ids(bs.anchor, bs.head) };
+        let mut all: Vec<BlockId> = picked.iter().flat_map(|id| self.range_ids(*id, *id)).collect();
+        let order = self.block_order(false);
+        all.sort_by_key(|b| order.iter().position(|x| x == b));
+        all.dedup();
+        self.topmost_in(&all, &path_index(&self.doc.blocks))
+    }
+
+    /// The blocks from `anchor` to `head` (either order) in document order, top-most only.
+    fn range_ids(&self, anchor: BlockId, head: BlockId) -> Vec<BlockId> {
         let vis = self.block_order(true);
-        let (Some(a), Some(h)) = (vis.iter().position(|x| *x == bs.anchor), vis.iter().position(|x| *x == bs.head))
+        let (Some(a), Some(h)) = (vis.iter().position(|x| *x == anchor), vis.iter().position(|x| *x == head))
         else {
             return vec![];
         };
@@ -3879,6 +3933,43 @@ mod tests {
         c.delete_selected_blocks();
         assert_eq!(xml(&c), "<title>T</title>\n<p>d</p>\n");
         assert_eq!(c.sel.head, Pos::new(d, 0));
+    }
+
+    #[test]
+    fn picked_blocks() {
+        let mut c = doc("<title>T</title><p>a</p><ul><li>b<ul><li>c</li></ul></li></ul><p>d</p><p>e</p>");
+        let (a, b, cc, d, e) = (id(&c, 1), id(&c, 2), id(&c, 3), id(&c, 4), id(&c, 5));
+        c.toggle_pick(d);
+        assert_eq!(c.block_sel_ids(), vec![d]);
+        // Picks skip what lies between them, and come back in document order.
+        c.toggle_pick(a);
+        assert_eq!(c.block_sel_ids(), vec![a, d]);
+        // A child of a picked block is already in; picking its parent takes it in.
+        c.toggle_pick(cc);
+        assert_eq!(c.block_sel_ids(), vec![a, cc, d]);
+        c.toggle_pick(b);
+        assert_eq!(c.block_sel_ids(), vec![a, b, d]);
+        c.toggle_pick(cc);
+        assert_eq!(c.block_sel_ids(), vec![a, b, d]);
+        c.toggle_pick(b);
+        assert_eq!(c.block_sel_ids(), vec![a, d]);
+        // A selection made some other way drops the picks.
+        let keep = c.block_sel;
+        c.select_block(e);
+        assert_eq!(c.block_sel_ids(), vec![e]);
+        c.block_sel = keep;
+        assert_eq!(c.block_sel_ids(), vec![a, d]);
+        c.select_range(a, d);
+        assert_eq!(c.block_sel_ids(), vec![a, b, d]);
+        c.toggle_pick(b);
+        c.delete_selected_blocks();
+        assert_eq!(xml(&c), "<title>T</title>\n<ul>\n  <li>b\n    <ul>\n      <li>c</li>\n    </ul>\n  </li>\n</ul>\n<p>e</p>\n");
+        c.undo();
+        assert_eq!(c.doc.blocks.len(), 4);
+        // Taking out the last pick leaves block mode.
+        c.toggle_pick(e);
+        c.toggle_pick(e);
+        assert!(!c.in_block_mode());
     }
 
     #[test]

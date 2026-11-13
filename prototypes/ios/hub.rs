@@ -72,7 +72,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         let id = e.id.clone();
         // 都画在行首那个 22 的格子里、同一个大小（搜索结果的 `entry_icon` 自带 24 的格子和右边距，放进来会偏左、偏小）。
         let icon = match &e.icon {
-            None if e.meta.folder.is_some() => crate::ui::icon("folder", 20., super::folder_tint(e)).into_any_element(),
+            _ if e.meta.folder.is_some() => super::folder_icons::glyph(e, 20.).into_any_element(),
             _ if e.meta.markdown => crate::ui::icon("doc-md", 20., Theme::icon()).into_any_element(),
             Some(em) => div().text_size(px(18.)).child(em.clone()).into_any_element(),
             None => crate::ui::icon("doc", 20., Theme::icon()).into_any_element(),

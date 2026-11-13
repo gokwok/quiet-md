@@ -10,9 +10,11 @@ pub mod appicon;
 pub mod card;
 pub mod editmenu;
 pub mod files;
+pub mod folder_icons;
 pub mod glass;
 pub mod hub;
 pub mod keybar;
+pub mod masonry;
 pub mod menu;
 pub mod panel;
 pub mod shot;
@@ -238,7 +240,7 @@ pub fn sheet_point() -> Point<Pixels> {
     let (_, safe, viewport) = LAYOUT.with(|l| l.get());
     point(viewport.width / 2., viewport.height - safe.bottom - px(SHEET_INSET))
 }
-/// 底部面板是浮着的卡片：四周留这么多，圆角 `SHEET_RADIUS`（走查 V6；先不加抓手，也不上玻璃）。
+/// 底部面板是浮着的卡片：四周留这么多，圆角 `SHEET_RADIUS`（走查 V6；没上玻璃）。编辑器的面板顶上有抓手，见 `touch.rs` 的 `pull_sheet`。
 pub const SHEET_INSET: f32 = 12.;
 pub const SHEET_RADIUS: f32 = 24.;
 /// 动作面板占满屏宽（两侧各留 `SHEET_INSET`）；宽屏用菜单自己的宽度。
@@ -254,6 +256,9 @@ pub fn sheet_scrim() -> impl IntoElement {
         .with_animation("sheet-scrim", Animation::new(Duration::from_millis(220)), |d, t| d.opacity(t))
 }
 
+/// 带抓手的底部面板顶上让出放抓手的地方（盖掉面板原来的上边距）。
+pub fn sheet_grab<E: Styled>(e: E) -> E { if is_compact() { e.pt(px(GRAB_ROOM)) } else { e } }
+pub const GRAB_ROOM: f32 = 20.;
 /// 底部面板不要描边：手机上只靠填充色、阴影和下面的明暗分开（走查 V2），桌面照旧。
 pub fn sheet_plane<E: Styled>(e: E) -> E { if is_compact() { e.border_0().rounded(px(SHEET_RADIUS)) } else { e } }
 
@@ -361,8 +366,9 @@ pub const LARGE_TITLE_H: f32 = 56.;
 pub const LARGE_TITLE_LINE: f32 = 34.;
 pub const LARGE_TITLE_SIZE: f32 = 26.;
 /// 跟着内容滚走的大标题。
-pub fn large_title(title: impl Into<SharedString>) -> impl IntoElement {
-    div().h(px(LARGE_TITLE_H)).px(px(24.)).flex().items_center().text_size(px(LARGE_TITLE_SIZE)).line_height(px(LARGE_TITLE_LINE)).font_weight(FontWeight::BOLD).text_color(Theme::text())
+pub fn large_title(title: impl Into<SharedString>) -> impl IntoElement { large_title_icon(title, None) }
+pub fn large_title_icon(title: impl Into<SharedString>, icon: Option<AnyElement>) -> impl IntoElement {
+    div().h(px(LARGE_TITLE_H)).px(px(24.)).flex().items_center().text_size(px(LARGE_TITLE_SIZE)).line_height(px(LARGE_TITLE_LINE)).font_weight(FontWeight::BOLD).text_color(Theme::text()).gap(px(10.)).children(icon)
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.into()))
 }
 
@@ -411,8 +417,9 @@ fn browse_menu_items(w: &Workspace) -> Vec<menu::Item> {
 /// 浏览页开头跟着内容滚走的一段：大标题和搜索。
 pub fn browse_lead(title: impl Into<SharedString>, cx: &mut Context<Workspace>) -> AnyElement { browse_lead_with(title, None, cx) }
 /// 同上，大标题下面多一行说明（文件夹的描述）。
-pub fn browse_lead_with(title: impl Into<SharedString>, note: Option<String>, cx: &mut Context<Workspace>) -> AnyElement {
-    div().pt(px(chrome_top())).child(large_title(title))
+pub fn browse_lead_with(title: impl Into<SharedString>, note: Option<String>, cx: &mut Context<Workspace>) -> AnyElement { browse_lead_icon(title, note, None, cx) }
+pub fn browse_lead_icon(title: impl Into<SharedString>, note: Option<String>, icon: Option<AnyElement>, cx: &mut Context<Workspace>) -> AnyElement {
+    div().pt(px(chrome_top())).child(large_title_icon(title, icon))
         .children(note.map(|n| div().px(px(24.)).pb(px(8.)).text_size(px(14.)).line_height(px(20.)).text_color(Theme::text_caption()).child(n)))
         .child(lead_search(crate::settings::tr("搜索", "Search"), cx)).into_any_element()
 }
@@ -512,7 +519,7 @@ pub fn row_context(w: &Workspace, id: &str, radius: f32) -> Option<AnyElement> {
             Item::new("ctx-new-doc", tr("新建文档", "New document"), "doc.badge.plus", 0),
             Item::new("ctx-new-folder", tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
             Item::new("ctx-rename", tr("重命名", "Rename"), "pencil", 0),
-            Item::new("ctx-icon", tr("更改图标", "Change icon"), "face.smiling", 0),
+            Item::new("ctx-icon", tr("更改图标", "Change icon"), "square.grid.2x2", 0),
             Item::new("ctx-move", tr("移动到", "Move to"), "folder", 0),
             Item::new("ctx-delete", tr("删除", "Delete"), "trash", 1).danger(),
         ]
@@ -544,6 +551,21 @@ pub fn trash_context(id: &str, title: SharedString) -> Option<AnyElement> {
         menu::Item::new("ctx-purge", text("彻底删除"), "trash", 0).danger(),
     ];
     Some(menu::context(SharedString::from(id.to_string()), title, 10., items).into_any_element())
+}
+
+/// 块动作栏剪掉 / 删掉了 `n` 块：这时正文没有焦点、键盘条（带撤销）不在，顶上一条提示带「撤销」。
+/// 没有原生提示的旧系统只出一行字。
+pub fn blocks_removed(n: usize, cut: bool) {
+    menu::dispatch(move |w, _, cx| {
+        let msg = match (cut, n) {
+            (true, 1) => crate::settings::tr("已剪切 1 个块", "Cut 1 block").to_string(),
+            (true, _) => crate::localized_format!("已剪切 {} 个块", "Cut {} blocks", n),
+            (false, 1) => crate::settings::tr("已删除 1 个块", "Deleted 1 block").to_string(),
+            (false, _) => crate::localized_format!("已删除 {} 个块", "Deleted {} blocks", n),
+        };
+        w.show_toast(&msg, cx);
+        if toast::native() { w.toast_link(crate::settings::tr("撤销", "Undo"), "toast-undo", cx); }
+    });
 }
 
 /// 系统菜单里的一项被点了（`menu.rs` 把它送回工作区）。
@@ -581,6 +603,8 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         "doc-append" => if let Some(editor) = w.editor.clone() { glass::haptic(); editor.update(cx, |ed, cx| ed.append_line(window, cx)); },
         "doc-history" => { glass::haptic(); HISTORY.with(|h| h.set(true)); cx.notify(); }
         "doc-undo" | "doc-redo" => if let Some(editor) = w.editor.clone() { glass::haptic(); editor.update(cx, |ed, cx| ed.history_step(id == "doc-redo", window, cx)); },
+        // 提示上的「撤销」：撤回之后提示也收起。
+        "toast-undo" => { w.toast = None; if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| ed.history_step(false, window, cx)); } cx.notify(); }
         "doc-paste" => if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| ed.paste_at_end(window, cx)); },
         // 「+」：都是在文末新起一行，再往里放东西。
         "doc-add-more" | "doc-add-file" | "doc-add-image" => if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| ed.append_with(id, window, cx)); },
@@ -688,9 +712,6 @@ thread_local! { static ICON_FOR: std::cell::RefCell<Option<String>> = const { st
 pub fn pick_icon(id: Option<String>) { ICON_FOR.with(|i| *i.borrow_mut() = id); }
 pub fn icon_picking() -> bool { ICON_FOR.with(|i| i.borrow().is_some()) }
 
-/// 文件夹可选的图标：一小组常用的 emoji。
-const FOLDER_ICONS: [&str; 30] = ["📁", "📂", "🗂️", "📚", "📖", "📝", "✏️", "📌", "⭐", "❤️", "💡", "🎯", "🚀", "🧪", "🛠️", "💼", "🏠", "🎓", "🎨", "🎵", "🎬", "📷", "✈️", "🌱", "🍀", "☕", "🍳", "🏃", "💰", "🔒"];
-
 /// 文件夹的图标面板：从底部升起，一排六个；最下面一行拿掉图标。
 pub fn icon_picker(cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let id = ICON_FOR.with(|i| i.borrow().clone())?;
@@ -703,9 +724,10 @@ pub fn icon_picker(cx: &mut Context<Workspace>) -> Option<AnyElement> {
         cx.notify();
     };
     let cell = f32::from(menu_w(0.) - px(24.)) / 6.;
-    let grid = div().px(px(12.)).py(px(8.)).flex().flex_wrap().children(FOLDER_ICONS.iter().enumerate().map(|(i, em)|
-        div().id(("folder-icon", i)).w(px(cell.floor())).h(px(48.)).flex().items_center().justify_center().rounded(px(10.)).text_size(px(26.))
-            .active(|s| s.bg(Theme::fill_pressed())).child(*em).on_click(cx.listener(set(Some(em.to_string()), id.clone())))));
+    let grid = div().px(px(12.)).py(px(8.)).flex().flex_wrap().children(folder_icons::CHOICES.iter().enumerate().map(|(i, choice)|
+        div().id(("folder-icon", i)).w(px(cell.floor())).h(px(48.)).flex().items_center().justify_center().rounded(px(10.))
+            .active(|s| s.bg(Theme::fill_pressed())).child(crate::ui::icon(choice.glyph, 24., Theme::icon()))
+            .on_click(cx.listener(set(Some(choice.value.to_string()), id.clone())))));
     let panel = sheet_plane(crate::editor_ui::popover()).id("folder-icons").occlude().w(menu_w(0.)).py(px(crate::ui::MENU_PAD_Y))
         .on_mouse_down_out(cx.listener(|_, _, _, cx| { pick_icon(None); cx.notify(); }))
         .child(div().px(px(20.)).pt(px(8.)).pb(px(4.)).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text_caption()).child(crate::settings::tr("文件夹图标", "Folder icon")))

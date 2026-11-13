@@ -248,7 +248,7 @@ pub(super) unsafe fn ui_color(color: Hsla) -> *mut AnyObject {
 }
 
 /// 把资源里的 SVG 图标画成模板图：UIKit 不认 SVG，颜色由 `tintColor` 给。
-unsafe fn icon_image(name: &str, size: f32) -> *mut AnyObject {
+pub(super) unsafe fn icon_image(name: &str, size: f32) -> *mut AnyObject {
     // `sf:名字`：系统的 SF Symbols（原生玻璃上的图标，不占图标名额）。
     if let Some(name) = name.strip_prefix("sf:") { unsafe {
         let config: *mut AnyObject = msg_send![AnyClass::get(c"UIImageSymbolConfiguration").unwrap(), configurationWithPointSize: f64::from(size) * 0.82, weight: 5isize];

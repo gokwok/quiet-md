@@ -111,6 +111,13 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
     if std::env::var("FDL_FUZZ_TRACE").is_ok() {
         eprintln!("  before: sel {:?} block_sel {:?}", c.sel, c.block_sel);
     }
+    if rng.chance(6) {
+        // Touch: pick a few blocks one at a time (not a run), then act on them.
+        let order = c.block_order(true);
+        for _ in 0..2 + rng.below(3) {
+            c.toggle_pick(*rng.pick(&order));
+        }
+    }
     if c.block_sel.is_some() {
         return block_mode_step(c, rng);
     }
@@ -221,7 +228,13 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
 /// Block mode takes only block commands (the view ignores text ones).
 fn block_mode_step(c: &mut Core, rng: &mut Rng) -> String {
     let ids = c.block_sel_ids();
-    match rng.below(8) {
+    match rng.below(10) {
+        8 | 9 => {
+            // Touch: add or take out one block, leaving the ones in between as they are.
+            let id = *rng.pick(&c.block_order(true));
+            c.toggle_pick(id);
+            format!("block mode: toggle_pick({id:?}) on {ids:?}")
+        }
         0 | 1 => {
             c.delete_selected_blocks();
             format!("block mode: delete {ids:?}")
@@ -439,6 +452,25 @@ fn check(c: &Core) -> Result<(), String> {
             if c.block(id).is_none() || c.is_hidden(id) {
                 return Err(format!("block selection end {id:?} is gone or hidden"));
             }
+        }
+        // Selected blocks (a run or single picks): real, never the title or a column, top-most, in document order.
+        let ids = c.block_sel_ids();
+        let order = c.block_order(false);
+        let at: Vec<Option<usize>> = ids.iter().map(|id| order.iter().position(|x| x == id)).collect();
+        if at.iter().any(|i| i.is_none()) || !at.windows(2).all(|w| w[0] < w[1]) {
+            return Err(format!("selected blocks {ids:?} are missing or out of order"));
+        }
+        if ids.iter().any(|id| matches!(c.kind_of(*id), Some(BlockKind::Column { .. })))
+            || ids.iter().any(|id| {
+                let mut up = c.parent_of(*id).map(|p| p.id);
+                while let Some(p) = up {
+                    if ids.contains(&p) { return true; }
+                    up = c.parent_of(p).map(|b| b.id);
+                }
+                false
+            })
+        {
+            return Err(format!("selected blocks {ids:?} hold a column or a block inside another"));
         }
         return Ok(());
     }

@@ -101,7 +101,7 @@ fn row(w: &Workspace, e: &Entry, n: usize, q: &str, cx: &mut Context<Workspace>)
     let summary = if q.is_empty() { None } else { crate::search::snippet(&e.body, q).map(|(text, _)| text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(90).collect::<String>()) };
     let summary = summary.or_else(|| { let s: String = e.body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(90).collect(); (!s.is_empty()).then_some(s) });
     let second = match (folder, summary) { (Some(f), Some(s)) => format!("{f} · {s}"), (Some(f), None) => f, (None, Some(s)) => s, (None, None) => String::new() };
-    let glyph = if e.meta.folder.is_some() && e.icon.is_none() { crate::ui::icon("folder", 20., super::folder_tint(e)).into_any_element() } else { crate::search::entry_icon(e).mr(px(0.)).into_any_element() };
+    let glyph = if e.meta.folder.is_some() { super::folder_icons::glyph(e, 20.).into_any_element() } else { crate::search::entry_icon(e).mr(px(0.)).into_any_element() };
     let (fill, ink) = badge();
     div().id(SharedString::from(format!("find-{}", e.id))).flex_none().h(px(64.)).mx(px(12.)).px(px(8.)).flex().items_center().gap(px(12.)).rounded(px(12.)).active(|s| s.bg(Theme::fill_hover()))
         .child(div().flex_none().size(px(40.)).rounded(px(10.)).bg(Theme::fill_hover()).flex().items_center().justify_center().child(glyph))

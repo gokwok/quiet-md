@@ -20,9 +20,10 @@ pub const GUTTER: f32 = 24.;
 /// 标记（36pt 见方）的左边离正文区右缘多远。
 const MARK_X: f32 = 40.;
 
-/// 正在拖块的那根手指是怎么开始的：按在右侧的拖动标记上，还是没在编辑时长按了块。
+/// 正在拖块的那根手指是怎么开始的：按在右侧的拖动标记上，还是长按了块。长按时记着当时在不在编辑、按的是不是光标所在的那一块，
+/// 还有编辑是不是已经因为拖动结束了。
 #[derive(Clone, Copy, PartialEq)]
-pub enum Lift { Grip, LongPress }
+pub enum Lift { Grip, LongPress { editing: bool, caret: bool } }
 
 /// 正文拉过头的回弹（GPUI 的列表到头就停，系统的滚动视图会跟着手指再走一段、松手弹回）。
 /// `raw` 是手指在边缘之外又拖了多远（向下为正），显示出来的位移按系统的阻尼曲线打折；
@@ -45,8 +46,8 @@ const SWIPE_COMMIT: f32 = 28.;
 const SWIPE_BACK: f32 = 0.24;
 
 /// 整块的拖动排序。桌面靠悬停时块左边的手柄；手机上是两条路，落点、幽灵和自动滚动都用 `drag.rs` 原有的：
-/// 编辑时光标所在的块右侧有一个拖动标记，点它选中整块（并升起块菜单），按住拖动就排序；
-/// 没在编辑时，长按一个块直接把它提起来拖。
+/// 编辑时光标所在的块右侧有一个拖动标记，点它选中整块（并升起块动作栏），按住拖动就排序；
+/// 长按一个块直接把它提起来拖（照 Craft，编辑时也是：选词用双击，或在光标上再点一下出编辑菜单）。
 impl Editor {
     /// 编辑时光标所在的块：右侧画拖动标记。
     fn grip_block(&self, window: &Window) -> Option<BlockId> {
@@ -88,18 +89,20 @@ impl Editor {
         if tapped && let Some(block) = block { self.open_block_menu(block, false, window, cx); }
     }
 
-    /// 没在编辑时长按：把手指下面的块提起来。编辑时返回假，长按照旧选词。
+    /// 长按：把手指下面的块提起来。只读、按在标题上、块提不起来时返回假，长按照旧选词。
     pub(super) fn lift_block(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.compact() || self.read_only || self.focus.is_focused(window) { return false; }
+        if !self.compact() || self.read_only { return false; }
+        let editing = self.focus.is_focused(window);
         // 手指下面最里层的块（引用、高亮块里的那一段，而不是整个容器）。
         let hit = self.block_bounds.borrow().iter().filter(|(id, b)| **id != super::core::TITLE && b.contains(&at))
             .min_by(|a, b| f32::from(a.1.size.height).total_cmp(&f32::from(b.1.size.height))).map(|(id, _)| *id);
-        let Some(id) = hit else { return false };
+        // 表格格子里的块不提起来（格子有自己的选择），长按照旧选词。
+        let Some(id) = hit.filter(|id| self.core.cell_of(*id).is_none()) else { return false };
         self.press_handle(id, at);
         if self.block_drag.is_none() { return false; }
         window.prevent_default();
         crate::ios::take_long_press();
-        self.touch_lift = Some(Lift::LongPress);
+        self.touch_lift = Some(Lift::LongPress { editing, caret: editing && self.core.sel.head.block == id });
         // 提起来就是拖动的开始，不用等手指再挪 2pt。
         self.block_drag_move(point(at.x, at.y + px(3.)), true, window, cx);
         cx.notify();
@@ -108,15 +111,28 @@ impl Editor {
 
     /// 拖着块的手指动了或抬起了。
     pub(super) fn lift_move(&mut self, phase: TouchPhase, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let near = |d: &super::drag::BlockDrag| { let m = at - d.from; f32::from(m.x).hypot(f32::from(m.y)) <= 10. };
         match phase {
-            TouchPhase::Moved => self.block_drag_move(at, true, window, cx),
+            TouchPhase::Moved => {
+                // 编辑中长按提起的块一拖动，编辑就结束（照 Craft）：键盘收起，松手后停在阅读状态。
+                if let Some(Lift::LongPress { editing: true, .. }) = self.touch_lift && self.block_drag.as_ref().is_some_and(|d| !near(d)) {
+                    self.touch_lift = Some(Lift::LongPress { editing: false, caret: false });
+                    window.blur(cx);
+                }
+                self.block_drag_move(at, true, window, cx)
+            }
             TouchPhase::Ended => {
-                // 长按提起后没挪就松手：选中这一块（或原来选中的那几块），升起块动作栏。不抢焦点，键盘不出来。
-                let held = self.touch_lift == Some(Lift::LongPress) && self.block_drag.as_ref().is_some_and(|d| { let m = at - d.from; f32::from(m.x).hypot(f32::from(m.y)) <= 10. });
+                // 长按提起后没挪就松手：没在编辑时选中这一块（或原来选中的那几块），升起块动作栏，不抢焦点、键盘不出来；
+                // 编辑时按的是光标所在的块，同样选中它并收起键盘；按的是别的块就什么都不变，接着编辑。
+                let lift = self.touch_lift.take();
+                let held = matches!(lift, Some(Lift::LongPress { .. })) && self.block_drag.as_ref().is_some_and(near);
                 let one = self.block_drag.as_ref().filter(|d| d.sel.is_none()).and_then(|d| d.ids.first().copied());
-                self.touch_lift = None;
                 self.end_block_drag(Some(at), window, cx);
-                if held { if let Some(id) = one { self.core.select_block(id); } self.menu = None; cx.notify(); }
+                match lift {
+                    Some(Lift::LongPress { editing: true, caret: true }) if held => if let Some(id) = one { self.open_block_menu(id, false, window, cx); },
+                    Some(Lift::LongPress { editing: false, .. }) if held => { if let Some(id) = one { self.core.select_block(id); } self.menu = None; cx.notify(); }
+                    _ => {}
+                }
             }
             TouchPhase::Cancelled => { self.touch_lift = None; self.block_drag = None; self.toolbar_hidden = false; cx.notify(); }
             _ => {}
@@ -124,8 +140,89 @@ impl Editor {
     }
 }
 
+/// 底部面板顶上的抓手（照 Craft）：按住它往下拖，面板跟着手走，松手时拖过 `PULL_COMMIT` 就收起这一层，不够就弹回。
+/// 面板收起后的退场照旧由 `ios::shot` 做（从拖到的位置滑出屏幕）。同一时间只有一块在拖。
+#[derive(Clone, Copy)]
+struct Pull { key: &'static str, from: f32, dy: f32, back: Option<(std::time::Instant, f32)> }
+thread_local! { static PULL: std::cell::Cell<Option<Pull>> = const { std::cell::Cell::new(None) }; }
+/// 面板上沿往下这么高的一条接这个手势（就是抓手让出的那一条，不压第一行）；拖过多远松手算收起；弹回用时。
+const PULL_ZONE: f32 = crate::ios::GRAB_ROOM;
+const PULL_COMMIT: f32 = 80.;
+const PULL_BACK: f32 = 0.25;
+
+/// 这块面板现在被拖下去多少（弹回的路上按缓动算）。
+fn pull_offset(key: &str) -> f32 {
+    let Some(p) = PULL.with(|c| c.get()).filter(|p| p.key == key) else { return 0. };
+    let Some((at, from)) = p.back else { return p.dy };
+    let t = at.elapsed().as_secs_f32() / PULL_BACK;
+    if t >= 1. { PULL.with(|c| c.set(None)); return 0. }
+    from * (1. - t).powi(3)
+}
+
+impl Editor {
+    /// 带抓手、能往下拖着收的底部面板。和 `rise_at` 一样按调用的那一处认面板（`track_caller` 一路传下去）。
+    #[track_caller]
+    pub(super) fn pull_sheet(&self, key: &'static str, rel: Point<Pixels>, el: impl IntoElement, cx: &mut Context<Self>) -> AnyElement {
+        let dy = pull_offset(key);
+        // 块菜单上面叠着子面板时，拖的只能是子面板：下面这层不接。
+        let covered = key == "sheet-block" && matches!(self.menu, Some(Menu::Block { sub: Some(BlockSub::Indent | BlockSub::Color), .. }));
+        let editor = cx.entity().downgrade();
+        let grab = div().absolute().top(px(8.)).left_0().right_0().flex().justify_center()
+            .child(div().w(px(36.)).h(px(5.)).rounded_full().bg(Theme::text_disabled().opacity(0.5)));
+        let watch = canvas(|_, _, _| {}, move |bounds, _, window, _| {
+            // 弹回的路上一直出帧。
+            if PULL.with(|c| c.get()).is_some_and(|p| p.key == key && p.back.is_some()) { window.request_animation_frame(); }
+            if covered { return; }
+            let editor = editor.clone();
+            window.on_mouse_event(move |ev: &TouchDragEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble { return; }
+                let cur = PULL.with(|c| c.get());
+                match ev.phase {
+                    TouchPhase::Started => {
+                        if cur.is_some_and(|p| p.back.is_none()) || !bounds.contains(&ev.start_position) || ev.start_position.y > bounds.top() + px(PULL_ZONE) { return; }
+                        window.prevent_default();
+                        PULL.with(|c| c.set(Some(Pull { key, from: f32::from(ev.start_position.y), dy: 0., back: None })));
+                    }
+                    _ if !cur.is_some_and(|p| p.key == key && p.back.is_none()) => {}
+                    TouchPhase::Moved => {
+                        let Some(mut p) = cur else { return };
+                        // 往上拖只给一点阻力感，不让面板离开底边。
+                        let raw = f32::from(ev.position.y) - p.from;
+                        p.dy = if raw >= 0. { raw } else { -rubber(-raw, 40.) };
+                        PULL.with(|c| c.set(Some(p)));
+                        let _ = editor.update(cx, |_, cx| cx.notify());
+                    }
+                    _ => {
+                        let Some(mut p) = cur else { return };
+                        if ev.phase == TouchPhase::Ended && p.dy > PULL_COMMIT {
+                            let _ = editor.update(cx, |e, cx| e.dismiss_sheet(key, cx));
+                            // 收起后这一帧不再画它；留着位移到下一次拖。
+                            PULL.with(|c| c.set(None));
+                        } else {
+                            p.back = Some((std::time::Instant::now(), p.dy));
+                            PULL.with(|c| c.set(Some(p)));
+                            let _ = editor.update(cx, |_, cx| cx.notify());
+                        }
+                    }
+                }
+            });
+        }).absolute().inset_0();
+        rise_at(key, rel, div().relative().top(px(dy)).child(el).child(grab).child(watch))
+    }
+
+    /// 往下拖收起一块面板：和点面板外面一样只收这一层——叠着的子面板回到块菜单，块菜单回到动作栏，别的直接收起。
+    fn dismiss_sheet(&mut self, key: &str, cx: &mut Context<Self>) {
+        match &mut self.menu {
+            Some(Menu::Block { sub, .. }) if key == "sheet-block-sub" => *sub = None,
+            _ => self.menu = None,
+        }
+        crate::ios::glass::haptic();
+        cx.notify();
+    }
+}
+
 /// 块选中。桌面靠手柄菜单和 Shift 点击；手机上选中整块后底部升起一条矮的动作栏，改类型再点「格式」展开块菜单，
-/// 每个块右边有一个圆圈，点它把选区伸到那一块（选区是连续的一段，和桌面的块选区是同一个）。
+/// 每个块右边有一个圆圈，点它把这一块加进选区或拿出来（照 Craft，可以隔着选：`Core::toggle_pick`）。
 impl Editor {
     fn block_bar_on(&self) -> bool {
         self.compact() && self.core.in_block_mode() && self.slash.is_none() && !self.block_drag.as_ref().is_some_and(|d| d.started)
@@ -153,9 +250,11 @@ impl Editor {
         });
         let act = |cut: bool, copy: bool| cx.listener(move |e: &mut Editor, _: &ClickEvent, window, cx| {
             if copy { e.copy_selection(cx); }
-            if cut { e.core.delete_selected_blocks(); }
             if copy && !cut { return cx.notify(); }
+            let n = e.core.block_sel_ids().len();
+            e.core.delete_selected_blocks();
             e.changed(window, cx);
+            crate::ios::blocks_removed(n, copy);
         });
         let bar = menu().map(crate::ios::sheet_plane).id("block-bar").occlude().w(crate::ios::menu_w(0.)).p(px(6.)).flex().items_center().gap(px(2.))
             .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); })
@@ -171,23 +270,23 @@ impl Editor {
     /// 选择圆圈：块选中时每个块第一行的右边一个，选中的实心。
     pub(super) fn block_circles(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if !self.block_bar_on() || self.menu.is_some() { return vec![]; }
-        let Some(bs) = self.core.block_sel else { return vec![] };
+        let picked: std::collections::HashSet<BlockId> = self.core.block_sel_ids().into_iter().collect();
+        // 选中的容器里的块也算选中（圈是实心的）。
+        let on = |id: BlockId| { let mut up = Some(id); while let Some(b) = up { if picked.contains(&b) { return true; } up = self.core.parent_of(b).map(|p| p.id); } false };
         let vis = self.core.block_order(true);
-        let (Some(a), Some(h)) = (vis.iter().position(|x| *x == bs.anchor), vis.iter().position(|x| *x == bs.head)) else { return vec![] };
-        let (s, e) = (a.min(h), a.max(h));
         let view = self.list.viewport_bounds();
         let mut out = vec![];
         // 圈在右边那条道里，对着块的竖直中间（`mark_y`）：表格格子里的块不给圈（选格子走表格自己的选择），
         // 和已有的圈挤在一起的也不给（引用、高亮块里的段落和容器自己的那一个，留容器的）。
         let mut ys = vec![];
-        for (i, id) in vis.iter().copied().enumerate() {
+        for id in vis.iter().copied() {
             if matches!(self.core.kind_of(id), None | Some(BlockKind::Grid | BlockKind::Column { .. })) || self.core.cell_of(id).is_some() { continue; }
             let Some(y) = self.mark_y(id) else { continue };
             // 横着滑的那一行的圈跟着它一起挪。
             let origin = point(view.right() - px(MARK_X) + px(self.swipe_offset(id).unwrap_or(0.)), y);
             if ys.iter().any(|o: &Pixels| (*o - y).abs() < px(22.)) { continue; }
             ys.push(y);
-            let on = (s..=e).contains(&i);
+            let on = on(id);
             let dot = div().size(px(18.)).rounded_full().flex().items_center().justify_center()
                 .when(on, |d| d.bg(Theme::primary()).child(icon("check", 12., Theme::bg_body())))
                 .when(!on, |d| d.border_2().border_color(Theme::text_disabled()));
@@ -215,17 +314,12 @@ impl Editor {
         (bottom - top >= room).then(|| (top + bottom - px(GRIP)) / 2.)
     }
 
-    /// 点圈、横着滑：切换这一块选没选中。块选区是连续的一段：没有选区时选中它（收起键盘，升起动作栏）；
-    /// 选区外的把选区伸过去；两端的缩一格；中间的缩到它前面；只剩它自己时退出块选中。
+    /// 点圈、横着滑：切换这一块选没选中。没有选区时选中它（收起键盘，升起动作栏）；有选区时把它加进来或拿出去，
+    /// 中间的块不动（照 Craft 的任意多选）；拿掉最后一块时退出块选中。
     pub(super) fn toggle_block(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
-        let Some(bs) = self.core.block_sel else { return self.open_block_menu(id, false, window, cx) };
-        let vis = self.core.block_order(true);
-        let (Some(a), Some(h), Some(i)) = (vis.iter().position(|x| *x == bs.anchor), vis.iter().position(|x| *x == bs.head), vis.iter().position(|x| *x == id)) else { return };
-        let (s, e) = (a.min(h), a.max(h));
-        let range = if i < s { Some((vis[e], id)) } else if i > e { Some((vis[s], id)) } else if s == e { None }
-            else if i == s { Some((vis[e], vis[s + 1])) } else { Some((vis[s], vis[i - 1])) };
-        self.core.block_sel = range.map(|(anchor, head)| super::core::BlockSel { anchor, head });
+        if !self.core.in_block_mode() { return self.open_block_menu(id, false, window, cx) }
+        self.core.toggle_pick(id);
         cx.notify();
     }
 

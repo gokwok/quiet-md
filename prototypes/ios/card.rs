@@ -241,11 +241,12 @@ unsafe fn refresh(card: &Card) {
             let _: () = msg_send![config, setImage: picture];
             let _: () = msg_send![button, setConfiguration: config];
         };
-        // 选了 emoji 就显示它；没选时是文件夹（有颜色就染上）。
-        match &icon {
-            Some(em) => face(card.icon, Some(em), std::ptr::null_mut()),
-            None => face(card.icon, None, match color { Some(c) => tinted("folder.fill", c), None => image("folder") }),
-        }
+        // 和首页共用同一份 SVG，颜色只染描边，不切换为实心或彩色 emoji。
+        face(card.icon, None, super::glass::icon_image(super::folder_icons::name(icon.as_deref()), 20.));
+        let config: *mut AnyObject = msg_send![card.icon, configuration];
+        let ink = color.and_then(crate::theme::callout_border_swatch).unwrap_or_else(crate::theme::Theme::icon);
+        let _: () = msg_send![config, setBaseForegroundColor: super::glass::ui_color(ink)];
+        let _: () = msg_send![card.icon, setConfiguration: config];
         match color { Some(c) => face(card.color, None, tinted("circle.fill", c)), None => face(card.color, None, image("plus")) }
         let actions = || -> *mut AnyObject { msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array] };
         let pick = |title: &str, picture: *mut AnyObject, checked: bool, run: Box<dyn Fn()>| -> *mut AnyObject {
@@ -256,17 +257,18 @@ unsafe fn refresh(card: &Card) {
             action
         };
         let group = |options: usize, children: *mut AnyObject| -> *mut AnyObject { msg_send![AnyClass::get(c"UIMenu").unwrap(), menuWithTitle: ns_string(""), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), options: options, children: children] };
-        // 图标：emoji 排成几排（1 | 128 = 就地展开的一排「调色板」），最下面一项换回默认。
+        // 图标：统一的线性图标排成几排（1 | 128 = 就地展开的一排「调色板」），最下面一项换回默认。
         let root = actions();
-        for row in super::FOLDER_ICONS.chunks(6) {
+        for row in super::folder_icons::CHOICES.chunks(6) {
             let cells = actions();
-            for em in row {
-                let em = *em;
-                let _: () = msg_send![cells, addObject: pick(em, std::ptr::null_mut(), icon.as_deref() == Some(em), Box::new(move || PICKED.with(|p| p.borrow_mut().0 = Some(em.to_string()))))];
+            for choice in row {
+                let value = choice.value;
+                let picture = super::glass::icon_image(choice.glyph, 20.);
+                let _: () = msg_send![cells, addObject: pick(tr(choice.zh, choice.en), picture, icon.as_deref() == Some(value), Box::new(move || PICKED.with(|p| p.borrow_mut().0 = Some(value.to_string()))))];
             }
             let _: () = msg_send![root, addObject: group(1 | 128, cells)];
         }
-        let _: () = msg_send![root, addObject: pick(tr("使用默认图标", "Use the default icon"), image("folder"), icon.is_none(), Box::new(|| PICKED.with(|p| p.borrow_mut().0 = None)))];
+        let _: () = msg_send![root, addObject: pick(tr("使用默认图标", "Use the default icon"), super::glass::icon_image("folder", 20.), icon.is_none(), Box::new(|| PICKED.with(|p| p.borrow_mut().0 = None)))];
         let _: () = msg_send![card.icon, setMenu: group(0, root)];
         // 颜色：一排色点，下面一项去掉颜色。
         let (root, cells) = (actions(), actions());
