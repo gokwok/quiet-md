@@ -33,5 +33,6 @@
             </dict></array>
         </dict>
     </dict>
+    <key>LSSupportsOpeningDocumentsInPlace</key><true/>
 </dict>
 </plist>

@@ -31,6 +31,8 @@ pub struct Space {
 /// `space.json` inside a space's folder.
 #[derive(Serialize, Deserialize, Default, Clone)]
 struct SpaceFile {
+    #[serde(default)]
+    id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     /// File name of the icon image, next to `space.json`.
@@ -76,28 +78,58 @@ fn relative(home: &Path, root: &Path) -> String {
 }
 
 fn load_registry(home: &Path) -> Registry {
-    std::fs::read(home.join(REGISTRY)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    crate::file_io::read(home.join(REGISTRY)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 fn save_registry(home: &Path, r: &Registry) -> Result<()> {
-    std::fs::create_dir_all(home)?;
+    crate::file_io::create_dir_all(home)?;
     crate::store::write_file(&home.join(REGISTRY), &serde_json::to_vec_pretty(r)?)
 }
 
 fn load_file(root: &Path) -> SpaceFile {
-    std::fs::read(root.join(SPACE_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    crate::file_io::read(root.join(SPACE_FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 fn save_file(root: &Path, f: &SpaceFile) -> Result<()> {
     crate::store::write_file(&root.join(SPACE_FILE), &serde_json::to_vec_pretty(f)?)
 }
 
+/// Stable across devices and moves; malformed identities must never be replaced silently.
+pub fn ensure_id(root: &Path) -> Result<String> {
+    let path = root.join(SPACE_FILE);
+    let mut value: serde_json::Value = match crate::file_io::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(e) => return Err(e.into()),
+    };
+    let object = value.as_object_mut().context("空间信息不是 JSON 对象")?;
+    if let Some(id) = object.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "空间标识无效");
+        return Ok(id.to_string());
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    object.insert("id".into(), id.clone().into());
+    crate::store::write_file(&path, &serde_json::to_vec_pretty(&value)?)?;
+    Ok(id)
+}
+
 /// The registry, with a library already at the home adopted as the first
 /// space (an existing user's library: nothing in it is touched).
 fn registry(home: &Path) -> Registry {
     let mut r = load_registry(home);
+    let mut changed = false;
+    for e in &mut r.spaces {
+        let f = load_file(&resolve(home, &e.path));
+        if !f.id.is_empty() && f.id != e.id {
+            if r.current.as_ref() == Some(&e.id) { r.current = Some(f.id.clone()); }
+            e.id = f.id; changed = true;
+        }
+    }
+    if changed { let _ = save_registry(home, &r); }
     if !r.spaces.iter().any(|e| e.path.is_empty()) && is_library(home) {
-        r.spaces.insert(0, Entry { id: uuid::Uuid::new_v4().to_string(), path: String::new() });
+        let f = load_file(home);
+        let id = if f.id.is_empty() { uuid::Uuid::new_v4().to_string() } else { f.id };
+        r.spaces.insert(0, Entry { id, path: String::new() });
         if r.current.is_none() { r.current = Some(r.spaces[0].id.clone()); }
         let _ = save_registry(home, &r);
     }
@@ -169,18 +201,26 @@ pub fn create(name: &str, folder: Option<&Path>) -> Result<Space> { create_in(&h
 pub fn create_with(name: &str, folder: Option<&Path>, seed: &dyn Fn(&Path) -> Result<()>) -> Result<Space> { create_in(&home(), name, folder, seed) }
 
 pub fn create_in(home: &Path, name: &str, folder: Option<&Path>, seed: &dyn Fn(&Path) -> Result<()>) -> Result<Space> {
+    create_registered(home, name, folder, seed, &|_, _| Ok(()))
+}
+
+pub fn create_with_registration(name: &str, folder: Option<&Path>, seed: &dyn Fn(&Path) -> Result<()>, register: &dyn Fn(&str, &Path) -> Result<()>) -> Result<Space> {
+    create_registered(&home(), name, folder, seed, register)
+}
+
+fn create_registered(home: &Path, name: &str, folder: Option<&Path>, seed: &dyn Fn(&Path) -> Result<()>, register: &dyn Fn(&str, &Path) -> Result<()>) -> Result<Space> {
     let mut r = registry(home);
     let root = match folder {
         Some(f) => {
             let f = f.to_path_buf();
             anyhow::ensure!(!r.spaces.iter().any(|e| resolve(home, &e.path) == f), "这个文件夹已经是一个空间");
-            let empty = std::fs::read_dir(&f).map(|mut d| d.next().is_none()).unwrap_or(true);
+            let empty = crate::file_io::read_dir(&f).map(|mut d| d.next().is_none()).unwrap_or(true);
             anyhow::ensure!(empty || is_library(&f), "请选择一个空文件夹，或已有的 Quiet.md 文档库");
             f
         }
         None => new_root(home, name),
     };
-    std::fs::create_dir_all(&root).with_context(|| format!("无法创建 {}", root.display()))?;
+    crate::file_io::create_dir_all(&root).with_context(|| format!("无法创建 {}", root.display()))?;
     if !is_library(&root) { seed(&root)?; }
     // Opening writes `format.json` and `docs/`: from now on it is a library.
     Store::open_at(root.clone())?;
@@ -189,12 +229,22 @@ pub fn create_in(home: &Path, name: &str, folder: Option<&Path>, seed: &dyn Fn(&
     if !name.is_empty() { f.name = Some(name.to_string()); }
     if f.created == 0 { f.created = crate::time::now(); }
     save_file(&root, &f)?;
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = ensure_id(&root)?;
+    anyhow::ensure!(!r.spaces.iter().any(|e| e.id == id), "这个空间已经在列表中");
+    register(&id, &root)?;
     r.spaces.push(Entry { id: id.clone(), path: relative(home, &root) });
     r.current = Some(id.clone());
     save_registry(home, &r)?;
     let primary = r.spaces.len() == 1;
     Ok(space(home, r.spaces.last().unwrap(), primary))
+}
+
+/// A persisted security bookmark can resolve to a new path after reinstalling.
+pub fn relocate(id: &str, root: &Path) -> Result<()> {
+    let home = home(); let mut registry = load_registry(&home);
+    let entry = registry.spaces.iter_mut().find(|e| e.id == id).context("找不到这个空间")?;
+    entry.path = relative(&home, root);
+    save_registry(&home, &registry)
 }
 
 pub fn rename(id: &str, name: &str) -> Result<()> { rename_in(&home(), id, name) }
@@ -222,7 +272,7 @@ pub fn set_icon_in(home: &Path, id: &str, image: Option<(&[u8], &str)>) -> Resul
         f.icon = Some(name);
     }
     save_file(&s.root, &f)?;
-    if let Some(old) = old.filter(|o| o.starts_with(ICON_STEM) && !o.contains('/')) { let _ = std::fs::remove_file(s.root.join(old)); }
+    if let Some(old) = old.filter(|o| o.starts_with(ICON_STEM) && !o.contains('/')) { let _ = crate::file_io::remove_file(s.root.join(old)); }
     Ok(())
 }
 
@@ -266,7 +316,7 @@ mod tests {
         let all = list_in(&home);
         assert_eq!(all.len(), 1);
         assert!(all[0].primary && all[0].available && all[0].root == home && all[0].name.is_none());
-        assert!(!home.join(SPACE_FILE).exists());
+        assert!(home.join(SPACE_FILE).exists());
         assert_eq!(current_in(&home).unwrap().id, all[0].id);
         // Adopted once: the id stays.
         assert_eq!(list_in(&home)[0].id, all[0].id);

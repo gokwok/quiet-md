@@ -120,6 +120,18 @@ fn form_head(f: &space::SpaceForm, size: f32, cx: &mut Context<Workspace>) -> Di
         .children(f.error.clone().map(|e| div().w_full().text_size(px(13.)).text_color(Theme::danger()).child(e)))
 }
 
+fn location(f: &space::SpaceForm, cx: &mut Context<Workspace>) -> Div {
+    div().w_full().flex().flex_col().gap(px(6.))
+        .child(div().text_size(px(13.)).text_color(Theme::text_caption()).child(tr("位置", "Location")))
+        .child(div().id("space-choose-folder").w_full().py(px(12.)).px(px(14.)).rounded(px(12.)).bg(Theme::fill_hover()).flex().items_center().gap(px(8.))
+            .child(div().flex_1().text_size(px(15.)).child(f.folder.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).unwrap_or_else(|| tr("仅此设备", "On this device").into())))
+            .child(crate::ui::icon("folder", 18., Theme::icon()))
+            .on_click(cx.listener(|w, _, window, cx| { window.blur(cx); w.pick_form_folder(window, cx); })))
+        .child(div().text_size(px(12.)).line_height(px(17.)).text_color(Theme::text_caption()).child(tr("选择 iCloud Drive 文件夹即可在 Apple 设备间同步。", "Choose an iCloud Drive folder to sync between Apple devices.")))
+        .when(f.folder.is_some(), |d| d.child(div().id("space-use-local").py(px(6.)).text_size(px(13.)).text_color(Theme::primary()).child(tr("改为仅此设备", "Use this device instead"))
+            .on_click(cx.listener(|w, _, _, cx| if let Some(f) = w.form_mut() { f.folder = None; cx.notify(); }))))
+}
+
 /// 没有空间时的整页：创建第一个空间。空间放在应用自己的文件夹里（手机上不选位置）。
 pub fn setup(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let f = w.setup.as_ref().expect("setup form");
@@ -130,6 +142,7 @@ pub fn setup(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) ->
         .child(div().mt(px(8.)).text_size(px(15.)).line_height(px(22.)).text_color(Theme::text_caption())
             .child(tr("空间是一个独立的文档库。以后可以再建更多空间，在设置里切换。", "A space is a library of its own. You can add more later and switch in Settings.")))
         .child(div().mt(px(36.)).child(form_head(f, 88., cx)))
+        .child(div().mt(px(20.)).child(location(f, cx)))
         .child(div().flex_1())
         .child(div().id("space-setup-create").h(px(50.)).rounded(px(14.)).flex().items_center().justify_center().bg(Theme::primary())
             .active(|d| d.bg(theme::c(theme::craft::B700))).text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).text_color(gpui::white())
@@ -150,6 +163,7 @@ pub fn new_space(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElemen
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(tr("新建空间", "New space")))
         .child(form_head(f, 72., cx))
+        .child(location(f, cx))
         .child(div().flex().gap(px(12.))
             .child(button("space-new-cancel", tr("取消", "Cancel"), false).on_click(cx.listener(move |w, _, _, cx| close(w, cx))))
             .child(button("space-new-create", tr("创建", "Create"), true).on_click(|_, _, cx| cx.defer(space::create_from_form))));

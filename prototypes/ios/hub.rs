@@ -77,7 +77,8 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             Some(em) => div().text_size(px(18.)).child(em.clone()).into_any_element(),
             None => crate::ui::icon("doc", 20., Theme::icon()).into_any_element(),
         };
-        with_menu(w, row(SharedString::from(format!("hub-{key}-{}", e.id)), icon, display_title(&e.title), count), e, cx)
+        with_menu(w, row(SharedString::from(format!("hub-{key}-{}", e.id)), icon, display_title(&e.title), count)
+            .children(crate::space_sync::download_label(&e.download).map(|label| div().text_size(px(12.)).text_color(Theme::text_caption()).child(label))), e, cx)
             .on_click(cx.listener(move |w, _, window, cx| w.open(&id, window, cx))).into_any_element()
     };
     let folder_rows: Vec<AnyElement> = folders.iter().map(|e| { let n = w.entries.iter().filter(|c| c.meta.parent.as_deref() == Some(e.id.as_str())).count(); open(e, "folder", Some(n), cx) }).collect();

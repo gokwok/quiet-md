@@ -26,12 +26,14 @@ pub mod veil;
 pub mod stylepanel;
 
 pub fn run() {
+    crate::apple_files::install();
     crate::logging::init();
     // 测试传相对路径：放进沙盒的临时目录。真实文档库在应用的 Documents 里。
     if let Some(home) = std::env::var_os("QUIET_MD_HOME") && std::path::Path::new(&home).is_relative() {
         // SAFETY: 还没有别的线程。
         unsafe { std::env::set_var("QUIET_MD_HOME", std::env::temp_dir().join(home)); }
     }
+    files::restore_space_bookmarks();
     // 要打开的空间，或者「创建第一个空间」（`space::prepare`）。冒烟测试用一篇固定的样例笔记，不放「开始指南」。
     crate::space::prepare(sample_library());
     crate::logging::write(&format!("library {}", crate::store::Store::root_dir().display()));
@@ -57,6 +59,7 @@ pub fn run() {
             }
             Err(err) => crate::logging::fatal("无法打开文档库 / Could not open the library", &err),
         }
+        crate::space_sync::init(cx);
         // 系统随时可能结束后台应用：一进后台就把没写完的改动落盘。
         cx.on_app_lifecycle(|phase, cx| {
             if phase != AppLifecyclePhase::Background { return; }

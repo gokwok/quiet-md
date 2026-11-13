@@ -12,6 +12,8 @@ impl SharedStore {
     pub fn replace(&self, store: Store) { *self.0.borrow_mut() = store; }
     pub fn take_warnings(&self) -> Vec<String> { std::mem::take(&mut self.0.borrow_mut().warnings) }
     pub fn list(&mut self) -> Vec<Entry> { self.0.borrow_mut().list() }
+    pub fn externally_changed(&self, id: &str) -> Result<bool> { self.0.borrow().externally_changed(id) }
+    pub fn download_state(&self, id: &str) -> DownloadState { self.0.borrow().download_state(id) }
     pub fn load(&self, id: &str) -> Result<Document> { self.0.borrow_mut().load(id) }
     pub fn load_for_edit(&self, id: &str, shared: bool) -> Result<Document> { self.0.borrow().load_for_edit(id, shared) }
     pub fn forget_loaded(&self, id: &str) { self.0.borrow().forget_loaded(id); }
