@@ -91,7 +91,9 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         .child(div().flex_1())
         .child(div().relative().size(px(40.)).flex().items_center().justify_center().child(crate::ui::icon("ellipsis", 20., Theme::text_caption()))
             .child(super::menu::button("hub-folders-more", super::hub_menu_items())));
-    let content = div().w_full().flex().flex_col().pt(px(super::chrome_top() + TOP_GAP)).pb(px(super::dock_bottom()))
+    // 左上角是当前空间的头像（照 Craft），点了去设置。跟着内容滚走。
+    let content = div().relative().w_full().flex().flex_col().pt(px(super::chrome_top() + TOP_GAP)).pb(px(super::dock_bottom()))
+        .children(super::spaces::avatar(w, cx))
         .child(super::large_title(tr("主页", "Home")))
         .child(div().mb(px(16.)).child(super::lead_search(tr("搜索文档", "Search documents"), cx)))
         .child(favourites)

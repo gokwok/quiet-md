@@ -38,6 +38,7 @@ mod native_header;
 mod printing;
 mod search;
 mod sidebar;
+mod space;
 mod local_files;
 mod sidebar_drag;
 mod home_folder;
@@ -114,13 +115,11 @@ fn main() {
     // No single-instance guard: copies may share a library (builds tested
     // side by side). `Store` rereads an index another copy rewrote before
     // writing its own, and `guides` seeds a new library only once.
-    let root = store::Store::root_dir();
-    logging::write(&format!("library {}", root.display()));
     // A library that was here before this launch can show 更新日志.
-    let existed = guides::seeded(&root).unwrap_or(false);
-    if !scripted && let Err(err) = guides::initialize(&root) {
-        logging::fatal(&format!("无法初始化文档库 / Could not set up the library at {}", root.display()), &err);
-    }
+    let existed = fdl_core::spaces::current().is_some();
+    // The space to open, or the first-space setup (`space`).
+    space::prepare(scripted);
+    logging::write(&format!("library {}", store::Store::root_dir().display()));
     let app = Application::new().with_assets(assets::Assets);
     // Markdown files opened from the Finder or the command line are edited in place.
     let incoming = local_files::Incoming::from_args();

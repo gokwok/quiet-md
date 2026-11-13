@@ -4,10 +4,13 @@ use std::fs;
 
 include!(concat!(env!("OUT_DIR"), "/guides.rs"));
 
-/// Any entry but the lock file means an existing library, even if all
-/// documents were deleted; a pending directory is a first launch to finish.
+/// Any entry but the lock file and the app's own files (settings, the list
+/// of spaces: the home holds them before its first space) means an existing
+/// library, even if all documents were deleted; a pending directory is a
+/// first launch to finish.
 pub(crate) fn seeded(root: &Path) -> std::io::Result<bool> {
-    Ok(!root.join(".guides-pending").exists() && fs::read_dir(root)?.any(|e| e.map_or(true, |e| e.file_name() != ".lock")))
+    const APP: [&str; 7] = [".lock", "preferences.json", "spaces.json", "shortcuts.json", "emoji.json", "themes", "space.json"];
+    Ok(!root.join(".guides-pending").exists() && fs::read_dir(root)?.any(|e| e.map_or(true, |e| !APP.iter().any(|n| e.file_name() == *n))))
 }
 
 /// Mac-only passages of the guides and what Windows reads instead; key

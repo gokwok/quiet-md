@@ -437,13 +437,28 @@ pub fn read_bounded(path: &std::path::Path, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// The open space's folder, once one is chosen (`set_root`).
+static ROOT: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Make `root` the library `Store::root_dir` (images, assets, exports) refers to: the open space.
+pub fn set_root(root: PathBuf) { *ROOT.write().unwrap_or_else(|e| e.into_inner()) = Some(root); }
+
+/// `write_atomic` for the other on-disk files of the core (`spaces`).
+pub(crate) fn write_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> { write_atomic(path, bytes) }
+
 impl Store {
-    /// `QUIET_MD_HOME`, else a folder of
-    /// its own in the user's Documents, where they can see and back it up.
-    pub fn root_dir() -> PathBuf {
+    /// The app's home: `QUIET_MD_HOME`, else a folder of its own in the
+    /// user's Documents, where they can see and back it up. It holds the
+    /// app's own files and the list of spaces; the first space is the home itself.
+    pub fn home_dir() -> PathBuf {
         std::env::var_os("QUIET_MD_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| dirs::document_dir().or_else(|| dirs::home_dir().map(|h| h.join("Documents"))).unwrap_or_else(|| PathBuf::from(".")).join("Quiet.md"))
+    }
+
+    /// The open space's library (the home until a space is chosen).
+    pub fn root_dir() -> PathBuf {
+        ROOT.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(Self::home_dir)
     }
 
     /// Where pasted / inserted images are copied to.

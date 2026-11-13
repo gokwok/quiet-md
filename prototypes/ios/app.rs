@@ -18,6 +18,7 @@ pub mod masonry;
 pub mod menu;
 pub mod panel;
 pub mod shot;
+pub mod spaces;
 pub mod style;
 pub mod search;
 pub mod toast;
@@ -31,12 +32,9 @@ pub fn run() {
         // SAFETY: 还没有别的线程。
         unsafe { std::env::set_var("QUIET_MD_HOME", std::env::temp_dir().join(home)); }
     }
-    let root = crate::store::Store::root_dir();
-    crate::logging::write(&format!("library {}", root.display()));
-    // 冒烟测试用一篇固定的样例笔记，不放「开始指南」。
-    if !sample_library() && let Err(err) = crate::guides::initialize(&root) {
-        crate::logging::fatal(&format!("无法初始化文档库 / Could not set up the library at {}", root.display()), &err);
-    }
+    // 要打开的空间，或者「创建第一个空间」（`space::prepare`）。冒烟测试用一篇固定的样例笔记，不放「开始指南」。
+    crate::space::prepare(sample_library());
+    crate::logging::write(&format!("library {}", crate::store::Store::root_dir().display()));
     gpui_platform::application().with_assets(crate::assets::Assets).run(|cx| {
         crate::editor::math::load_fonts(cx);
         crate::editor::image::init_pictures(cx);

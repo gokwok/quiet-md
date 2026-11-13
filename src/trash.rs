@@ -323,6 +323,23 @@ impl Workspace {
                 false,
             ),
             Confirm::Refs { show: true, .. } => (crate::settings::text("是否显示引用列表？").to_string(), crate::settings::text("选择显示后，协作者可再次查看本文的引用列表。").to_string(), crate::settings::text("显示"), false),
+            Confirm::RemoveSpace { id, name } => {
+                use crate::space::{Deletion, DELETION};
+                let available = self.spaces.iter().any(|s| &s.id == id && s.available);
+                if available && DELETION == Deletion::Trash {
+                    (crate::localized_format!("删除空间「{}」？", "Delete the space “{}”?", name),
+                     crate::settings::tr("这个空间的文件夹会移到废纸篓，可以从废纸篓里找回。", "Its folder moves to the Trash, where you can still get it back.").to_string(),
+                     crate::settings::tr("删除", "Delete"), true)
+                } else if available && DELETION == Deletion::Permanent {
+                    (crate::localized_format!("删除空间「{}」？", "Delete the space “{}”?", name),
+                     crate::settings::tr("这个空间和里面的所有文档都会被删除，无法恢复。", "The space and every document in it will be deleted. This cannot be undone.").to_string(),
+                     crate::settings::tr("删除", "Delete"), true)
+                } else {
+                    (crate::localized_format!("从列表中移除「{}」？", "Remove “{}” from the list?", name),
+                     crate::settings::tr("只从这台设备的空间列表里移除，文件夹留在原处。", "It is only taken off this device's list; the folder stays where it is.").to_string(),
+                     crate::settings::tr("移除", "Remove"), true)
+                }
+            }
             Confirm::SaveFailed => (
                 crate::settings::text("文档保存失败").to_string(),
                 crate::localized_format!("{}。可以重试或另存副本；重新载入将放弃未保存的修改并载入磁盘内容。", "{}. Retry or save a copy. Reload discards unsaved changes and loads the document from disk.", self.save_error()),
@@ -402,6 +419,7 @@ impl Workspace {
                                 w.set_refs_hidden(!show, cx);
                             }
                             Confirm::SaveFailed => w.resolve_save_failed(true, window, cx),
+                            Confirm::RemoveSpace { id, .. } => w.remove_space(&id, cx),
                         }
                         cx.notify();
                     }))),

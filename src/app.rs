@@ -201,6 +201,8 @@ pub enum Confirm {
     /// The open document could not be written before it was to be replaced
     /// (another document, 新建, 退出): 重试 / 放弃修改, then carry on.
     SaveFailed,
+    /// 设置 › 空间 › 删除 / 移除 a space that is not open.
+    RemoveSpace { id: String, name: String },
 }
 
 /// What to do once the open document is safely on disk (or its changes given up).
@@ -281,6 +283,16 @@ pub struct Workspace {
     /// Expanded pages of the 我的文档 tree.
     pub expanded: HashSet<String>,
     pub move_dlg: Option<crate::tree::MoveDialog>,
+    /// The spaces this device knows (`fdl_core::spaces`), reread after changes.
+    pub spaces: Vec<fdl_core::spaces::Space>,
+    /// No space yet: the window is the first-space setup page.
+    pub setup: Option<crate::space::SpaceForm>,
+    /// 新建空间… open.
+    pub space_form: Option<crate::space::SpaceForm>,
+    /// The switcher's menu (top of the sidebar) is open.
+    pub space_menu: bool,
+    /// 设置 › 空间's name field.
+    pub space_name: Entity<TextField>,
     /// 导出 Markdown 设置.
     pub export_md: Option<crate::transfer::ExportMd>,
     /// 编辑 / 阅读 dropdown, and the mode button's last-frame bounds.
@@ -338,12 +350,23 @@ impl Workspace {
             f.placeholder_color = Theme::text_disabled();
             f
         });
+        let spaces = fdl_core::spaces::list();
+        let setup = crate::space::setup_due().then(|| crate::space::SpaceForm::new(cx));
+        let space_name = cx.new(|cx| {
+            let mut f = TextField::new(crate::space::default_name(), cx);
+            f.placeholder_color = Theme::text_disabled();
+            f.max_len = Some(60);
+            let root = crate::store::Store::root_dir();
+            if let Some(s) = spaces.iter().find(|s| s.root == root) { f.set_text(&crate::space::name(s), cx); }
+            f
+        });
         let settings_filter = cx.new(|cx| {
             let mut f = TextField::new(crate::settings::tr("搜索快捷键", "Search shortcuts"), cx);
             f.placeholder_color = Theme::text_disabled();
             f
         });
         let subs = vec![
+            cx.subscribe(&space_name, |w, _, ev: &TextFieldEvent, cx| if matches!(ev, TextFieldEvent::Changed) { w.space_name_changed(cx); }),
             cx.subscribe(&settings_filter, |_, _, ev: &TextFieldEvent, cx| if matches!(ev, TextFieldEvent::Changed) { cx.notify(); }),
             cx.observe_window_bounds(window, |this, window, cx| crate::quick_note::remember(window, this.quick_note, cx)),
             // The system switched between light and dark (or the app's own look changed).
@@ -454,6 +477,11 @@ impl Workspace {
             folded: [false; 3],
             expanded: HashSet::new(),
             move_dlg: None,
+            spaces,
+            setup,
+            space_form: None,
+            space_menu: false,
+            space_name,
             export_md: None,
             focus: cx.focus_handle(),
             save_task: None,
@@ -1316,6 +1344,7 @@ pub(crate) const HEADER_ACTIONS_H: f32 = 32.;
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.setup.is_some() { return self.render_setup(window, cx); }
         // Clicks no longer take focus from the editor (see the root's mouse
         // down), so leaving the document hands it back to the window's keys.
         if self.view != View::Doc && self.editor.as_ref().is_some_and(|e| e.read(cx).focus.is_focused(window)) { window.focus(&self.focus); }
@@ -1369,6 +1398,8 @@ impl Render for Workspace {
             View::Settings => self.render_settings(cx),
         };
         let move_dlg = self.render_move_dialog(cx);
+        let space_dialog = self.render_space_dialog(cx);
+        let space_menu = self.render_space_menu(cx);
         let export_md = self.render_export_md(cx);
         // Only the note stands out: a white plane flush with the window's top,
         // right and bottom edges. The sidebar sits sunken on the window
@@ -1503,6 +1534,8 @@ impl Render for Workspace {
             .children(theme_menu)
             .children(confirm)
             .children(move_dlg)
+            .children(space_menu)
+            .children(space_dialog)
             .children(export_md)
             .children(search)
             .children(resize_overlay)
@@ -1514,6 +1547,7 @@ impl Render for Workspace {
             .children(create_menu)
             .children(import_menu)
             .children(toast)
+            .into_any_element()
     }
 }
 

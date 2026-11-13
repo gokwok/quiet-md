@@ -8,6 +8,7 @@ iOS 自己的代码在本目录，补丁里只留挂接点：
 |---|---|
 | `app.rs` | 入口（`crate::ios`）；手机版式的判断、安全区、抽屉、长按当右键、左缘返回 |
 | `hub.rs` | 手机上的首页：搜索、收藏、所有文档、文件夹、最近打开 |
+| `spaces.rs` | 空间（照 Craft）：首页左上的空间头像、设置顶上的「空间名 ⌄」和底部的换空间卡片、空间设置页、新建空间面板、「创建你的第一个空间」整页 |
 | `files.rs` | 系统的文件选择器（`UIDocumentPickerViewController`）：选文件、选文件夹、把写好的文件存出去；选图片时先问「照片图库 / 文件」，照片图库是 `PHPickerViewController` |
 | `alert.rs` | 确认框：系统的 `UIAlertController`，去掉它自带的压暗 |
 | `folder_icons.rs` | 文件夹线性图标选项与旧标识的显示兼容，新建和更改图标共用 |

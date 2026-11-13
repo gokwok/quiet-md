@@ -69,7 +69,7 @@ impl Preferences {
     }
 }
 
-fn path() -> std::path::PathBuf { crate::store::Store::root_dir().join("preferences.json") }
+fn path() -> std::path::PathBuf { crate::store::Store::home_dir().join("preferences.json") }
 
 pub fn load() {
     let p = std::fs::read(path()).ok().and_then(|b| serde_json::from_slice::<Preferences>(&b).ok()).unwrap_or_default();
@@ -124,7 +124,7 @@ pub fn prefs() -> Preferences {
 
 pub(crate) fn save(p: &Preferences) -> anyhow::Result<()> {
     use std::io::Write;
-    let root = crate::store::Store::root_dir();
+    let root = crate::store::Store::home_dir();
     std::fs::create_dir_all(&root)?;
     let tmp = root.join("preferences.json.tmp");
     let mut f = std::fs::File::create(&tmp)?;
@@ -193,7 +193,7 @@ impl Page {
             Page::General => tr("通用", "General"),
             Page::Appearance => tr("外观", "Appearance"),
             Page::Shortcuts => tr("快捷键", "Shortcuts"),
-            Page::Library => tr("文档库", "Documents"),
+            Page::Library => tr("空间", "Space"),
             Page::About => tr("关于", "About"),
         }
     }
@@ -231,7 +231,7 @@ pub(crate) fn caption(t: &'static str) -> Div {
 }
 
 /// One setting: title and an optional description on the left, the control on the right.
-fn row(title: impl Into<SharedString>, desc: Option<SharedString>, control: impl IntoElement) -> Div {
+pub(crate) fn row(title: impl Into<SharedString>, desc: Option<SharedString>, control: impl IntoElement) -> Div {
     div().w_full().min_h(px(48.)).px(px(16.)).py(px(10.)).flex().items_center().justify_between().gap(px(24.))
         .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
             .child(div().text_size(px(13.)).line_height(px(20.)).text_color(Theme::text()).child(title.into()))
@@ -596,7 +596,7 @@ impl Workspace {
             Page::General => self.general_page(cx),
             Page::Appearance => self.appearance_page(cx),
             Page::Shortcuts => self.shortcut_settings(cx),
-            Page::Library => self.library_page(cx),
+            Page::Library => self.space_page(cx),
             Page::About => self.about_page(cx),
         };
         div().flex_1().min_w_0().h_full().flex().flex_col().bg(Theme::bg_body()).text_color(Theme::text()).font_family(theme::UI_FONT)
@@ -639,7 +639,7 @@ impl Workspace {
         let errors = themes::errors();
         let where_: SharedString = match &sel_path {
             // Inside the library: the short path (the full one wraps on narrow windows).
-            Some(p) => p.strip_prefix(crate::store::Store::root_dir()).unwrap_or(p).display().to_string().into(),
+            Some(p) => p.strip_prefix(crate::store::Store::home_dir()).unwrap_or(p).display().to_string().into(),
             None => tr("内置主题", "Built in").into(),
         };
         let (edit_id, dup_id, rm_id, open_id) = (sel_id.clone(), sel_id.clone(), sel_id.clone(), sel_id);
@@ -681,24 +681,6 @@ impl Workspace {
                 ]))
                 .children(errors.into_iter().chain(warnings.into_iter().take(8).map(|w| format!("{}：{w}", tr("未生效", "Ignored")))).map(|e| div().px(px(4.)).text_size(px(12.)).line_height(px(18.)).text_color(Theme::danger()).child(e)))
                 )
-            .into_any_element()
-    }
-
-    fn library_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let root = crate::store::Store::root_dir();
-        let location = if cfg!(target_os = "windows") { root.display().to_string() } else {
-            dirs::home_dir().and_then(|h| root.strip_prefix(h).ok().map(|r| format!("~/{}", r.display()))).unwrap_or_else(|| root.display().to_string())
-        };
-        let reveal = if cfg!(target_os = "macos") { tr("在访达中显示", "Show in Finder") } else if cfg!(target_os = "windows") {
-            tr("在文件资源管理器中显示", "Show in File Explorer")
-        } else { tr("在文件管理器中显示", "Show in File Manager") };
-        div().w_full().flex().flex_col().gap(px(8.))
-            .child(group(None, vec![
-                row(tr("文档库文件夹", "Documents folder"), Some(location.into()),
-                    button("reveal-library", reveal).on_click(|_, _, cx| cx.reveal_path(&crate::store::Store::root_dir()))).into_any_element(),
-                row(tr("回收站", "Trash"), Some(if english() { format!("Deleted documents are kept for {} days.", crate::store::TRASH_DAYS) } else { format!("删除的文档保留 {} 天后自动清除。", crate::store::TRASH_DAYS) }.into()),
-                    button("open-trash", tr("打开", "Open")).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Trash, cx)))).into_any_element(),
-            ]))
             .into_any_element()
     }
 

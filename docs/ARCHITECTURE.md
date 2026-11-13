@@ -13,6 +13,7 @@ Quiet.md 是一个单进程 GPUI 应用（Rust，约 4 万行）。一篇文档�
 main.rs ─ 窗口
   └─ app.rs  Workspace（窗口根视图）
        ├─ store.rs        文档库：docs/*.xml + index.json（见 FORMAT.md）           [core]
+       ├─ spaces.rs       空间：每个空间一个文档库文件夹，本机的空间列表            [core]
        ├─ sidebar / home / search / trash / tree / docmenu / docinfo / modes
        └─ editor::Editor（view.rs）   打开的那篇文档
             └─ editor::Core（core.rs） 文档 + 选区 + 撤销栈                        [core]
@@ -94,7 +95,8 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 |---|---|
 | `model.rs` | 文档模型，包括行内对象类型、`display_title` |
 | `docxml.rs` | DocxXML 解析与序列化；`to_inline` 构造行内对象 |
-| `store.rs` | 文档库读写、索引恢复、回收站、设置；`image_path` |
+| `store.rs` | 文档库读写、索引恢复、回收站、设置；`image_path`；`home_dir`（应用的家：设置、主题、空间列表）和 `root_dir`（打开着的空间） |
+| `spaces.rs` | 空间：`space.json`（名字、图标）在空间文件夹里，`spaces.json`（这台设备知道哪些空间、打开的是哪个）在 `home_dir`；第一个空间就是 `home_dir` 本身，之后新建的放在 `home_dir/spaces/<名字>/`，也可以是选的文件夹 |
 | `paste.rs` | HTML / Markdown → block（粘贴和导入共用） |
 | `markdown.rs` | 导出 Markdown |
 | `lang.rs` | 代码语言表 |
@@ -109,7 +111,8 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 | 模块 | 内容 |
 |---|---|
 | `main.rs` | 入口；`FDL_SCRIPT` 脚本模式（仅 `devtools` 特性）；重新导出 `fdl_core` 的模块 |
-| `guides.rs` | 文档库是空的时放入内置的「开始指南」（只放一次） |
+| `guides.rs` | 文档库是空的时放入内置的「开始指南」（只放一次）；有了空间以后，只放进第一个空间 |
+| `space.rs` | 启动时选要打开的空间，没有就整页「创建你的第一个空间」；侧栏顶上的空间切换（两个以上才出现）、新建空间、设置 › 空间；切换时先保存所有窗口，再换文档库、重建窗口 |
 | `app.rs` | `Workspace`：两栏窗口、打开 / 新建 / 保存 / 删除、保存状态、提醒调度 |
 | `html.rs` / `printing.rs` / `transfer.rs` | 导出 HTML / PDF、打印、导入导出的界面 |
 | `clipboard.rs` | 系统剪贴板的 HTML 读取，以及脚本模式的模拟剪贴板 |
