@@ -5,56 +5,70 @@
 默认位置：`~/Documents/Quiet.md`（「文稿」里的独立文件夹，用户能直接看到和备份）。可以用环境变量 `QUIET_MD_HOME` 指定别处。
 
 ```
-Quiet.md/
-├── format.json          {"format": 2}：目录布局版本（store::FORMAT）
-├── index.json           文档 id → Meta
-├── index.json.bak       上一版 index.json
+<空间>/
+├── space.json           {id, name, icon, created}；id 是持久 UUID，跟随空间移动
+├── format.json          {"format": 4}：目录布局版本（store::FORMAT）
 ├── settings.json        窗口级 UI 设置（侧栏宽度等）
-├── .lock                写锁（flock）：改写索引时短暂独占，不是单实例标记
-├── docs/<id>.xml        每篇文档一份 DocxXML
-├── assets/              粘贴或插入的图片、附件；assets/thumbs 是文件预览缩略图
+├── docs/<uuid>.json     一篇文档或一个文件夹的 Meta，以及 preview 列表缓存
+├── docs/<uuid>.xml      DocxXML 正文；Markdown 文档用同名 .md
+├── assets/              图片、附件；新插入资源写相对路径 assets/…
+├── backdrops/           这个空间的背景
 └── trash/
-    ├── index.json       id → Trashed { meta, deleted, root }
-    └── <id>.xml
+    ├── <uuid>.json      {meta, deleted, root, preview}
+    └── <uuid>.xml       或 .md；文件夹只有 JSON
 ```
 
-### Meta 字段
+本机应用数据目录（macOS 为 `~/Library/Application Support/quiet-md`）的 `spaces/<空间 id>/` 保存 `documents.json` 和 `.lock`。`documents.json` 保存 `opened`、`catalogue_closed`、`reading`；外部本机文件的整条记录（包括绝对路径 `path`）也只在这里。删除进回收站后保留本机阅读状态，恢复时复用。测试可用 `QUIET_MD_LOCAL_DATA` 指定临时应用数据目录，不能指向同步空间内部。
+
+应用的家仍由 `Store::home_dir()` 决定，保存本机 `spaces.json`、偏好、快捷键、主题和表情记录；文档资源由当前 `Store::root_dir()` 决定。
+
+### Meta 与列表缓存
 
 | 字段 | 含义 | 省略时 |
 |---|---|---|
-| `created` / `modified` / `opened` | unix 秒 | 必填；`opened` 默认 0 |
+| `created` / `modified` | unix 秒 | 必填 |
 | `pinned` | 置顶 | false |
 | `starred` | 收藏时间，0 表示未收藏 | 0 |
-| `folder` | 文件夹名称；文件夹只存索引，不对应 XML | 普通文档 |
+| `folder` | 文件夹名称；文件夹只有 JSON，不对应正文 | 普通文档 |
 | `parent` | 父文件夹 id | 顶层 |
-| `order` | 文件夹内的同级顺序 | 0，未手动排序 |
-| `root_order` | 顶层同级顺序 | 未手动排序 |
-| `width` | 页宽：`standard`（820）/ `wide`（1020）/ `full` | standard |
-| `catalogue_closed` | 目录已收起 | false |
-| `reading` | 阅读模式 | false |
+| `order` / `root_order` | 文件夹内 / 顶层顺序 | 未手动排序 |
+| `width` | `standard` / `wide` / `full` | standard |
 | `info` | 文档信息行：`{hidden, created, modified}` | 只显示修改时间 |
 | `refs_hidden` | 隐藏引用列表 | false |
+| `markdown` / `name` | Markdown 正文及其标题 | XML 文档 |
+| `field_modified` | 每个同步字段的独立修改时间（毫秒）；字段恢复默认值后仍保留时间 | 老记录按 `modified` 回退 |
+| `conflict_source` | 冲突副本的稳定来源标识，用于中断重试去重 | 普通文档 |
+| `preview` | 标题、图标、纯文本（列表摘要与搜索）、提醒和文档链接 | 空缓存 |
 
-新字段一律带 `#[serde(default)]`，值为默认时不写出。这样旧版程序读新库会忽略它不认识的字段，新版程序读旧库会用默认值。
+Meta 的新字段一律带 `#[serde(default)]`。只更新变动的文档 JSON，不因打开一篇文档而重写同步元数据；对同一记录的修改保留未改字段和未知字段。`list()` 读 JSON，不为库内文档读取正文。正文变更事件通过 `refresh_external` 刷新缓存，不改变打开编辑器时的冲突检测基线。
 
-### 文件夹迁移与排序
+只识别小写、连字符形式的纯 UUID 文件名。`<uuid> 2.xml` 等不会直接成为列表条目，留给冲突处理；原文件不会被删除。正文暂时不存在时仍可显示缓存，打开失败不会将其替换为空文档。
 
-FORMAT 2 把旧的父文档结构转换为同名文件夹，原父文档保留为文件夹内第一篇文档，其余子项保持旧顺序。迁移前保留 `index.before-folders.json`。文件夹的删除与恢复使用回收站索引，不创建虚假的 XML 文件。
+### FORMAT 4 迁移与恢复
 
-侧栏和主页手动排序共用 `Meta::place()`：未手动定位的条目按修改时间倒序在前，已定位的条目按顺序号排列，最后用 id 打破并列。首次初始化手动排序会固定现有顺序。
+所有空间统一升级；旧版通过 `format.json` 拒绝打开。迁移在本机锁和旧版写锁内进行，先写独立元数据和本机状态，保留旧索引字节，最后写 FORMAT 4 标记。标记发布前失败可重试，旧索引保持可用；不改正文、附件字节。FORMAT 1 的父文档先按原有逻辑转成文件夹。
 
-新版可迁移旧库，不保证旧程序能安全写入新库。早期版本只对高版本标记给出警告，升级后的库不应交给这些旧版本写入。FORMAT 3 的直接 Markdown 文件支持不属于本分支。
+旧 `index.json` 备份在本机 `spaces/<id>/migration-format4/docs/index.before-format4.json`，回收站索引在同目录的 `trash/` 下；重复迁移遇到不同内容会额外保留一份，绝不覆盖旧备份。备份放在本机目录，避免把其中的绝对路径和阅读状态重新同步出去。
 
-### 可靠性约定
+打开时把根目录、`docs/`、`trash/` 中遗留的 `*.tmp`、`*.corrupt-*` 和旧索引、备份、锁文件移出同步目录，保存在本机 `recovered-files/`，不直接丢弃潜在的恢复内容。FORMAT 4 元数据损坏时拒绝写入，不用默认值覆盖坏文件。
 
-- **原子写入。** 所有文件先写到 `<name>.tmp`，再 `rename` 覆盖原文件。崩溃时，磁盘上要么是旧内容，要么是新内容。
-- **索引损坏后恢复。** 每次保存 `index.json` 前，先把旧文件复制成 `.bak`。读取时如果解析失败：
-  - 坏文件改名为 `<name>.corrupt-<秒>` 保留，不会被覆盖；
-  - 改用 `.bak`，并提示用户一次；
-  - 没有可用的 `.bak` 时，用空索引。文档本身还在 `docs/` 里，只是置顶、层级这些信息会丢。
-- **版本标记。** 打开库时，如果 `format.json` 里的版本比本程序新，会拒绝打开并提示升级；每次写入获取锁后也会重新检查版本。改目录布局、会让旧版本误读的时候，要把 `FORMAT` 加一。
-- **手放的文件也会出现。** 直接放进 `docs/` 的 `.xml` 文件（比如从飞书导出的 DocxXML）会出现在列表里。
-- **保存失败不静默。**
+Apple 平台的读取、写入、移动、复制和删除经过 `NSFileCoordinator`；保存正文时基线检查和写入共享一次访问授权。其他平台仍使用 `std::fs`。
+
+每个文件使用同目录唯一临时文件、`sync_all`、原子重命名；Unix 上再同步父目录。多文件操作先写目标元数据和内容，再清理来源；它不是跨文件的原子事务，中断时可能保留重复或待恢复条目，但不能删掉两边的正文。
+
+### 冲突副本与版本清理
+
+正文冲突保留当前文件；每个未解决版本创建独立 UUID 的「（冲突副本）」，继承原文档所在文件夹。XML 仅插入标题后缀，正文原始字节不变；Markdown 正文和 front matter 不改写。`<uuid> 2.xml/.md` 按同样方式处理，成功保存后才删除这个冲突文件。稳定来源标识和派生 UUID 让重试复用同一副本，已在回收站的副本也不重复创建。
+
+元数据按 `field_modified` 逐字段取后改值；删除默认字段也留下时间。时间相同用规范 JSON 值确定结果，两个方向合并可收敛。排序值现在是顺序号（拖动时重排为 1、2、3），不能充当修改时间。JSON 写出时递归排序键，避免依赖的 `preserve_order` 特性影响合并结果。
+
+所有副本 / 元数据合并落盘后，才把对应 `NSFileVersion` 标为已解决，再调用 `removeOtherVersionsOfItem` 清理版本。清理失败时保留副本并提示，后续从系统的版本状态中发现已解决冲突再清理；不维护额外的持久同步队列或重试日志。新到达但尚未保留的版本不会被顺带清掉。尚未做块级合并。
+
+### 文件夹与排序
+
+FORMAT 2 将旧父文档结构转换为同名文件夹，原父文档保留为文件夹内第一篇文档，其余子项保持旧顺序。旧迁移备份在升级 FORMAT 4 时移入本机 `recovered-files/`。
+
+侧栏和主页手动排序共用 `Meta::place()`：未手动定位的条目按修改时间倒序在前，已定位的条目按顺序号排列，最后用 id 打破并列。首次初始化手动排序固定现有顺序。
 
 ## DocxXML
 
