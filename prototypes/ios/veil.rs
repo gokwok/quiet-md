@@ -12,16 +12,30 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 struct Veil { view: *mut AnyObject, glass: *mut AnyObject, frost: *mut AnyObject, smoke: *mut AnyObject, rim: *mut AnyObject, title: *mut AnyObject, sub: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, home: bool, centered: bool, text: (String, String), shown: bool }
 thread_local! { static VEIL: RefCell<Option<Veil>> = const { RefCell::new(None) }; }
-thread_local! { static SEEN: Cell<(bool, bool)> = const { Cell::new((false, false)) }; }
+/// 首页左上角的空间头像（系统视图：外框、图片、上次的样子）。
+/// `blur`：同一个头像的高斯模糊版（比头像四周各大 `BLUR_PAD`），过渡完露面时先是它、再化成清楚的（`reveal`）。
+struct Avatar { view: *mut AnyObject, img: *mut AnyObject, key: String, blur: *mut AnyObject }
+const BLUR_PAD: f64 = 10.;
+thread_local! { static AVATAR: RefCell<Option<Avatar>> = const { RefCell::new(None) }; }
+// 系统头像已经连着显示了几帧（藏起时归零）。
+thread_local! { static AVATAR_FRAMES: Cell<u32> = const { Cell::new(0) }; }
+/// 系统头像已经稳稳在屏幕上了，GPUI 那份可以不画。刚露面的头几帧两份都画：真机上 GPUI 的一帧和原生视图的改动
+/// 不一定同一下上屏，交接的那一帧两边都没有，头像就闪一下（换页滑完、玻璃回来的时候）。
+pub fn avatar_settled() -> bool { on() && AVATAR_FRAMES.with(|f| f.get()) >= 3 }
+// 这一帧有人要：带子、标题、首页的空间头像。
+thread_local! { static SEEN: Cell<(bool, bool, bool)> = const { Cell::new((false, false, false)) }; }
 // 这一帧允许显示带子。首页在绘制时读滚动位置，文档由正文的位置决定。
 thread_local! { static ON: Cell<bool> = const { Cell::new(false) }; }
 
 pub fn on() -> bool { ON.with(|o| o.get()) }
+/// 正显示着的那条带子（连同上面的小字标题）：换页拍快照时把它也拍进去（`shot::capture_page`），
+/// 不然它在原处一收，快照顶上就露出没有玻璃的正文。
+pub fn band() -> Option<*mut AnyObject> { VEIL.with(|v| v.borrow().as_ref().filter(|v| v.shown).map(|v| v.view)) }
 
 /// 每帧开头调用。`on`：这一帧要这条带子。带子或标题这一帧没人要，就各自收起。
 pub fn begin(on: bool, window: &Window) {
     ON.with(|o| o.set(on));
-    SEEN.with(|s| s.set((false, false)));
+    SEEN.with(|s| s.set((false, false, false)));
     if !on { VEIL.with(|v| if let Some(veil) = v.borrow_mut().as_mut() { unsafe {
         let layer: *mut AnyObject = msg_send![veil.view, layer];
         let _: () = msg_send![layer, removeAllAnimations];
@@ -29,7 +43,8 @@ pub fn begin(on: bool, window: &Window) {
         veil.shown = false;
     } }); }
     window.on_next_frame(|_, _| {
-        let (band, title) = SEEN.with(|s| s.get());
+        let (band, title, avatar) = SEEN.with(|s| s.get());
+        if !avatar { AVATAR_FRAMES.with(|f| f.set(0)); AVATAR.with(|a| if let Some(a) = a.borrow().as_ref() { unsafe { let _: () = msg_send![a.view, setHidden: true]; } }); }
         VEIL.with(|v| if let Some(veil) = v.borrow_mut().as_mut() { unsafe {
             if !band && veil.shown { veil.shown = false; fade(veil.view, 0.); }
             if !title && !veil.text.0.is_empty() { veil.text = Default::default(); fade(veil.title, 0.); fade(veil.sub, 0.); }
@@ -56,11 +71,14 @@ pub fn title(title: SharedString, folder: Option<SharedString>, ink: Hsla, sub: 
 }
 
 /// 首页的滚动标题。绘制时读取偏移，惯性滚动和玻璃的位置在同一帧更新。
-pub fn home_header(scroll: &ScrollHandle, title: SharedString) -> impl IntoElement {
+/// `avatar`：左上角空间头像的位置和样子（图片，没有图片时的底色）。有带子的时候（`on`）头像一直是浮层里的一个系统视图，
+/// 滚没滚都是它，GPUI 那边不画（`hub.rs`）：带子浮起来会把 GPUI 画的糊掉，而在两者之间来回换会闪。照 Craft：滚动后头像仍留在顶栏。
+pub fn home_header(scroll: &ScrollHandle, title: SharedString, avatar: Option<(Bounds<Pixels>, Option<std::path::PathBuf>, Hsla)>) -> impl IntoElement {
     let scroll = scroll.clone();
     canvas(move |bounds, window, _| {
         if !on() { return; }
         let offset = -scroll.offset().y;
+        if let Some((frame, image, color)) = &avatar { write_avatar(*frame, image.as_deref(), *color, window); }
         // 大标题在行内居中：以字号框的下沿完全进入玻璃为界，不等行高和整行底部的留白也滚进去。
         let title_end = px(super::hub::TOP_GAP + (super::LARGE_TITLE_H + super::LARGE_TITLE_SIZE) / 2.);
         VEIL.with(|v| if let Some(veil) = v.borrow_mut().as_mut() { unsafe {
@@ -81,7 +99,7 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
     let parent = super::shot::overlay(handle.ui_view.as_ptr() as *mut AnyObject);
-    SEEN.with(|s| s.set((true, s.get().1)));
+    SEEN.with(|s| { let (_, t, a) = s.get(); s.set((true, t, a)) });
     VEIL.with(|v| unsafe {
         let mut slot = v.borrow_mut();
         if slot.is_none() {
@@ -167,8 +185,156 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
     });
 }
 
+/// 空间头像：和 `space::icon_el` 同样的圆角方块，有图片铺图片，没有就是底色。放在浮层里、带子的上面，不跟着带子淡入淡出。
+fn write_avatar(frame: Bounds<Pixels>, image: Option<&std::path::Path>, color: Hsla, window: &Window) {
+    SEEN.with(|s| { let (b, t, _) = s.get(); s.set((b, t, true)) });
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
+    let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
+    let parent = super::shot::overlay(handle.ui_view.as_ptr() as *mut AnyObject);
+    AVATAR.with(|slot| unsafe {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            let view: *mut AnyObject = msg_send![AnyClass::get(c"UIView").unwrap(), new];
+            let _: () = msg_send![view, setClipsToBounds: true];
+            let _: () = msg_send![view, setUserInteractionEnabled: false];
+            let img: *mut AnyObject = msg_send![AnyClass::get(c"UIImageView").unwrap(), new];
+            // 2 = UIViewContentModeScaleAspectFill，同 `ObjectFit::Cover`。
+            let _: () = msg_send![img, setContentMode: 2isize];
+            let _: () = msg_send![view, addSubview: img];
+            let _: () = msg_send![parent, addSubview: view];
+            let blur: *mut AnyObject = msg_send![AnyClass::get(c"UIImageView").unwrap(), new];
+            let _: () = msg_send![blur, setUserInteractionEnabled: false];
+            let _: () = msg_send![blur, setAlpha: 0f64];
+            let _: () = msg_send![parent, addSubview: blur];
+            *slot = Some(Avatar { view, img, key: String::new(), blur });
+        }
+        let a = slot.as_mut().unwrap();
+        // 带子后建时会插到最底下，头像总在它上面；这里只保证还在浮层里。
+        let sup: *mut AnyObject = msg_send![a.view, superview];
+        if sup != parent { let _: () = msg_send![parent, addSubview: a.view]; let _: () = msg_send![parent, addSubview: a.blur]; }
+        let size = f64::from(frame.size.width);
+        let _: () = msg_send![a.view, setFrame: CGRect::new(CGPoint::new(f64::from(frame.origin.x), f64::from(frame.origin.y)), CGSize::new(size, size))];
+        let _: () = msg_send![a.img, setFrame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(size, size))];
+        let layer: *mut AnyObject = msg_send![a.view, layer];
+        let _: () = msg_send![layer, setCornerRadius: (size * 0.24).round()];
+        let key = format!("{size}{}{:?}", image.map(|p| p.display().to_string()).unwrap_or_default(), color);
+        if a.key != key {
+            a.key = key;
+            let picture: *mut AnyObject = match image {
+                Some(p) => msg_send![AnyClass::get(c"UIImage").unwrap(), imageWithContentsOfFile: ns_string(&p.to_string_lossy())],
+                None => std::ptr::null_mut(),
+            };
+            let _: () = msg_send![a.img, setImage: picture];
+            let bg = if picture.is_null() { super::glass::ui_color(color) } else { msg_send![AnyClass::get(c"UIColor").unwrap(), clearColor] };
+            let _: () = msg_send![a.view, setBackgroundColor: bg];
+            let _: () = msg_send![a.blur, setImage: blurred(picture, color, size)];
+        }
+        let _: () = msg_send![a.blur, setFrame: CGRect::new(CGPoint::new(f64::from(frame.origin.x) - BLUR_PAD, f64::from(frame.origin.y) - BLUR_PAD), CGSize::new(size + BLUR_PAD * 2., size + BLUR_PAD * 2.))];
+        let was_hidden: bool = msg_send![a.view, isHidden];
+        let _: () = msg_send![a.view, setHidden: false];
+        // 返回首页的过渡刚完（照 Craft）：文档页的返回键先很快淡掉，这里稍晚一点从一团模糊里清楚起来，不是一下出现。
+        if was_hidden && super::shot::just_slid() { reveal(a); }
+    });
+    AVATAR_FRAMES.with(|f| f.set(f.get().saturating_add(1)));
+}
+
+/// 头像从模糊到清楚：模糊版先浮出来再淡掉，清楚的那个同时淡入（都晚 `DELAY` 开始，让返回键先走）。
+unsafe fn reveal(a: &Avatar) {
+    const DELAY: f64 = 0.05;
+    const DUR: f64 = 0.3;
+    unsafe {
+        let number = |v: f64| -> *mut AnyObject { msg_send![AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: v] };
+        let array = |vs: &[f64]| -> *mut AnyObject {
+            let list: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
+            for v in vs { let _: () = msg_send![list, addObject: number(*v)]; }
+            list
+        };
+        let ca = AnyClass::get(c"CATransaction").unwrap();
+        let _: () = msg_send![ca, begin];
+        let _: () = msg_send![ca, setDisableActions: true];
+        let sharp: *mut AnyObject = msg_send![a.view, layer];
+        let now: f64 = msg_send![sharp, convertTime: ca_now(), fromLayer: std::ptr::null_mut::<AnyObject>()];
+        let anim: *mut AnyObject = msg_send![AnyClass::get(c"CAKeyframeAnimation").unwrap(), animationWithKeyPath: ns_string("opacity")];
+        let _: () = msg_send![anim, setValues: array(&[0., 0., 1.])];
+        let _: () = msg_send![anim, setKeyTimes: array(&[0., 0.35, 1.])];
+        let _: () = msg_send![anim, setDuration: DUR];
+        let _: () = msg_send![anim, setBeginTime: now + DELAY];
+        let _: () = msg_send![anim, setFillMode: ns_string("backwards")];
+        let _: () = msg_send![sharp, addAnimation: anim, forKey: ns_string("reveal")];
+        let soft: *mut AnyObject = msg_send![a.blur, layer];
+        let anim: *mut AnyObject = msg_send![AnyClass::get(c"CAKeyframeAnimation").unwrap(), animationWithKeyPath: ns_string("opacity")];
+        let _: () = msg_send![anim, setValues: array(&[0., 0.85, 0.])];
+        let _: () = msg_send![anim, setKeyTimes: array(&[0., 0.3, 1.])];
+        let _: () = msg_send![anim, setDuration: DUR];
+        let _: () = msg_send![anim, setBeginTime: now + DELAY];
+        let _: () = msg_send![anim, setFillMode: ns_string("backwards")];
+        let _: () = msg_send![soft, addAnimation: anim, forKey: ns_string("reveal")];
+        let _: () = msg_send![ca, commit];
+    }
+}
+fn ca_now() -> f64 { unsafe extern "C" { fn CACurrentMediaTime() -> f64; } unsafe { CACurrentMediaTime() } }
+
+#[repr(C)]
+struct CGImage { _private: [u8; 0] }
+unsafe impl RefEncode for CGImage { const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGImage", &[])); }
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" { fn CGImageRelease(image: *mut CGImage); }
+#[link(name = "CoreImage", kind = "framework")]
+unsafe extern "C" {}
+
+/// 头像的高斯模糊版：先照 `space::icon_el` 画出圆角方块（有图铺图、没有就是底色），四周留 `BLUR_PAD` 的空，
+/// 再用 Core Image 糊开。只在头像变了时算一次。
+unsafe fn blurred(picture: *mut AnyObject, color: Hsla, size: f64) -> *mut AnyObject {
+    unsafe {
+        let full = size + BLUR_PAD * 2.;
+        let format: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRendererFormat").unwrap(), preferredFormat];
+        let _: () = msg_send![format, setOpaque: false];
+        let scale: f64 = msg_send![format, scale];
+        let renderer: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRenderer").unwrap(), alloc];
+        let renderer: *mut AnyObject = msg_send![renderer, initWithSize: CGSize::new(full, full), format: format];
+        let fill = super::glass::ui_color(color);
+        let actions = block2::RcBlock::new(move |_ctx: *mut AnyObject| {
+            let rect = CGRect::new(CGPoint::new(BLUR_PAD, BLUR_PAD), CGSize::new(size, size));
+            let path: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPathWithRoundedRect: rect, cornerRadius: (size * 0.24).round()];
+            let _: () = msg_send![path, addClip];
+            if picture.is_null() {
+                let _: () = msg_send![fill, setFill];
+                let _: () = msg_send![path, fill];
+            } else {
+                // 铺满（同 `ObjectFit::Cover`）。
+                let s: CGSize = msg_send![picture, size];
+                let k = (size / s.width.max(1.)).max(size / s.height.max(1.));
+                let (w, h) = (s.width * k, s.height * k);
+                let at = CGRect::new(CGPoint::new(BLUR_PAD + (size - w) / 2., BLUR_PAD + (size - h) / 2.), CGSize::new(w, h));
+                let _: () = msg_send![picture, drawInRect: at];
+            }
+        });
+        let sharp: *mut AnyObject = msg_send![renderer, imageWithActions: &*actions];
+        let _: () = msg_send![renderer, release];
+        if sharp.is_null() { return std::ptr::null_mut(); }
+        let cg: *mut CGImage = msg_send![sharp, CGImage];
+        let Some(ci_class) = AnyClass::get(c"CIImage") else { return std::ptr::null_mut(); };
+        let input: *mut AnyObject = msg_send![ci_class, imageWithCGImage: cg];
+        let extent: CGRect = msg_send![input, extent];
+        let Some(filter_class) = AnyClass::get(c"CIFilter") else { return std::ptr::null_mut(); };
+        let filter: *mut AnyObject = msg_send![filter_class, filterWithName: ns_string("CIGaussianBlur")];
+        if filter.is_null() { return std::ptr::null_mut(); }
+        let _: () = msg_send![filter, setValue: input, forKey: ns_string("inputImage")];
+        // 半径按像素：约 4pt。
+        let radius: *mut AnyObject = msg_send![AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: 4. * scale];
+        let _: () = msg_send![filter, setValue: radius, forKey: ns_string("inputRadius")];
+        let output: *mut AnyObject = msg_send![filter, outputImage];
+        let context: *mut AnyObject = msg_send![AnyClass::get(c"CIContext").unwrap(), context];
+        let out: *mut CGImage = msg_send![context, createCGImage: output, fromRect: extent];
+        if out.is_null() { return std::ptr::null_mut(); }
+        let image: *mut AnyObject = msg_send![AnyClass::get(c"UIImage").unwrap(), imageWithCGImage: out, scale: scale, orientation: 0isize];
+        CGImageRelease(out);
+        image
+    }
+}
+
 fn write(frame: Bounds<Pixels>, title: &str, folder: &str, ink: Hsla, sub: Hsla, centered: bool) {
-    SEEN.with(|s| s.set((s.get().0, true)));
+    SEEN.with(|s| { let (b, _, a) = s.get(); s.set((b, true, a)) });
     VEIL.with(|v| unsafe {
         let mut slot = v.borrow_mut();
         let Some(veil) = slot.as_mut() else { return; };

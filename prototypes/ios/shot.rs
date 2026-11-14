@@ -38,6 +38,88 @@ pub fn attach(window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
     METAL.with(|m| m.set(handle.ui_view.as_ptr() as *mut AnyObject));
+    FRAME.with(|f| f.set(Instant::now()));
+    watch_presents(handle.ui_view.as_ptr() as *mut AnyObject);
+}
+
+// ---- 哪一帧真的上屏了
+//
+// GPUI 画完一帧就把它交给 Metal，Metal 等 GPU 画好才上屏：真机上首页刚换上来的头几帧（字形、图片第一次进图集）
+// 可能比画的时候晚好几帧才出现。原生视图的改动（挪开快照）却是下一次刷新就生效，只按 GPUI 画了几帧来等，
+// 快照挪开时底下可能还什么都没有。所以在 Metal 图层上挂个钩子：每次 GPUI 要一块新的画布（`nextDrawable`），
+// 给它登记「上屏时」的回调，记下已经上屏的最新一帧。只改这一个图层实例的类（像 KVO 那样），不动 GPUI。
+
+static REQUESTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PRESENTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+thread_local! { static WATCHED: Cell<bool> = const { Cell::new(false) }; }
+#[link(name = "objc")]
+unsafe extern "C" { fn object_setClass(obj: *mut AnyObject, cls: *const AnyClass) -> *const AnyClass; }
+
+fn watch_presents(view: *mut AnyObject) {
+    if WATCHED.with(|w| w.get()) || view.is_null() { return; }
+    WATCHED.with(|w| w.set(true));
+    unsafe {
+        let layer: *mut AnyObject = msg_send![view, layer];
+        let Some(metal) = AnyClass::get(c"CAMetalLayer") else { return; };
+        if layer.is_null() { return; }
+        let is_metal: bool = msg_send![layer, isKindOfClass: metal];
+        if !is_metal { return; }
+        let class: *const AnyClass = msg_send![layer, class];
+        let Some(sub) = presents_class(&*class) else { return; };
+        object_setClass(layer, sub);
+    }
+}
+fn presents_class(base: &'static AnyClass) -> Option<&'static AnyClass> {
+    static CLASS: std::sync::OnceLock<Option<&'static AnyClass>> = std::sync::OnceLock::new();
+    static BASE: std::sync::OnceLock<&'static AnyClass> = std::sync::OnceLock::new();
+    let _ = BASE.set(base);
+    *CLASS.get_or_init(|| {
+        extern "C-unwind" fn next(this: &AnyObject, _: Sel) -> *mut AnyObject {
+            let base = *BASE.get().unwrap();
+            let drawable: *mut AnyObject = unsafe { msg_send![super(this, base), nextDrawable] };
+            // 模拟器的画布没有上屏回调：那里不挂，按帧数等（`below_on_screen`）。
+            let hook: bool = !drawable.is_null() && unsafe { msg_send![drawable, respondsToSelector: sel!(addPresentedHandler:)] };
+            if hook {
+                let seq = REQUESTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                // 掉帧（没上屏）时 `presentedTime` 是 0，不算。
+                let shown = RcBlock::new(move |d: *mut AnyObject| {
+                    let t: f64 = unsafe { msg_send![d, presentedTime] };
+                    if t > 0. { PRESENTED.fetch_max(seq, std::sync::atomic::Ordering::Relaxed); }
+                });
+                unsafe { let _: () = msg_send![drawable, addPresentedHandler: &*shown]; }
+            }
+            drawable
+        }
+        let mut b = ClassBuilder::new(c"QuietMdPresentedMetalLayer", base)?;
+        unsafe { b.add_method(sel!(nextDrawable), next as extern "C-unwind" fn(_, _) -> _); }
+        Some(b.register())
+    })
+}
+fn presents_watched() -> bool { REQUESTED.load(std::sync::atomic::Ordering::Relaxed) > 0 }
+// 拍快照以后：这一帧要等哪一块画布上屏（下面那页第一次连图片都画好的那一帧），和已经画了几帧（钩子装不上时按帧数等）。
+thread_local! { static TARGET: Cell<(Option<u64>, u32)> = const { Cell::new((None, 0)) }; }
+/// 下面那页（连图片）已经真的在屏幕上了，可以挪开快照。每帧（`below_drawn`）调一次。等太久就不等了。
+fn below_on_screen() -> bool {
+    if CAPTURED.with(|c| c.get()).elapsed() > PICTURE_WAIT { return true; }
+    let pics = pictures_ready();
+    let (target, frames) = TARGET.with(|t| t.get());
+    if !presents_watched() { TARGET.with(|t| t.set((target, frames + 1))); return pics && frames + 1 >= 2; }
+    match target {
+        // 这一帧的画布在 prepaint 之后才要：它的序号是现在的下一个。
+        None => { if pics { TARGET.with(|t| t.set((Some(REQUESTED.load(std::sync::atomic::Ordering::Relaxed) + 1), frames))); } false }
+        // 回调万一没来：Metal 一共三块画布轮着用，又要了三块，那一块肯定已经上过屏、还回来了。
+        Some(t) => PRESENTED.load(std::sync::atomic::Ordering::Relaxed) >= t || REQUESTED.load(std::sync::atomic::Ordering::Relaxed) >= t + 3,
+    }
+}
+thread_local! { static FRAME: Cell<Instant> = Cell::new(Instant::now()); }
+// 拍下旧页的时候。
+thread_local! { static CAPTURED: Cell<Instant> = Cell::new(Instant::now()); }
+/// 下面那页最多等图片解码多久：再久就不等了，宁可露出空白也不能让手势卡住。
+const PICTURE_WAIT: Duration = Duration::from_millis(400);
+/// 刚画的这一帧里的图片都好了（或者已经等够了）。首页卡片的图片在文档里待久了会被放掉（`editor::image` 的缓存），
+/// 回来要重新解码：这时挪开旧页，卡片先空着、随后图片跳出来，看着就是闪了一下。
+fn pictures_ready() -> bool {
+    !crate::editor::image::pictures_pending(FRAME.with(|f| f.get())) || CAPTURED.with(|c| c.get()).elapsed() > PICTURE_WAIT
 }
 fn metal() -> Option<*mut AnyObject> { Some(METAL.with(|m| m.get())).filter(|p| !p.is_null()) }
 fn superview() -> Option<*mut AnyObject> {
@@ -92,44 +174,112 @@ fn pass_class() -> &'static AnyClass {
 thread_local! { static PAGE_SHOT: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) }; }
 thread_local! { static DIM: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) }; }
 thread_local! { static SLIDING: Cell<Option<Instant>> = const { Cell::new(None) }; }
+// 跟手返回：下面那一页已经画过几帧，和这期间手指滑到的比例（还没交给快照的）。
+thread_local! { static BELOW: Cell<(u32, Option<f32>)> = const { Cell::new((0, None)) }; }
 
 /// 要换页了（状态还没变，屏幕上还是这一页）：把这一页拍下来盖在原处。下一帧 `ios::page` 看清了方向：
 /// 是返回就送走（`slide_out`），不是就拿掉（`drop_page`）。没换成页（比如被「先保存」拦下了）也在那一帧拿掉。
 pub fn capture_page() {
     if !super::is_compact() { return; }
     let (Some(metal), Some(sup)) = (metal(), superview()) else { return; };
-    drop_page();
+    remove_page();
+    // 这一页上画着的图片留着，回来时不用重新解码（`editor::image::pin_shown`）。
+    crate::editor::image::pin_shown();
     unsafe {
+        // 只拍页面（Metal）和顶部那条玻璃带：玻璃按钮不跟着走，照 Craft 留在顶上原处淡出（`show`）；
+        // 带子要拍进来，不然它在原处一收，快照顶上就露出没有玻璃的正文（文档往下滚过、或者有背景样式时顶上一直有带子）。
         let snap: Option<Retained<AnyObject>> = msg_send![metal, snapshotViewAfterScreenUpdates: false];
         let Some(snap) = snap else { return; };
         let _: () = msg_send![&*snap, setUserInteractionEnabled: false];
         let frame: CGRect = msg_send![metal, frame];
-        let _: () = msg_send![&*snap, setFrame: frame];
-        let _: () = msg_send![sup, insertSubview: &*snap, aboveSubview: metal];
-        PAGE_SHOT.with(|s| *s.borrow_mut() = Some(snap));
+        // 快照剪成和屏幕一样的圆角（照 Craft：滑走时左边两个角是圆的，和机身的角一样弯）；
+        // 阴影要画在剪裁之外，所以外面再套一层，动画和阴影都在外面这层上。
+        let holder: Retained<AnyObject> = msg_send![AnyClass::get(c"UIView").unwrap(), new];
+        let _: () = msg_send![&*holder, setUserInteractionEnabled: false];
+        let _: () = msg_send![&*holder, setFrame: frame];
+        let clip: Retained<AnyObject> = msg_send![AnyClass::get(c"UIView").unwrap(), new];
+        let _: () = msg_send![&*clip, setFrame: CGRect::new(CGPoint::new(0., 0.), frame.size)];
+        // 2 | 16：缩回卡片时外层的高度会变，剪裁这层跟着。
+        let _: () = msg_send![&*clip, setAutoresizingMask: 18usize];
+        let layer: *mut AnyObject = msg_send![&*clip, layer];
+        let _: () = msg_send![layer, setCornerRadius: corner_radius()];
+        let _: () = msg_send![layer, setCornerCurve: ns_string("continuous")];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+        let _: () = msg_send![&*snap, setFrame: CGRect::new(CGPoint::new(0., 0.), frame.size)];
+        let _: () = msg_send![&*clip, addSubview: &*snap];
+        if let Some(band) = super::veil::band() {
+            let copy: Option<Retained<AnyObject>> = msg_send![band, snapshotViewAfterScreenUpdates: false];
+            if let Some(copy) = copy {
+                let at: CGRect = msg_send![band, frame];
+                let parent: *mut AnyObject = msg_send![band, superview];
+                let at: CGRect = if parent.is_null() { at } else { msg_send![parent, convertRect: at, toView: metal] };
+                let _: () = msg_send![&*copy, setFrame: at];
+                let _: () = msg_send![&*clip, addSubview: &*copy];
+            }
+        }
+        let _: () = msg_send![&*holder, addSubview: &*clip];
+        let _: () = msg_send![sup, insertSubview: &*holder, aboveSubview: metal];
+        // 马上提交：GPUI 下一帧就画新页，Metal 的画面不等 Core Animation 的事务，一画完就上屏；
+        // 快照要是等到这一轮事件处理完才随事务提交，真机上会晚一帧——那一帧新页已经出来、快照还没盖上，就是那一下闪。
+        let _: () = msg_send![AnyClass::get(c"CATransaction").unwrap(), flush];
+        PAGE_SHOT.with(|s| *s.borrow_mut() = Some(holder));
+        BELOW.with(|b| b.set((0, None)));
+        CATCH.with(|c| c.set(None));
+        SHOWN.with(|s| s.set(0.));
+        TARGET.with(|t| t.set((None, 0)));
+        CAPTURED.with(|c| c.set(Instant::now()));
+        LANDED.with(|l| l.set(false));
+        // 是从卡片打开的文档在返回：这次缩回那张卡片（`zoom_*`），卡片先空着。
+        let leaving = LEAVING.with(|l| l.borrow_mut().take());
+        let slot = leaving.filter(|id| FROM_CARD.with(|f| f.borrow().as_ref() == Some(id)));
+        ZOOM.with(|z| *z.borrow_mut() = slot.map(|id| Zoom { id, card: None }));
     }
+}
+
+/// 屏幕的圆角半径。系统没有公开的接口，读 `UIScreen` 的 `_displayCornerRadius`；读不到（旧系统、没有圆角的屏）就是直角。
+fn corner_radius() -> f64 {
+    thread_local! { static RADIUS: Cell<Option<f64>> = const { Cell::new(None) }; }
+    RADIUS.with(|r| *r.get().get_or_insert_with(|| unsafe {
+        let screen: *mut AnyObject = msg_send![AnyClass::get(c"UIScreen").unwrap(), mainScreen];
+        let name = sel!(_displayCornerRadius);
+        let ok: bool = !screen.is_null() && msg_send![screen, respondsToSelector: name];
+        if !ok { return 0.; }
+        let v: f64 = MessageReceiver::send_message(screen, name, ());
+        if v.is_finite() { v.max(0.) } else { 0. }
+    }))
 }
 /// 有一张等着 `ios::page` 处理的快照。
 pub fn page_pending() -> bool { PAGE_SHOT.with(|s| s.borrow().is_some()) }
 /// 不是返回：快照和下面这一帧要换上的东西无关，拿掉。
 pub fn drop_page() {
+    remove_page();
+    ZOOM.with(|z| z.borrow_mut().take());
+}
+fn remove_page() {
     if let Some(v) = PAGE_SHOT.with(|s| s.borrow_mut().take()) { unsafe { let _: () = msg_send![&*v, removeFromSuperview]; } }
     if let Some(v) = DIM.with(|s| s.borrow_mut().take()) { unsafe { let _: () = msg_send![&*v, removeFromSuperview]; } }
 }
 /// 旧页正在滑走（或跟着手指）：只属于新页的玻璃等它走完再露面，离开的那一页的玻璃淡出。
 pub fn sliding() -> bool { PAGE_SHOT.with(|s| s.borrow().is_some()) || SLIDING.with(|s| s.get()).is_some_and(|t| Instant::now() < t) }
 
-/// 玻璃和系统菜单按钮的显隐都经过这里。旧页正在滑走时：要露面的推迟（返回假，下一帧再试），
-/// 要藏起的淡出；别的时候照常立刻显隐。
+/// 玻璃和系统菜单按钮的显隐都经过这里。旧页正在滑走（缩回卡片）时：要露面的推迟（返回假，下一帧再试）；
+/// 要藏起的分两种（照 Craft）：顶栏的按钮停在原处不动，也推迟，等过渡完了再淡出、和新页的按钮交接；
+/// 别处的（文档底部的工具条）在原处淡出。别的时候照常立刻显隐。
 pub fn show(view: *mut AnyObject, on: bool) -> bool {
     unsafe {
         let layer: *mut AnyObject = msg_send![view, layer];
         if on {
             if sliding() { return false; }
             let _: () = msg_send![layer, removeAnimationForKey: ns_string("vanish")];
+            let _: () = msg_send![layer, removeAnimationForKey: ns_string("shrink")];
+            let was_hidden: bool = msg_send![view, isHidden];
             let _: () = msg_send![view, setHidden: false];
-        } else if sliding() {
-            let anim = basic("opacity", 1., 0., 0.15, [0.42, 0., 1., 1.]);
+            if was_hidden && just_slid() { materialize(layer); }
+        } else if sliding() && in_top_bar(view) {
+            return false;
+        } else if sliding() || just_slid() {
+            // 交接时旧的走得快（0.1 秒），新的稍晚再出来，两份不在原处叠着（照 Craft）。
+            let anim = basic("opacity", 1., 0., if just_slid() { 0.1 } else { 0.15 }, [0.42, 0., 1., 1.]);
             let _: () = msg_send![anim, setFillMode: ns_string("forwards")];
             let _: () = msg_send![anim, setRemovedOnCompletion: false];
             // 淡完还没被叫回来才真的藏起；中途露面会先拿掉这段动画，这里就什么都不做。
@@ -138,13 +288,54 @@ pub fn show(view: *mut AnyObject, on: bool) -> bool {
                 let anim: *mut AnyObject = msg_send![layer, animationForKey: ns_string("vanish")];
                 if !anim.is_null() { let _: () = msg_send![view, setHidden: true]; let _: () = msg_send![layer, removeAnimationForKey: ns_string("vanish")]; }
             });
-            transaction(&done, || { let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("vanish")]; });
+            transaction(&done, || {
+                let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("vanish")];
+                // 顶栏的按钮交接时边淡边缩一点（照 Craft）。
+                if just_slid() {
+                    let shrink = basic("transform.scale", 1., 0.9, 0.1, [0.42, 0., 1., 1.]);
+                    let _: () = msg_send![shrink, setFillMode: ns_string("forwards")];
+                    let _: () = msg_send![shrink, setRemovedOnCompletion: false];
+                    let _: () = msg_send![layer, addAnimation: shrink, forKey: ns_string("shrink")];
+                }
+            });
         } else {
             let _: () = msg_send![view, setHidden: true];
         }
     }
     true
 }
+/// 按钮在顶栏里（上沿在安全区下面一个顶栏高度以内）。
+fn in_top_bar(view: *mut AnyObject) -> bool {
+    let frame: CGRect = unsafe { msg_send![view, frame] };
+    frame.origin.y < f64::from(super::insets().top) + f64::from(crate::app::HEADER_H)
+}
+/// 旧页在 `end` 之前一直在走（`sliding`）。走完的那一刻和交接（`just_slid`）结束时各让 GPUI 重画一次：
+/// 新页的玻璃、空间头像要等过渡完才露面，而那时不一定还有别的事让它出帧——没有的话头像会一直空着，直到下一次触摸。
+fn slide_until(end: Instant) {
+    SLIDING.with(|s| s.set(Some(end)));
+    let wait = end.saturating_duration_since(Instant::now());
+    for after in [wait + Duration::from_millis(10), wait + Duration::from_millis(320)] {
+        let tick = RcBlock::new(move |_timer: *mut AnyObject| super::menu::dispatch(|_, _, cx| cx.notify()));
+        unsafe { let _: *mut AnyObject = msg_send![AnyClass::get(c"NSTimer").unwrap(), scheduledTimerWithTimeInterval: after.as_secs_f64(), repeats: false, block: &*tick]; }
+    }
+}
+/// 过渡刚完时露面的顶栏按钮、空间头像：从小一点、透明里长出来，稍微弹一下（照 Craft 顶栏的交接，
+/// 旧页的按钮同时边淡边缩）。
+pub fn materialize(layer: *mut AnyObject) {
+    unsafe {
+        let ca = AnyClass::get(c"CATransaction").unwrap();
+        let _: () = msg_send![ca, begin];
+        let _: () = msg_send![ca, setDisableActions: true];
+        // 控制点越过 1：先略过头再回来。
+        let grow = basic("transform.scale", 0.78, 1., 0.34, [0.3, 1.45, 0.55, 1.]);
+        let _: () = msg_send![layer, addAnimation: grow, forKey: ns_string("materialize")];
+        let fade = basic("opacity", 0., 1., 0.2, [0.25, 0.1, 0.25, 1.]);
+        let _: () = msg_send![layer, addAnimation: fade, forKey: ns_string("materialize-fade")];
+        let _: () = msg_send![ca, commit];
+    }
+}
+/// 过渡刚完（0.3 秒内）：推迟到现在才藏起的顶栏按钮淡出，和新页淡入的按钮交接，不是一下没了。
+pub fn just_slid() -> bool { SLIDING.with(|s| s.get()).is_some_and(|t| { let now = Instant::now(); now >= t && now - t < Duration::from_millis(300) }) }
 
 fn width() -> f64 { metal().map_or(0., |m| unsafe { let f: CGRect = msg_send![m, frame]; f.size.width }) }
 
@@ -157,7 +348,7 @@ fn dress() {
         let _: () = msg_send![layer, setShadowRadius: 10f64];
         let _: () = msg_send![layer, setShadowOffset: CGSize::new(-2., 0.)];
         let bounds: CGRect = msg_send![&*snap, bounds];
-        let path: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPathWithRect: bounds];
+        let path: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPathWithRoundedRect: bounds, cornerRadius: corner_radius()];
         let cg: *mut CGPath = msg_send![path, CGPath];
         let _: () = msg_send![layer, setShadowPath: cg];
         if DIM.with(|d| d.borrow().is_some()) { return; }
@@ -175,9 +366,56 @@ fn dress() {
 /// 下面那页上的暗：完全盖着时 0.12，旧页走完时没有。
 fn dim_at(progress: f64) -> f64 { 0.12 * (1. - progress) }
 
-/// 跟手返回：快照跟着手指，`progress` 是已经滑过的屏宽比例。
+/// 跟手返回：快照跟着手指，`progress` 是已经滑过的屏宽比例。下面那一页还没真的上屏时（GPUI 换页要一两帧，
+/// 真机上首页卡片多时更久）快照先不动，比例记着，等 `below_drawn` 再挪：不然头几帧快照底下露出来的是还没换掉的旧页，
+/// 随后才变成首页，看着像闪了一下。
 pub fn follow(progress: f32) {
+    let ready = BELOW.with(|b| { let (n, _) = b.get(); if n < 2 { b.set((n, Some(progress))); } n >= 2 });
+    if ready { CATCH.with(|c| if let Some((t, _)) = c.get() { c.set(Some((t, progress))); }); apply(progress); }
+}
+// 等下面那页上屏的这段时间里手指已经走了一段：快照不一下跳过去（看着像闪），而是在 `CATCH_UP` 里追上手指。
+thread_local! { static CATCH: Cell<Option<(Instant, f32)>> = const { Cell::new(None) }; }
+// 快照实际摆到的比例（追手指时比手指慢）：松手时从这里接着走。
+thread_local! { static SHOWN: Cell<f32> = const { Cell::new(0.) }; }
+const CATCH_UP: f32 = 0.14;
+fn apply(progress: f32) {
+    let k = CATCH.with(|c| match c.get() {
+        Some((t, _)) => { let k = (t.elapsed().as_secs_f32() / CATCH_UP).min(1.); if k >= 1. { c.set(None); } ease_out_cubic(k) }
+        None => 1.,
+    });
+    let shown = progress * k;
+    SHOWN.with(|s| s.set(shown));
+    move_to(shown);
+}
+/// 快照还原样盖着整屏（下面那页还没上屏、快照还没动）：状态栏先不换深浅（`ios::set_layout`）。
+pub fn covering() -> bool { page_pending() && BELOW.with(|b| b.get().0) < 2 }
+/// 每帧（换页那一层的 prepaint）调用：有快照在等，就数下面那一页画了几帧；画过一帧、又到了下一帧，就把记着的比例交给快照。
+pub fn below_drawn() {
+    // 这一帧画了哪些卡片（换页那一层的 prepaint 在页面内容之后，卡片都已经报过了）。
+    let cards = CARDS.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    ZOOM.with(|z| if let Some(z) = z.borrow_mut().as_mut() && z.card.is_none() {
+        let (w, h) = screen();
+        z.card = cards.iter().find(|(id, _)| *id == z.id).map(|(_, b)| CGRect::new(CGPoint::new(f64::from(b.origin.x), f64::from(b.origin.y)), CGSize::new(f64::from(b.size.width), f64::from(b.size.height))))
+            // 卡片得在屏幕上（横排里滑出去了、列表滚走了就照常滑走）。
+            .filter(|r| { let (cx, cy) = (r.origin.x + r.size.width / 2., r.origin.y + r.size.height / 2.); r.size.width > 20. && (0. ..w).contains(&cx) && (0. ..h).contains(&cy) });
+    });
+    // 正在追手指：手指不动也每帧往前追。
+    if PAGE_SHOT.with(|s| s.borrow().is_some()) && let Some((_, p)) = CATCH.with(|c| c.get()) { apply(p); }
+    let waiting = OUT.with(|o| o.borrow().is_some()) || PAGE_SHOT.with(|s| s.borrow().is_some()) && BELOW.with(|b| b.get().0) < 2;
+    if !waiting { return; }
+    let ready = below_on_screen();
+    // 点返回键（或早早松手）的那一次：等到知道了卡片在哪、下面那页也真的上屏了才走。
+    if ready && let Some((snap, dim, from)) = OUT.with(|o| o.borrow_mut().take()) {
+        match zoom_card() { Some(card) => zoom_out(snap, dim, card), None => { ZOOM.with(|z| z.borrow_mut().take()); slide_anim(snap, dim, from) } }
+    }
+    if PAGE_SHOT.with(|s| s.borrow().is_none()) || !ready { return; }
+    let (_, pending) = BELOW.with(|b| b.get());
+    BELOW.with(|b| b.set((2, pending)));
+    if let Some(p) = pending { CATCH.with(|c| c.set(Some((Instant::now(), p)))); apply(p); }
+}
+fn move_to(progress: f32) {
     dress();
+    if zoom_card().is_some() { return zoom_follow(progress); }
     let x = width() * f64::from(progress);
     PAGE_SHOT.with(|s| if let Some(snap) = s.borrow().as_ref() { unsafe { set_value(msg_send![&**snap, layer], "transform.translation.x", x); } });
     DIM.with(|d| if let Some(dim) = d.borrow().as_ref() { unsafe { let _: () = msg_send![&**dim, setAlpha: dim_at(f64::from(progress))]; } });
@@ -186,12 +424,27 @@ pub fn follow(progress: f32) {
 /// 返回：快照从 `from`（已经滑过的比例）往右滑出屏幕。没有快照时返回假，`ios::page` 用原来的滑入。
 pub fn slide_out(from: f32) -> bool {
     if !page_pending() { return false; }
+    let below_ready = BELOW.with(|b| b.get().0) >= 2;
+    // 快照可能还没追上手指：从它实际在的地方走。
+    let from = if below_ready && CATCH.with(|c| c.take()).is_some() { SHOWN.with(|s| s.get()) } else { from };
+    BELOW.with(|b| b.set((2, None)));
     dress();
     let Some(snap) = PAGE_SHOT.with(|s| s.borrow_mut().take()) else { return false; };
     let dim = DIM.with(|d| d.borrow_mut().take());
+    FROM_CARD.with(|f| f.borrow_mut().take());
+    if let Some(card) = zoom_card() { zoom_out(snap, dim, card); return true; }
+    // 点返回键：这一帧下面那页才开始画，卡片在哪还不知道，留到 `below_drawn`。
+    // 下面那页还没真的上屏（图片没解码好、或者 GPU 还没画完，松手得早）：缩回卡片也等它，免得四周先空着。照常滑走的那种不等——GPUI 那边的视差已经开始了。
+    if ZOOM.with(|z| z.borrow().is_some()) && (from <= 0. || !below_ready) { OUT.with(|o| *o.borrow_mut() = Some((snap, dim, from))); slide_until(Instant::now() + PICTURE_WAIT + Duration::from_millis(600)); return true; }
+    // 跟手到这里卡片还是没找到：照常滑走。
+    ZOOM.with(|z| z.borrow_mut().take());
+    slide_anim(snap, dim, from);
+    true
+}
+fn slide_anim(snap: Retained<AnyObject>, dim: Option<Retained<AnyObject>>, from: f32) {
     let w = width();
     let dur = slide_time(1. - from).as_secs_f64();
-    SLIDING.with(|s| s.set(Some(Instant::now() + Duration::from_secs_f64(dur))));
+    slide_until(Instant::now() + Duration::from_secs_f64(dur));
     unsafe {
         let (gone, dim_gone) = (snap.clone(), dim.clone());
         let done = RcBlock::new(move || {
@@ -203,15 +456,18 @@ pub fn slide_out(from: f32) -> bool {
             if let Some(dim) = &dim { animate(msg_send![&**dim, layer], "opacity", dim_at(f64::from(from)), 0., dur, OUT_CUBIC); let _: () = msg_send![&**dim, setAlpha: 0f64]; }
         });
     }
-    true
 }
 
 /// 跟手返回松手时没过半：快照滑回原处。滑完把 `restore` 交给 GPUI（`ios::menu_action`），
 /// 它把原来那页恢复好；快照再稍等一下淡掉，免得新的一帧还没上屏就露出下面那页。
 pub fn slide_back(from: f32, restore: &'static str) {
+    let from = if CATCH.with(|c| c.take()).is_some() { SHOWN.with(|s| s.get()) } else { from };
+    BELOW.with(|b| b.set((2, None)));
+    if zoom_card().is_some() { return zoom_back(restore); }
+    ZOOM.with(|z| z.borrow_mut().take());
     let w = width();
     let dur = slide_time(from).as_secs_f64();
-    SLIDING.with(|s| s.set(Some(Instant::now() + Duration::from_secs_f64(dur))));
+    slide_until(Instant::now() + Duration::from_secs_f64(dur));
     PAGE_SHOT.with(|s| unsafe {
         let Some(snap) = s.borrow().clone() else { return; };
         let done = RcBlock::new(move || super::menu::chosen(restore));
@@ -228,14 +484,19 @@ thread_local! { static PARK_FRAMES: Cell<u32> = const { Cell::new(0) }; }
 /// 按时间等不行：真机上文档页重新排版、图片重新解码可能比固定的几十毫秒慢，快照先淡掉就会闪出下面那页。
 pub fn park_page(frames: u32) {
     let Some(snap) = PAGE_SHOT.with(|s| s.borrow_mut().take()) else { return; };
-    PARKED.with(|p| *p.borrow_mut() = Some((snap, DIM.with(|d| d.borrow_mut().take()))));
+    // 快照已经回到整屏、把下面那层暗整个盖住了：暗现在拿掉看不出来；留到快照淡掉以后再拿，整屏会一下亮回来。
+    if let Some(dim) = DIM.with(|d| d.borrow_mut().take()) { unsafe { let _: () = msg_send![&*dim, removeFromSuperview]; } }
+    PARKED.with(|p| *p.borrow_mut() = Some((snap, None)));
     PARK_FRAMES.with(|f| f.set(frames));
+    // 和返回时一样，等恢复的那页真的上屏（`below_on_screen`，从现在算起最多等 `PICTURE_WAIT`）。
+    TARGET.with(|t| t.set((None, 0)));
+    CAPTURED.with(|c| c.set(Instant::now()));
 }
 /// 每帧调用：还盖着快照就数一帧，数完淡掉。返回真表示还要接着出帧。
 pub fn parked_tick() -> bool {
     if PARKED.with(|p| p.borrow().is_none()) { return false; }
     let left = PARK_FRAMES.with(|f| { let n = f.get().saturating_sub(1); f.set(n); n });
-    if left > 0 { return true; }
+    if left > 0 || !below_on_screen() { return true; }
     if let Some((snap, dim)) = PARKED.with(|p| p.borrow_mut().take()) {
         drop_page();
         PAGE_SHOT.with(|s| *s.borrow_mut() = Some(snap));
@@ -255,14 +516,18 @@ pub fn fade_page() {
             if let Some(dim) = &dim_gone { let _: () = msg_send![&**dim, removeFromSuperview]; }
         });
         transaction(&done, || {
-            let layer: *mut AnyObject = msg_send![&*snap, layer];
-            let anim = basic("opacity", 1., 0., 0.1, [0.42, 0., 1., 1.]);
-            // 晚 60ms 再开始：新的一帧先上屏。
-            let now: f64 = msg_send![layer, convertTime: ca_now(), fromLayer: std::ptr::null_mut::<AnyObject>()];
-            let _: () = msg_send![anim, setBeginTime: now + 0.06];
-            let _: () = msg_send![anim, setFillMode: ns_string("backwards")];
-            let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("fade")];
-            let _: () = msg_send![layer, setOpacity: 0f32];
+            // 下面那层暗和快照一起淡掉：只淡快照的话，快照淡完时恢复的那页上还压着一层暗，随后暗一拿掉，整屏一下亮回来，看着就是闪了一下。
+            let layers: Vec<*mut AnyObject> = std::iter::once(msg_send![&*snap, layer]).chain(dim.as_ref().map(|d| msg_send![&**d, layer])).collect();
+            for layer in layers {
+                let from: f32 = msg_send![layer, opacity];
+                let anim = basic("opacity", f64::from(from), 0., 0.1, [0.42, 0., 1., 1.]);
+                // 晚 60ms 再开始：新的一帧先上屏。
+                let now: f64 = msg_send![layer, convertTime: ca_now(), fromLayer: std::ptr::null_mut::<AnyObject>()];
+                let _: () = msg_send![anim, setBeginTime: now + 0.06];
+                let _: () = msg_send![anim, setFillMode: ns_string("backwards")];
+                let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("fade")];
+                let _: () = msg_send![layer, setOpacity: 0f32];
+            }
         });
     }
 }
@@ -354,6 +619,145 @@ fn fade_scrim(alpha: f32) {
         let layer: *mut AnyObject = msg_send![&*view, layer];
         let done = RcBlock::new(move || { let _: () = msg_send![&*view, removeFromSuperview]; });
         transaction(&done, || animate(layer, "opacity", f64::from(alpha), 0., SINK, OUT_CUBIC));
+    }
+}
+
+// ---- 缩回卡片
+//
+// 照 Craft（和系统的缩放转场）：从卡片打开的文档返回时，旧页不往右滑走，而是边跟着手指边缩小，
+// 松手后缩回它那张卡片的位置和大小，再淡出露出真的卡片；这期间卡片画成空着的一格（`zoom_slot`）。
+// 卡片不在屏幕上（滚走了、横排里滑出去了）就照常滑走。
+
+struct Zoom { id: String, card: Option<CGRect> }
+thread_local! { static ZOOM: RefCell<Option<Zoom>> = const { RefCell::new(None) }; }
+// 缩回过卡片、还没换过页：下面那页一直不动（不然缩完以后 `ios::page` 又补上返回的视差，首页晃一下）。
+thread_local! { static LANDED: Cell<bool> = const { Cell::new(false) }; }
+// 从卡片打开的那篇文档；正在返回离开的那篇（`ios::doc_back` 记下，拍快照时对上了才缩回）。
+thread_local! { static FROM_CARD: RefCell<Option<String>> = const { RefCell::new(None) }; }
+thread_local! { static LEAVING: RefCell<Option<String>> = const { RefCell::new(None) }; }
+// 这一帧画了的卡片和它们的位置。
+thread_local! { static CARDS: RefCell<Vec<(String, Bounds<Pixels>)>> = const { RefCell::new(Vec::new()) }; }
+// 点返回键时等着知道卡片位置的快照。
+thread_local! { static OUT: RefCell<Option<(Retained<AnyObject>, Option<Retained<AnyObject>>, f32)>> = const { RefCell::new(None) }; }
+/// 卡片的圆角（`render_home_card` 的 20）。
+const CARD_RADIUS: f64 = 20.;
+
+/// 点卡片打开文档。
+pub fn from_card(id: &str) { FROM_CARD.with(|f| *f.borrow_mut() = Some(id.to_string())); }
+/// 要从文档 `id` 返回了（下一步就拍快照）。
+pub fn leaving(id: Option<String>) { LEAVING.with(|l| *l.borrow_mut() = id); }
+/// 这次返回是缩回卡片：下面那页原地不动（没有视差）。
+pub fn zooming() -> bool { ZOOM.with(|z| z.borrow().is_some()) || LANDED.with(|l| l.get()) }
+/// 这张卡片正等着文档缩回来：画成空着的一格。
+pub fn zoom_slot(id: &str) -> bool { ZOOM.with(|z| z.borrow().as_ref().is_some_and(|z| z.id == id)) }
+fn zoom_card() -> Option<CGRect> { ZOOM.with(|z| z.borrow().as_ref().and_then(|z| z.card)) }
+/// 放在卡片里的记号：每帧报一次卡片在哪。
+pub fn card_marker(id: &str) -> impl IntoElement {
+    let id = id.to_string();
+    canvas(move |b, _, _| CARDS.with(|c| c.borrow_mut().push((id.clone(), b))), |_, _, _, _| {}).absolute().inset_0()
+}
+
+fn screen() -> (f64, f64) { metal().map_or((0., 0.), |m| unsafe { let f: CGRect = msg_send![m, frame]; (f.size.width, f.size.height) }) }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Affine { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 }
+unsafe impl objc2::Encode for Affine { const ENCODING: Encoding = Encoding::Struct("CGAffineTransform", &[const { Encoding::Double }; 6]); }
+fn scale(s: f64) -> Affine { Affine { a: s, b: 0., c: 0., d: s, tx: 0., ty: 0. } }
+
+/// 快照外面那层摆成：中心 `center`，未缩放的大小 `w`×`h`（高度变小就是把底下剪掉），缩放 `s`，圆角 `radius`（屏幕上看到的）。
+/// 在 `UIView` 的动画里调用就是动画到这个样子。
+unsafe fn place(view: *mut AnyObject, center: CGPoint, w: f64, h: f64, s: f64, radius: f64) {
+    unsafe {
+        let _: () = msg_send![view, setBounds: CGRect::new(CGPoint::new(0., 0.), CGSize::new(w, h))];
+        let _: () = msg_send![view, setCenter: center];
+        let _: () = msg_send![view, setTransform: scale(s)];
+        let layer: *mut AnyObject = msg_send![view, layer];
+        let _: () = msg_send![layer, setCornerRadius: radius / s.max(0.01)];
+    }
+}
+/// 缩放时外层自己剪成圆角，不要滑走时的那道阴影（剪掉了也画不出来）。
+unsafe fn zoom_dress(view: *mut AnyObject) {
+    unsafe {
+        let layer: *mut AnyObject = msg_send![view, layer];
+        let _: () = msg_send![layer, setShadowOpacity: 0f32];
+        let _: () = msg_send![layer, setCornerCurve: ns_string("continuous")];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+    }
+}
+/// 跟手：左边跟着手指，越往右越小（到 0.4 为止），竖直方向居中。
+fn zoom_follow(progress: f32) {
+    let (w, h) = screen();
+    let p = f64::from(progress);
+    let s = (1. - 0.9 * p).max(0.4);
+    PAGE_SHOT.with(|v| if let Some(v) = v.borrow().as_ref() { unsafe {
+        zoom_dress(&**v as *const _ as *mut _);
+        place(&**v as *const _ as *mut _, CGPoint::new(p * w + s * w / 2., h / 2.), w, h, s, corner_radius() * s);
+    } });
+    DIM.with(|d| if let Some(dim) = d.borrow().as_ref() { unsafe { let _: () = msg_send![&**dim, setAlpha: dim_at(p)]; } });
+}
+/// 一段弹簧动画，`done` 在结束后调用。
+unsafe fn spring(dur: f64, body: impl Fn() + 'static, done: impl Fn() + 'static) {
+    unsafe {
+        let body = RcBlock::new(body);
+        let done = RcBlock::new(move |_: objc2::runtime::Bool| done());
+        let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: dur, delay: 0f64, usingSpringWithDamping: 0.88f64, initialSpringVelocity: 0f64, options: 0usize, animations: &*body, completion: &*done];
+    }
+}
+/// 松手（或点了返回键）：缩到卡片上，卡片露出来以后快照淡掉。
+fn zoom_out(snap: Retained<AnyObject>, dim: Option<Retained<AnyObject>>, card: CGRect) {
+    let (w, _) = screen();
+    const DUR: f64 = 0.42;
+    slide_until(Instant::now() + Duration::from_secs_f64(DUR + 0.2));
+    unsafe {
+        let view = &*snap as *const AnyObject as *mut AnyObject;
+        zoom_dress(view);
+        let se = card.size.width / w;
+        let target = CGPoint::new(card.origin.x + card.size.width / 2., card.origin.y + card.size.height / 2.);
+        let (v, d) = (view as usize, dim.as_ref().map(|d| &**d as *const AnyObject as usize));
+        let (keep, keep_dim) = (snap.clone(), dim.clone());
+        spring(DUR, move || {
+            place(v as *mut AnyObject, target, w, card.size.height / se, se, CARD_RADIUS);
+            if let Some(d) = d { let _: () = msg_send![d as *mut AnyObject, setAlpha: 0f64]; }
+        }, move || {
+            // 卡片画回来，等它上屏再淡掉快照。
+            ZOOM.with(|z| z.borrow_mut().take());
+            LANDED.with(|l| l.set(true));
+            super::menu::dispatch(|_, _, cx| cx.notify());
+            let (gone, dim_gone) = (keep.clone(), keep_dim.clone());
+            let done = RcBlock::new(move || {
+                let _: () = msg_send![&*gone, removeFromSuperview];
+                if let Some(dim) = &dim_gone { let _: () = msg_send![&**dim, removeFromSuperview]; }
+            });
+            transaction(&done, || {
+                let layer: *mut AnyObject = msg_send![&*keep, layer];
+                let anim = basic("opacity", 1., 0., 0.12, [0.42, 0., 1., 1.]);
+                let now: f64 = msg_send![layer, convertTime: ca_now(), fromLayer: std::ptr::null_mut::<AnyObject>()];
+                let _: () = msg_send![anim, setBeginTime: now + 0.05];
+                let _: () = msg_send![anim, setFillMode: ns_string("backwards")];
+                let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("fade")];
+                let _: () = msg_send![layer, setOpacity: 0f32];
+            });
+        });
+    }
+}
+/// 跟手没过半：放大回整屏，再交给 GPUI 恢复原来那页（和 `slide_back` 一样）。
+fn zoom_back(restore: &'static str) {
+    let (w, h) = screen();
+    const DUR: f64 = 0.36;
+    slide_until(Instant::now() + Duration::from_secs_f64(DUR));
+    let Some(snap) = PAGE_SHOT.with(|s| s.borrow().clone()) else { return; };
+    let dim = DIM.with(|d| d.borrow().clone());
+    unsafe {
+        let v = &*snap as *const AnyObject as usize;
+        let d = dim.as_ref().map(|d| &**d as *const AnyObject as usize);
+        spring(DUR, move || {
+            place(v as *mut AnyObject, CGPoint::new(w / 2., h / 2.), w, h, 1., corner_radius());
+            if let Some(d) = d { let _: () = msg_send![d as *mut AnyObject, setAlpha: dim_at(0.)]; }
+        }, move || {
+            ZOOM.with(|z| z.borrow_mut().take());
+            super::menu::chosen(restore);
+        });
     }
 }
 

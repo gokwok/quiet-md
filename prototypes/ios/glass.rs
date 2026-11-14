@@ -41,7 +41,7 @@ impl Pane {
         self.shown = on;
         unsafe {
             // 露面时淡入，和 GPUI 那边换页、收面板的过渡接上；藏起是立刻的，免得压在新盖上来的东西上
-            // （返回时离开的那一页的玻璃例外，见 `shot::show`）。
+            // （返回时离开的那一页的玻璃例外：在原处淡出，见 `shot::show`）。
             if on {
                 let anim: *mut AnyObject = msg_send![AnyClass::get(c"CABasicAnimation").unwrap(), animationWithKeyPath: ns_string("opacity")];
                 let from: *mut AnyObject = msg_send![AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: 0f64];
