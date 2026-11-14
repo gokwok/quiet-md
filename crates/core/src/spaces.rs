@@ -26,6 +26,31 @@ pub struct Space {
     /// The folder is there and holds a library; a moved or deleted folder
     /// stays listed (greyed) until it is removed.
     pub available: bool,
+    /// Where the folder is kept: on this device, or in iCloud.
+    pub location: Location,
+}
+
+/// Where a space's folder lives. Spaces made by the app live inside the
+/// app's own folders: the home (`Local`) or the app's iCloud folder
+/// (`ICloud`, see `set_icloud_root`). A folder picked by hand counts as
+/// iCloud when it is in iCloud Drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Location { Local, #[serde(rename = "icloud")] ICloud }
+
+/// Registry paths inside the app's iCloud folder start with this, so they
+/// survive the container moving (it is resolved on every launch).
+const ICLOUD_PREFIX: &str = "icloud:";
+static ICLOUD_ROOT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// The app's iCloud folder on this device, `None` while iCloud is off or the
+/// build has no iCloud entitlement. Set once at launch by the app.
+pub fn set_icloud_root(root: Option<PathBuf>) { *ICLOUD_ROOT.lock().unwrap_or_else(|e| e.into_inner()) = root; }
+pub fn icloud_root() -> Option<PathBuf> { ICLOUD_ROOT.lock().unwrap_or_else(|e| e.into_inner()).clone() }
+
+fn location_of(root: &Path, icloud: Option<&Path>) -> Location {
+    let in_drive = root.to_string_lossy().contains("/Mobile Documents/");
+    if icloud.is_some_and(|c| root.starts_with(c)) || in_drive { Location::ICloud } else { Location::Local }
 }
 
 /// `space.json` inside a space's folder.
@@ -69,11 +94,16 @@ pub fn home() -> PathBuf { Store::home_dir() }
 fn is_library(root: &Path) -> bool { root.join("format.json").is_file() }
 
 fn resolve(home: &Path, path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix(ICLOUD_PREFIX) {
+        // iCloud is off: a path that is never a library, so the space shows as missing.
+        return icloud_root().map_or_else(|| PathBuf::from("/nonexistent-icloud"), |c| c.join(rest));
+    }
     let p = Path::new(path);
     if path.is_empty() { home.to_path_buf() } else if p.is_absolute() { p.to_path_buf() } else { home.join(p) }
 }
 
 fn relative(home: &Path, root: &Path) -> String {
+    if let Some(rest) = icloud_root().and_then(|c| root.strip_prefix(&c).ok().map(|r| r.to_string_lossy().into_owned())) { return format!("{ICLOUD_PREFIX}{rest}"); }
     match root.strip_prefix(home) { Ok(r) => r.to_string_lossy().into_owned(), Err(_) => root.to_string_lossy().into_owned() }
 }
 
@@ -144,6 +174,7 @@ fn space(home: &Path, e: &Entry, primary: bool) -> Space {
         icon: f.icon.map(|i| root.join(i)).filter(|p| p.is_file()),
         name: f.name.filter(|n| !n.trim().is_empty()),
         available: is_library(&root),
+        location: location_of(&root, icloud_root().as_deref()),
         primary,
         root,
     }
@@ -294,12 +325,80 @@ fn find(home: &Path, id: &str) -> Result<Space> {
     list_in(home).into_iter().find(|s| s.id == id).context("找不到这个空间")
 }
 
+/// Move a space's folder to `to` (inside the app's own folders: `<home>/spaces/`
+/// or the app's iCloud folder). `mover` does the actual move (the system's
+/// iCloud move on Apple platforms); the device's list is updated only after
+/// it succeeds. The space at the home itself cannot move: the home also holds
+/// the app's own files and the other spaces.
+pub fn move_space(id: &str, to: Location, mover: &dyn Fn(&Path, &Path) -> Result<()>) -> Result<PathBuf> {
+    move_in(&home(), icloud_root().as_deref(), id, to, mover)
+}
+
+pub fn move_in(home: &Path, icloud: Option<&Path>, id: &str, to: Location, mover: &dyn Fn(&Path, &Path) -> Result<()>) -> Result<PathBuf> {
+    let r = registry(home);
+    let entry = r.spaces.iter().find(|e| e.id == id).context("找不到这个空间")?.clone();
+    anyhow::ensure!(!entry.path.is_empty(), "这个空间就是应用的主文件夹，不能移动");
+    let from = resolve(home, &entry.path);
+    anyhow::ensure!(is_library(&from), "找不到这个空间的文件夹");
+    anyhow::ensure!(location_of(&from, icloud) != to, "这个空间已经在那里了");
+    let base = match to {
+        Location::Local => home.join("spaces"),
+        Location::ICloud => icloud.context("iCloud 不可用：请在系统设置里登录 iCloud 并打开 iCloud 云盘")?.to_path_buf(),
+    };
+    crate::file_io::create_dir_all(&base)?;
+    let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "space".into());
+    let mut dest = base.join(&name);
+    let mut n = 2;
+    while dest.exists() { dest = base.join(format!("{name} {n}")); n += 1; }
+    mover(&from, &dest)?;
+    anyhow::ensure!(is_library(&dest), "移动后找不到文档库，原文件夹没有改动");
+    let mut r = load_registry(home);
+    if let Some(e) = r.spaces.iter_mut().find(|e| e.id == id) {
+        e.path = match dest.strip_prefix(icloud.unwrap_or(Path::new("/nonexistent"))) {
+            Ok(rest) if to == Location::ICloud => format!("{ICLOUD_PREFIX}{}", rest.to_string_lossy()),
+            _ => match dest.strip_prefix(home) { Ok(rel) => rel.to_string_lossy().into_owned(), Err(_) => dest.to_string_lossy().into_owned() },
+        };
+    }
+    save_registry(home, &r)?;
+    Ok(dest)
+}
+
 /// Nothing to open: the first-space setup is due.
 pub fn needs_setup() -> bool { current().is_none() }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A space moves into the app's iCloud folder and back; the list follows it,
+    /// the documents travel with it, and the space at the home cannot move.
+    #[test]
+    fn moves_between_local_and_icloud() {
+        let (home, cloud) = (temp(), temp());
+        set_icloud_root(Some(cloud.clone()));
+        create_in(&home, "第一个", None, &|_| Ok(())).unwrap();
+        let s = create_in(&home, "旅行", None, &|_| Ok(())).unwrap();
+        std::fs::write(s.root.join("docs").join("note.txt"), b"hi").unwrap();
+        let mv = |a: &Path, b: &Path| -> Result<()> { std::fs::rename(a, b)?; Ok(()) };
+        let first = list_in(&home)[0].id.clone();
+        assert!(move_in(&home, Some(&cloud), &first, Location::ICloud, &mv).is_err());
+        let dest = move_in(&home, Some(&cloud), &s.id, Location::ICloud, &mv).unwrap();
+        assert!(dest.starts_with(&cloud) && !s.root.exists());
+        assert!(load_registry(&home).spaces.iter().any(|e| e.id == s.id && e.path.starts_with(ICLOUD_PREFIX)));
+        let moved = list_in(&home).into_iter().find(|x| x.id == s.id).unwrap();
+        assert!(moved.available && moved.location == Location::ICloud && moved.root == dest);
+        assert_eq!(std::fs::read(dest.join("docs").join("note.txt")).unwrap(), b"hi");
+        assert!(move_in(&home, Some(&cloud), &s.id, Location::ICloud, &mv).is_err());
+        let back = move_in(&home, Some(&cloud), &s.id, Location::Local, &mv).unwrap();
+        assert!(back.starts_with(home.join("spaces")));
+        assert_eq!(list_in(&home).into_iter().find(|x| x.id == s.id).unwrap().location, Location::Local);
+        // A failed move leaves the list as it was.
+        let fail = |_: &Path, _: &Path| -> Result<()> { anyhow::bail!("no") };
+        assert!(move_in(&home, Some(&cloud), &s.id, Location::ICloud, &fail).is_err());
+        assert_eq!(list_in(&home).into_iter().find(|x| x.id == s.id).unwrap().root, back);
+        assert!(move_in(&home, None, &s.id, Location::ICloud, &mv).is_err());
+        set_icloud_root(None);
+    }
 
     fn temp() -> PathBuf {
         let d = std::env::temp_dir().join(format!("qmd-spaces-{}", uuid::Uuid::new_v4()));
