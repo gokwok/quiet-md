@@ -38,6 +38,11 @@ pub fn run() {
         unsafe { std::env::set_var("QUIET_MD_HOME", std::env::temp_dir().join(home)); }
     }
     files::restore_space_bookmarks();
+    // 应用自己的 iCloud 文件夹（iCloud 云盘里的「Quiet.md」）：没登录 iCloud、或这个版本没有 iCloud 的权限时为空，
+    // 「存放位置」里的 iCloud 就用不了。要在打开文档库之前知道：iCloud 里的空间的路径靠它解析。
+    let icloud = spaces::icloud_container();
+    log::info!("iCloud folder: {}", icloud.as_ref().map_or_else(|| "unavailable".to_string(), |p| p.display().to_string()));
+    fdl_core::spaces::set_icloud_root(icloud);
     // 要打开的空间，或者「创建第一个空间」（`space::prepare`）。冒烟测试用一篇固定的样例笔记，不放「开始指南」。
     crate::space::prepare(sample_library());
     crate::logging::write(&format!("library {}", crate::store::Store::root_dir().display()));

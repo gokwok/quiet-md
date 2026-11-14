@@ -6,6 +6,9 @@ use crate::settings::tr;
 use crate::space::{self, name, space_icon};
 use crate::theme::{self, Theme};
 use gpui::{prelude::FluentBuilder, *};
+use fdl_core::spaces::Location;
+use objc2::msg_send;
+use objc2::runtime::{AnyClass, AnyObject};
 
 const ROW_H: f32 = 52.;
 
@@ -18,16 +21,58 @@ pub fn avatar(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> 
         .into_any_element())
 }
 
-/// 设置第一级的页头：大头像，下面「空间名 ⌄」，点名字换空间。
+// 设置页大头像的角度动画：从哪个角度、往哪个角度、什么时候开始。
+thread_local! { static TURN: std::cell::Cell<(f32, f32, Option<std::time::Instant>)> = const { std::cell::Cell::new((super::tilt::ANGLE, super::tilt::ANGLE, None)) }; }
+const TURN_TIME: f32 = 0.34;
+
+/// 头像右下角的脚标（照 Craft 的「Pro」，截屏 2026-11-15 06.11.36 实测）：这个空间存放在哪里。不跟着头像转，一直是正的。
+/// 近黑（32,34,36）的胶囊，22pt 高，没有描边，白色半粗的小字（GPUI 的中等粗细比 Craft 用的系统字细一档，所以用半粗），上下左右都留足空（字只占胶囊高度的一半多一点）。
+/// 深色模式反过来：浅色胶囊、深色字。
+fn location_badge(location: Location) -> Div {
+    let label = match location { Location::ICloud => "iCloud", Location::Local => "Local" };
+    let dark = crate::theme::dark();
+    let (fill, ink) = if dark { (crate::theme::rgbaf(236, 237, 239, 1.), crate::theme::rgbaf(32, 34, 36, 1.)) } else { (crate::theme::rgbaf(32, 34, 36, 1.), crate::theme::rgbaf(250, 250, 250, 1.)) };
+    div().h(px(22.)).px(px(7.5)).flex().items_center().rounded_full().bg(fill)
+        .text_size(px(12.5)).line_height(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(label)
+}
+
+/// 打开换空间的卡片：轻轻一震，头像转正（`settings_head` 里看 `space_menu`）。
+fn open_switcher(w: &mut Workspace, cx: &mut Context<Workspace>) {
+    super::glass::haptic();
+    w.space_menu = true;
+    w.space_query.update(cx, |f, cx| f.set_text("", cx));
+    cx.notify();
+}
+
+/// 设置第一级的页头：大头像（照 Craft 微微斜着立起来），下面「空间名 ⌄」。点头像或名字：头像转正，从底部浮起换空间的卡片；
+/// 卡片收起后头像再斜回去。
 pub fn settings_head(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let Some(s) = space::current(w) else { return div().into_any_element() };
+    let target = if w.space_menu { 0. } else { super::tilt::ANGLE };
+    let now = std::time::Instant::now();
+    let angle = TURN.with(|t| {
+        let (from, to, start) = t.get();
+        let at = |start: Option<std::time::Instant>| start.map_or(1., |s: std::time::Instant| (now - s).as_secs_f32() / TURN_TIME).min(1.);
+        let ease = |k: f32| { let k = 1. - k; 1. - k * k * k };
+        let current = from + (to - from) * ease(at(start));
+        if to != target { t.set((current, target, Some(now))); current }
+        else if at(start) >= 1. { t.set((to, to, None)); to }
+        else { current }
+    });
+    let moving = TURN.with(|t| t.get().2.is_some());
+    // 角度按半度取整：画好的图能重复用。
+    let angle = (angle * 2.).round() / 2.;
     div().w_full().pt(px(8.)).pb(px(20.)).flex().flex_col().items_center().gap(px(12.))
-        .child(space_icon(s, 84.))
+        .child(div().id("settings-space-icon").relative().child(super::tilt::turning(s.icon.as_deref(), &s.id, 84., angle))
+            .child(div().absolute().right(px(-12.)).bottom(px(-2.)).child(location_badge(s.location)))
+            .on_click(cx.listener(|w, _, _, cx| open_switcher(w, cx))))
+        // 转动时一直出帧；绝对定位，不占列里的位置（不然多一道间距，下面的名字会跳）。
+        .when(moving, |d| d.relative().child(canvas(|_, window, _| window.request_animation_frame(), |_, _, _, _| {}).absolute().size_0()))
         .child(div().id("settings-space-name").h(px(32.)).px(px(12.)).flex().items_center().gap(px(6.)).rounded(px(10.)).active(|d| d.bg(Theme::fill_pressed()))
             .text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD)
             .child(div().max_w(px(260.)).truncate().child(name(s)))
             .child(crate::ui::icon("chevron-down", 15., Theme::text_caption()))
-            .on_click(cx.listener(|w, _, _, cx| { w.space_menu = true; w.space_query.update(cx, |f, cx| f.set_text("", cx)); cx.notify(); })))
+            .on_click(cx.listener(|w, _, _, cx| open_switcher(w, cx))))
         .into_any_element()
 }
 
@@ -79,6 +124,75 @@ pub fn switcher(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement
         .child(card)).with_priority(5).into_any_element())
 }
 
+/// 应用自己的 iCloud 文件夹（容器里的 `Documents`，在 iCloud 云盘里显示成应用名的文件夹）。没有就是空：
+/// 没登录 iCloud、关了 iCloud 云盘，或者签名里没有 iCloud 容器的权限。
+pub fn icloud_container() -> Option<std::path::PathBuf> {
+    unsafe {
+        let fm: *mut AnyObject = msg_send![AnyClass::get(c"NSFileManager")?, defaultManager];
+        let url: *mut AnyObject = msg_send![fm, URLForUbiquityContainerIdentifier: std::ptr::null_mut::<AnyObject>()];
+        if url.is_null() { return None; }
+        let path: *mut AnyObject = msg_send![url, path];
+        if path.is_null() { return None; }
+        let utf8: *const std::ffi::c_char = msg_send![path, UTF8String];
+        if utf8.is_null() { return None; }
+        Some(std::path::PathBuf::from(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()).join("Documents"))
+    }
+}
+
+/// 系统的 iCloud 搬家（`setUbiquitous:itemAtURL:destinationURL:error:`）：本机 → iCloud 是交给 iCloud 管，反过来是
+/// 拿回本机。整个文件夹一次搬过去，不是自己复制再删。系统要求不在主线程上调用。
+fn system_move(from: &std::path::Path, to: &std::path::Path, ubiquitous: bool) -> anyhow::Result<()> {
+    unsafe {
+        let url = |p: &std::path::Path| -> *mut AnyObject {
+            let s = std::ffi::CString::new(p.to_string_lossy().as_bytes()).unwrap_or_default();
+            let ns: *mut AnyObject = msg_send![AnyClass::get(c"NSString").unwrap(), stringWithUTF8String: s.as_ptr()];
+            msg_send![AnyClass::get(c"NSURL").unwrap(), fileURLWithPath: ns]
+        };
+        let fm: *mut AnyObject = msg_send![AnyClass::get(c"NSFileManager").unwrap(), new];
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let ok: bool = msg_send![fm, setUbiquitous: ubiquitous, itemAtURL: url(from), destinationURL: url(to), error: &mut error];
+        let _: () = msg_send![fm, release];
+        if ok { return Ok(()); }
+        let reason = if error.is_null() { String::new() } else {
+            let d: *mut AnyObject = msg_send![error, localizedDescription];
+            let u: *const std::ffi::c_char = if d.is_null() { std::ptr::null() } else { msg_send![d, UTF8String] };
+            if u.is_null() { String::new() } else { std::ffi::CStr::from_ptr(u).to_string_lossy().into_owned() }
+        };
+        anyhow::bail!("{}", if reason.is_empty() { tr("系统没能移动这个文件夹", "The system could not move the folder").to_string() } else { reason })
+    }
+}
+
+thread_local! { static MOVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// 把空间搬到另一个存放位置：先存好打开的文档，在后台让系统搬，搬完重新打开这个空间（它若正打开着）。
+fn move_space(w: &mut Workspace, id: String, to: Location, cx: &mut Context<Workspace>) {
+    if MOVING.with(|m| m.get()) { return; }
+    if !w.flush(cx) { w.show_toast_kind(crate::ui::ToastKind::Error, tr("有文档没能保存，处理好再移动空间", "A document could not be saved. Resolve it before moving the space."), cx); return; }
+    MOVING.with(|m| m.set(true));
+    super::glass::haptic();
+    cx.notify();
+    let task = cx.background_executor().spawn(async move {
+        let mover = |a: &std::path::Path, b: &std::path::Path| system_move(a, b, to == Location::ICloud);
+        fdl_core::spaces::move_space(&id, to, &mover).map(|_| id)
+    });
+    cx.spawn(async move |this, cx| {
+        let result = task.await;
+        let _ = this.update(cx, |w, cx| {
+            MOVING.with(|m| m.set(false));
+            match result {
+                Ok(id) => {
+                    let open = space::current(w).is_some_and(|s| s.id == id);
+                    w.reload_spaces(cx);
+                    w.show_toast(if to == Location::ICloud { tr("空间已移到 iCloud", "The space is now in iCloud") } else { tr("空间已移到本机", "The space is now on this device") }, cx);
+                    // 正打开着：在新位置重新打开（文档库的路径变了）。
+                    if open { cx.defer(move |cx| { space::switch(id, cx); }); }
+                }
+                Err(e) => w.show_toast_kind(crate::ui::ToastKind::Error, &crate::settings::diagnostic(&e.to_string()), cx),
+            }
+        });
+    }).detach();
+}
+
 /// 设置 › 空间设置（照 Craft）：图标带相机钮，名称，危险区里的删除（第一个空间没有）。
 pub fn space_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let Some(s) = space::current(w).cloned() else { return div().into_any_element() };
@@ -92,6 +206,7 @@ pub fn space_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         .child(card().px(px(16.)).py(px(10.)).flex().flex_col().gap(px(2.))
             .child(div().text_size(px(13.)).text_color(Theme::text_caption()).child(tr("空间名称", "Name")))
             .child(div().h(px(28.)).flex().items_center().child(w.space_name.clone())))
+        .child(storage(&s, cx))
         .when(s.icon.is_some(), |d| { let id = s.id.clone(); d.child(card().child(div().id("space-icon-reset").h(px(ROW_H)).px(px(16.)).flex().items_center().text_size(px(16.)).text_color(Theme::primary())
             .active(|s| s.bg(Theme::fill_pressed())).child(tr("恢复默认图标", "Use the default icon"))
             .on_click(cx.listener(move |w, _, _, cx| { let _ = fdl_core::spaces::set_icon(&id, None); w.reload_spaces(cx); })))) })
@@ -102,6 +217,32 @@ pub fn space_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                 .child(div().text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(tr("删除后，这个空间和里面的所有文档都无法恢复。", "Deleting the space removes it and every document in it for good.")))
                 .on_click(cx.listener(move |w, _, _, cx| { w.confirm = Some(Confirm::RemoveSpace { id: del.clone(), name: label.clone() }); cx.notify(); })))))
         .into_any_element()
+}
+
+/// 「存放位置」：这个空间在本机还是 iCloud，下面一行把它移到另一边。两边都在应用自己的文件夹里。
+fn storage(s: &fdl_core::spaces::Space, cx: &mut Context<Workspace>) -> Div {
+    let card = || div().w_full().rounded(px(14.)).bg(Theme::fill_hover()).overflow_hidden();
+    let here = s.location;
+    let label = match here { Location::ICloud => "iCloud", Location::Local => tr("本机", "On this device") };
+    let to = if here == Location::ICloud { Location::Local } else { Location::ICloud };
+    // 不能移的原因（空就是能移）。
+    let blocked = if s.root == fdl_core::spaces::home() { Some(tr("这是应用主文件夹里的第一个空间，暂不能移动。", "This is the first space in the app's main folder and can't be moved yet.")) }
+        else if to == Location::ICloud && fdl_core::spaces::icloud_root().is_none() { Some(tr("iCloud 不可用：请登录 iCloud 并打开 iCloud 云盘。", "iCloud is unavailable. Sign in to iCloud and turn on iCloud Drive.")) }
+        else { None };
+    let moving = MOVING.with(|m| m.get());
+    let action = if moving { tr("正在移动…", "Moving…") } else if to == Location::ICloud { tr("移到 iCloud", "Move to iCloud") } else { tr("移到本机", "Move to this device") };
+    let id = s.id.clone();
+    div().flex().flex_col().gap(px(8.))
+        .child(card()
+            .child(div().h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(16.))
+                .child(crate::ui::icon("storage", 18., Theme::icon())).child(div().flex_1().child(tr("存放位置", "Location")))
+                .child(div().text_color(Theme::text_caption()).child(label)))
+            .child(div().ml(px(46.)).h(px(1.)).bg(crate::ui::list_line()))
+            .child(div().id("space-move").h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(16.))
+                .text_color(if blocked.is_some() || moving { Theme::text_disabled() } else { Theme::primary() })
+                .child(crate::ui::icon("folder-input", 18., if blocked.is_some() || moving { Theme::text_disabled() } else { Theme::primary() })).child(action)
+                .when(blocked.is_none() && !moving, |d| d.active(|s| s.bg(Theme::fill_pressed())).on_click(cx.listener(move |w, _, _, cx| move_space(w, id.clone(), to, cx))))))
+        .children(blocked.map(|why| div().px(px(4.)).text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(why)))
 }
 
 /// 名字输入框外面那一圈。

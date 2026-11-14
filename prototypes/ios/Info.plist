@@ -34,5 +34,15 @@
         </dict>
     </dict>
     <key>LSSupportsOpeningDocumentsInPlace</key><true/>
+    <!-- 应用自己的 iCloud 文件夹在 iCloud 云盘和「文件」里显示成「Quiet.md」：「存放位置」为 iCloud 的空间放在这里。 -->
+    <key>NSUbiquitousContainers</key>
+    <dict>
+        <key>iCloud.com.s1dashu.quietmd</key>
+        <dict>
+            <key>NSUbiquitousContainerIsDocumentScopePublic</key><true/>
+            <key>NSUbiquitousContainerName</key><string>Quiet.md</string>
+            <key>NSUbiquitousContainerSupportedFolderLevels</key><string>Any</string>
+        </dict>
+    </dict>
 </dict>
 </plist>
