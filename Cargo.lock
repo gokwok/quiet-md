@@ -4253,6 +4253,7 @@ dependencies = [
  "anyhow",
  "async-lock",
  "base64",
+ "block",
  "core-foundation 0.10.0",
  "core-graphics 0.24.0",
  "dirs 7.0.0",

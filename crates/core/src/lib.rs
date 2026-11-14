@@ -13,3 +13,5 @@ pub mod paste;
 pub mod spaces;
 pub mod store;
 pub mod time;
+
+pub mod file_io;

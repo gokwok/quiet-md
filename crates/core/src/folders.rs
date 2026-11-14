@@ -3,13 +3,13 @@ use super::*;
 impl Store {
     /// Independent handle for background tree writes; begin_write reloads under the library lock.
     pub fn tree_writer(&self) -> Self {
-        Self { file_changes: vec![], root: self.root.clone(), index: self.index.clone(), trash: HashMap::new(),
+        Self { v4_state: std::cell::RefCell::new(self.v4_state.borrow().clone()), file_changes: vec![], root: self.root.clone(), index: self.index.clone(), trash: HashMap::new(),
             loaded: Default::default(), copied: Default::default(), parsed: HashMap::new(), warnings: vec![] }
     }
 
     pub(super) fn migrate_folders(&mut self) -> Result<()> {
         let _lock = self.begin_write()?;
-        let marker: FormatMarker = serde_json::from_slice(&std::fs::read(self.root.join("format.json"))?)?;
+        let marker: FormatMarker = serde_json::from_slice(&crate::file_io::read(self.root.join("format.json"))?)?;
         if marker.format < BASE_FORMAT {
             let backup = self.root.join("index.before-folders.json");
             if !backup.exists() { write_atomic(&backup, &serde_json::to_vec_pretty(&self.index)?)?; }

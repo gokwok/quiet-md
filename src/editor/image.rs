@@ -279,6 +279,10 @@ impl ImageCache for DocImages {
             if s.image.is_none() && !s.waiters.contains(&window.current_view()) { s.waiters.push(window.current_view()); }
             return s.image.clone();
         }
+        if let Resource::Path(path) = r && matches!(fdl_core::file_io::download_state(path), fdl_core::file_io::DownloadState::Waiting | fdl_core::file_io::DownloadState::Downloading) {
+            let _ = fdl_core::file_io::request_download(path);
+            return None;
+        }
         let now = Instant::now();
         let generation = Arc::new(());
         self.0.borrow_mut().insert(r.clone(), Slot { image: None, used: now, windows: HashMap::from([(id, now)]), generation: generation.clone(), waiters: vec![window.current_view()] });
@@ -1956,7 +1960,7 @@ pub(super) fn image_block_from(bytes: &[u8], ext: &str) -> Result<Block, &'stati
 fn image_block_named(bytes: &[u8], ext: &str, name: Option<&str>) -> Result<Block, &'static str> {
     let path = store_image_named(bytes, ext, name)?;
     let mut b = Block::new(
-        BlockKind::Image { src_kind: "src".into(), src: path.to_string_lossy().to_string(), width: None, height: None, caption: None, crop: None },
+        BlockKind::Image { src_kind: "src".into(), src: path.to_string_lossy().replace('\\', "/"), width: None, height: None, caption: None, crop: None },
         RichText::default(),
     );
     b.align = Align::Center;
@@ -1986,9 +1990,9 @@ fn store_image_named(bytes: &[u8], ext: &str, name: Option<&str>) -> Result<Path
     let name: Option<String> = name.map(|n| n.chars().map(|c| if matches!(c, '/' | '\\' | ':') || c.is_control() { '_' } else { c }).take(80).collect::<String>())
         .map(|n| n.trim().trim_start_matches('.').to_string()).filter(|n| !n.is_empty());
     let file = match name { Some(n) => format!("{}-{n}.{ext}", &id[..8]), None => format!("{id}.{ext}") };
-    let path = Store::assets_dir().join(file);
-    std::fs::write(&path, bytes).map_err(|_| BAD_DIMS)?;
-    Ok(path)
+    let path = Store::assets_dir().join(&file);
+    crate::store::write_file(&path, bytes).map_err(|_| BAD_DIMS)?;
+    Ok(PathBuf::from("assets").join(file))
 }
 
 fn image_block_from_file(p: &Path) -> Result<Block, &'static str> {

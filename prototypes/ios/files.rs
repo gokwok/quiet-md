@@ -150,7 +150,12 @@ fn finish(urls: Option<*mut AnyObject>) {
                 (0..n).filter_map(|i| {
                     let url: *mut AnyObject = msg_send![urls, objectAtIndex: i];
                     // 文件夹没有拷进沙盒，要先向系统要到访问权；之后一直留着，导入是异步读的。
-                    if folders { let _: bool = msg_send![url, startAccessingSecurityScopedResource]; }
+                    if folders {
+                        let _: bool = msg_send![url, startAccessingSecurityScopedResource];
+                        let retained: *mut AnyObject = msg_send![url, retain];
+                        FOLDER_SCOPES.with(|s| s.borrow_mut().push(retained));
+                        if let Some(path) = url_path(url) { FOLDER_BOOKMARKS.with(|b| b.borrow_mut().insert(path, capture_folder(url).map_err(|e| e.to_string()))); }
+                    }
                     let path: *mut AnyObject = msg_send![url, path];
                     if path.is_null() { return None; }
                     let utf8: *const std::ffi::c_char = msg_send![path, UTF8String];
@@ -324,4 +329,64 @@ pub fn export(path: &Path) {
         present(picker)
     };
     if shown { PENDING.with(|p| *p.borrow_mut() = Some(Pending::Export(dir.to_path_buf()))); } else { let _ = std::fs::remove_dir_all(dir); }
+}
+
+// The picker grants folder access for this process; bookmarks restore it next launch.
+thread_local! {
+    static FOLDER_BOOKMARKS: RefCell<std::collections::HashMap<PathBuf, Result<String, String>>> = RefCell::default();
+    static FOLDER_SCOPES: RefCell<Vec<*mut AnyObject>> = const { RefCell::new(Vec::new()) };
+}
+fn bookmark_file() -> PathBuf {
+    std::env::var_os("QUIET_MD_LOCAL_DATA").map(PathBuf::from)
+        .unwrap_or_else(|| dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("quiet-md")).join("space-bookmarks.json")
+}
+
+unsafe fn capture_folder(url: *mut AnyObject) -> anyhow::Result<String> {
+    use base64::Engine;
+    unsafe {
+        let mut failure: *mut AnyObject = std::ptr::null_mut();
+        let data: *mut AnyObject = msg_send![url, bookmarkDataWithOptions: 0usize, includingResourceValuesForKeys: std::ptr::null_mut::<AnyObject>(), relativeToURL: std::ptr::null_mut::<AnyObject>(), error: &mut failure];
+        anyhow::ensure!(!data.is_null(), "无法保存文件夹访问权限，请重新选择文件夹");
+        let len: usize = msg_send![data, length]; let bytes: *const u8 = msg_send![data, bytes];
+        anyhow::ensure!(!bytes.is_null(), "文件夹书签为空");
+        Ok(base64::engine::general_purpose::STANDARD.encode(std::slice::from_raw_parts(bytes, len)))
+    }
+}
+
+pub fn remember_space(id: &str, root: &Path) -> anyhow::Result<()> {
+    let Some(bookmark) = FOLDER_BOOKMARKS.with(|b| b.borrow().get(root).cloned()) else { return Ok(()); };
+    let bookmark = bookmark.map_err(anyhow::Error::msg)?;
+    let file = bookmark_file();
+    std::fs::create_dir_all(file.parent().unwrap())?;
+    let mut all: std::collections::HashMap<String, String> = match std::fs::read(&file) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(e.into()),
+    };
+    all.insert(id.to_string(), bookmark);
+    crate::store::write_file(&file, &serde_json::to_vec_pretty(&all)?)
+}
+
+pub fn restore_space_bookmarks() {
+    use base64::Engine;
+    let file = bookmark_file();
+    let Some(mut all) = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice::<std::collections::HashMap<String, String>>(&b).ok()) else { return; };
+    let registered: std::collections::HashSet<_> = fdl_core::spaces::list().into_iter().map(|s| s.id).collect();
+    let mut changed = false;
+    for (id, bookmark) in &mut all {
+        if !registered.contains(id) { continue; }
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&*bookmark) else { continue; };
+        unsafe {
+            let data: *mut AnyObject = msg_send![objc2::class!(NSData), dataWithBytes: bytes.as_ptr(), length: bytes.len()];
+            let mut stale = objc2::runtime::Bool::NO; let mut failure: *mut AnyObject = std::ptr::null_mut();
+            let url: *mut AnyObject = msg_send![objc2::class!(NSURL), URLByResolvingBookmarkData: data, options: 256usize, relativeToURL: std::ptr::null_mut::<AnyObject>(), bookmarkDataIsStale: &mut stale, error: &mut failure];
+            if url.is_null() { continue; }
+            let _: bool = msg_send![url, startAccessingSecurityScopedResource];
+            let retained: *mut AnyObject = msg_send![url, retain];
+            FOLDER_SCOPES.with(|s| s.borrow_mut().push(retained));
+            if let Some(path) = url_path(url) { let _ = fdl_core::spaces::relocate(id, &path); }
+            if stale.as_bool() && let Ok(fresh) = capture_folder(url) { *bookmark = fresh; changed = true; }
+        }
+    }
+    if changed { let _ = serde_json::to_vec_pretty(&all).map(|bytes| crate::store::write_file(&file, &bytes)); }
 }

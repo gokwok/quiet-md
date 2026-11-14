@@ -96,6 +96,11 @@ fn entry_icon(w: &Workspace, e: &Entry) -> AnyElement {
     }
 }
 
+/// iCloud 文件夹空间里还没下载（或正在下载）的文档：行尾一行小字（`space_sync::download_label`）。
+fn download_label(e: &Entry) -> Option<Div> {
+    crate::space_sync::download_label(&e.download).map(|label| div().flex_none().text_size(px(12.)).text_color(Theme::text_caption()).child(label))
+}
+
 /// 文件夹那一行，展开着就接着它里面的东西（文件夹也能再展开），`depth` 是缩进的层数。
 fn folder_rows(w: &Workspace, e: &Entry, depth: usize, out: &mut Vec<(AnyElement, usize)>, cx: &mut Context<Workspace>) {
     let open_id = e.id.clone();
@@ -111,7 +116,7 @@ fn folder_rows(w: &Workspace, e: &Entry, depth: usize, out: &mut Vec<(AnyElement
                 .child(crate::ui::icon(if open { "chevron-down" } else { "chevron-right" }, 14., Theme::text_caption()))
                 .on_click(cx.listener(move |_, _, _, cx| { cx.stop_propagation(); toggle(&flip); cx.notify(); })));
     }
-    let r = with_menu(w, r, e, cx).pl(px(16. + depth as f32 * INDENT))
+    let r = with_menu(w, r.children(download_label(e)), e, cx).pl(px(16. + depth as f32 * INDENT))
         .on_click(cx.listener(move |w, _, window, cx| w.open(&open_id, window, cx)));
     out.push((r.into_any_element(), depth));
     if e.meta.folder.is_some() && expanded(&e.id) {
@@ -154,7 +159,8 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     });
     let open = |e: &Entry, key: &str, count: Option<usize>, cx: &mut Context<Workspace>| {
         let id = e.id.clone();
-        with_menu(w, row(SharedString::from(format!("hub-{key}-{}", e.id)), entry_icon(w, e), display_title(&e.title), count, true), e, cx)
+        with_menu(w, row(SharedString::from(format!("hub-{key}-{}", e.id)), entry_icon(w, e), display_title(&e.title), count, true)
+            .children(download_label(e)), e, cx)
             .on_click(cx.listener(move |w, _, window, cx| w.open(&id, window, cx))).into_any_element()
     };
 

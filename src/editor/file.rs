@@ -283,16 +283,16 @@ fn file_block_from_path(p: &Path) -> Option<Block> {
     let name = p.file_name()?.to_string_lossy().to_string();
     let size = std::fs::metadata(p).ok().filter(|m| m.is_file())?.len();
     let dir = Store::assets_dir().join("files").join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir).ok()?;
+    fdl_core::file_io::create_dir_all(&dir).ok()?;
     let dest = dir.join(&name);
-    std::fs::copy(p, &dest).ok()?;
+    fdl_core::file_io::copy(p, &dest).ok()?;
     let view = match preview_of(&name) {
         Some(Kind::Audio) => FileView::Preview,
         Some(Kind::Video) if size < VIDEO_PREVIEW_MAX => FileView::Preview,
         Some(Kind::Pdf | Kind::Word | Kind::Excel | Kind::Ppt) if size < DOC_PREVIEW_MAX => FileView::Preview,
         _ => FileView::Card,
     };
-    let f = FileBlock { src_kind: "path".into(), src: dest.to_string_lossy().to_string(), name, view };
+    let f = FileBlock { src_kind: "path".into(), src: dest.strip_prefix(Store::root_dir()).ok()?.to_string_lossy().replace('\\', "/"), name, view };
     Some(Block::new(BlockKind::File(f), RichText::default()))
 }
 

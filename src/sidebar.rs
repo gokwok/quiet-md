@@ -672,6 +672,7 @@ impl Workspace {
                 })
             })
             .child(title)
+            .children(crate::space_sync::download_label(&e.download).map(|label| div().ml(px(4.)).text_size(px(10.)).text_color(Theme::text_caption()).child(label)))
             .when(!renaming && folder && batch.is_none() && key == "doc", |d| d.child(self.add_button(e, key, true, cx)).child(self.add_button(e, key, false, cx)))
             .when(!renaming && batch.is_none(), |d| d.child(self.more_button(e, key, cx).when(key == "doc", |d| d.ml(px(2.)))))
     }

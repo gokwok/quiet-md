@@ -372,7 +372,7 @@ impl Workspace {
             // The system switched between light and dark (or the app's own look changed).
             cx.observe_window_appearance(window, |this, _, cx| if crate::settings::sync_dark(cx) { crate::settings::refresh_all(this, cx); }),
             cx.observe_window_activation(window, |this, window, cx| {
-                if window.is_window_active() { if let Some(id) = &this.current { crate::quick_note::used(id, cx); } this.entries = this.store.list(); this.sort(); crate::update::check_if_stale(cx); cx.notify(); }
+                if window.is_window_active() { if let Some(id) = &this.current { crate::quick_note::used(id, cx); } this.entries = this.store.list(); this.sort(); crate::update::check_if_stale(cx); crate::space_sync::start(cx); cx.notify(); }
                 else { this.cancel_home_drag(cx); this.end_folder_drag(true, cx); this.cancel_shortcut_recording(cx); this.flush(cx); }
             }),
             cx.subscribe_in(&search, window, |this, _, ev: &TextFieldEvent, window, cx| {
@@ -510,6 +510,15 @@ impl Workspace {
         ws
     }
 
+    pub(crate) fn has_unsaved_changes(&self) -> bool { self.unsaved }
+
+    pub(crate) fn receive_external_document(&mut self, doc: &crate::model::Document, cx: &mut Context<Self>) {
+        if self.unsaved { return; }
+        if let Some(ed) = &self.editor { ed.update(cx, |e, cx| e.receive_document(&crate::editor::core::Core::new(doc.clone()), cx)); }
+        self.save_task = None; self.dirty_since = None; self.status = SaveStatus::Idle;
+        cx.notify();
+    }
+
     /// Most recently modified first.
     pub(crate) fn sort(&mut self) {
         self.reapply_pending_tree_moves();
@@ -527,6 +536,9 @@ impl Workspace {
     /// Show `id`; false when it could not be opened (or the open document
     /// could not be saved first, see [`Self::save_before`]).
     pub fn try_open(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(label) = crate::space_sync::download_label(&self.store.download_state(id)) {
+            self.show_toast(label, cx); return false;
+        }
         if self.entries.iter().any(|e| e.id == id && e.meta.folder.is_some()) { return self.open_folder(id, window, cx); }
         if self.view != View::Doc {
             self.view = View::Doc;

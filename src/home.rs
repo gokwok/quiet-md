@@ -463,7 +463,10 @@ impl Workspace {
         v
     }
 
+    pub(crate) fn invalidate_previews(&self) { self.home.thumbs.borrow_mut().clear(); }
+
     fn thumb(&self, e: &Entry) -> Thumb {
+        if !e.download.ready() { return Rc::new(ThumbContent { blocks: vec![], eqnos: HashMap::new(), cover: None }); }
         use std::hash::{Hash, Hasher};
         // A child-page list shows the other pages in the document's folder, as in
         // the open document (`sync_sub_pages`).
@@ -799,6 +802,7 @@ impl Workspace {
                         .when_some(check, |d, c| d.child(c.mr(px(12.))))
                         .child(entry_icon(e))
                         .child(div().min_w_0().text_size(px(15.)).line_height(px(22.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(display_title(&e.title))))
+                        .children(crate::space_sync::download_label(&e.download).map(|label| div().ml(px(8.)).text_size(px(12.)).text_color(Theme::text_caption()).child(label)))
                         .when(e.meta.pinned, |d| d.child(icon("pin-filled", 14., Theme::pinned()).ml(px(6.)))),
                 );
             for c in &cols {
@@ -852,6 +856,11 @@ impl Workspace {
     /// A document's first page in miniature: a card's face, and the papers
     /// in a folder that show one (`home_folder.rs`). `pad`: its margin.
     pub(crate) fn thumb_page(&self, e: &Entry, pad: f32) -> Div {
+        if let Some(label) = crate::space_sync::download_label(&e.download) {
+            return div().size_full().p(px(pad)).flex().flex_col().gap(px(12.))
+                .child(div().text_size(px(14.)).font_weight(FontWeight::BOLD).child(display_title(&e.title)))
+                .child(div().text_size(px(12.)).text_color(Theme::text_caption()).child(label));
+        }
         let thumb = self.thumb(e);
         if thumb.blocks.is_empty() && e.title.trim().is_empty() {
                 div()

@@ -147,8 +147,14 @@ pub(crate) fn create_from_form(cx: &mut App) {
         let f = if first { w.setup.as_mut() } else { w.space_form.as_mut() }?;
         let typed = f.name.read(cx).text.trim().to_string();
         let name = if typed.is_empty() { default_name().to_string() } else { typed };
-        let seed = |root: &Path| crate::guides::initialize(root);
-        let made = if first { spaces::create_with(&name, f.folder.as_deref(), &seed) } else { spaces::create(&name, f.folder.as_deref()) };
+        let seed = |root: &Path| if first { crate::guides::initialize(root) } else { Ok(()) };
+        let register = |_id: &str, _root: &Path| {
+            #[cfg(target_os = "ios")]
+            { crate::ios::files::remember_space(_id, _root) }
+            #[cfg(not(target_os = "ios"))]
+            { Ok(()) }
+        };
+        let made = spaces::create_with_registration(&name, f.folder.as_deref(), &seed, &register);
         match made {
             Ok(space) => {
                 if let Some(p) = f.icon.clone() && let Ok((bytes, ext)) = read_icon(&p) { let _ = spaces::set_icon(&space.id, Some((&bytes, &ext))); }
@@ -177,10 +183,12 @@ pub fn switch(id: String, cx: &mut App) -> bool {
         Ok(s) => s,
         Err(e) => { tell(crate::localized_format!("无法打开这个空间：{}", "Could not open this space: {}", crate::settings::diagnostic(&e.to_string())), cx); return false; }
     };
-    let _ = spaces::set_current(&id);
+    let persisted_id = spaces::list().into_iter().find(|s| s.root == space.root).map(|s| s.id).unwrap_or(id);
+    let _ = spaces::set_current(&persisted_id);
     crate::store::set_root(space.root.clone());
     if SETUP.swap(false, Ordering::Relaxed) { let _ = std::fs::remove_dir_all(placeholder_root()); }
     cx.global::<SharedStore>().replace(store);
+    crate::space_sync::start(cx);
     for h in handles {
         let _ = h.update(cx, |w, window, cx| {
             if w.quick_note { window.remove_window(); return; }
@@ -262,7 +270,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn form_mut(&mut self) -> Option<&mut SpaceForm> { if self.setup.is_some() { self.setup.as_mut() } else { self.space_form.as_mut() } }
+    pub(crate) fn form_mut(&mut self) -> Option<&mut SpaceForm> { if self.setup.is_some() { self.setup.as_mut() } else { self.space_form.as_mut() } }
 
     pub(crate) fn pick_form_icon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pick = pick_image(cx);
@@ -275,7 +283,7 @@ impl Workspace {
         }).detach();
     }
 
-    fn pick_form_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn pick_form_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pick = pick_folder(cx);
         cx.spawn_in(window, async move |this, cx| {
             let Some(p) = pick.await else { return };
@@ -310,7 +318,7 @@ impl Workspace {
         let home = crate::store::Store::home_dir();
         let here = if cfg!(target_os = "macos") { tr("这台 Mac 上", "On this Mac") } else { tr("这台电脑上", "On this computer") };
         let picked = f.folder.as_ref().map(|p| p.display().to_string())
-            .unwrap_or_else(|| tr("空文件夹，或已有的 Quiet.md 文档库。放在同步盘里时，同一时间只在一台设备上使用。", "An empty folder or an existing Quiet.md library. In a synced folder, use it on one device at a time.").to_string());
+            .unwrap_or_else(|| tr("选择 iCloud Drive 中的文件夹即可跨设备同步，也可以选择本机文件夹。", "Choose a folder in iCloud Drive to sync between devices, or choose a local folder.").to_string());
         div().w_full().flex().flex_col().gap(px(16.))
             .child(div().w_full().flex().items_center().gap(px(14.))
                 .child(div().id("space-form-icon").relative().cursor_pointer().child(icon_el(f.icon.as_deref(), "new", 52.))

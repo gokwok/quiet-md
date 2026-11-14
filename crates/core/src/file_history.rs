@@ -76,7 +76,7 @@ impl Store {
         if self.is_markdown(id) { return Ok(()); }
         let mut expected = docxml::parse(previous)?;
         expected.title = crate::model::RichText::plain(title);
-        let disk = std::fs::read_to_string(self.path(id))?;
+        let disk = crate::file_io::read_to_string(self.path(id))?;
         // Accept only our title change, never unrelated edits from another instance.
         if docxml::serialize(&expected) == docxml::serialize(&docxml::parse(&disk)?) { loaded.insert(id.to_string(), disk); }
         Ok(())
@@ -115,7 +115,7 @@ impl Store {
                     let mut root = None;
                     while let Some(p) = ancestor.filter(|p| deleted.contains(*p)) { root = Some(p.to_string()); ancestor = self.index.get(p).and_then(|m| m.parent.as_deref()); }
                     if meta.folder.is_none() {
-                        let bytes = std::fs::read(self.path(&c.id))?;
+                        let bytes = crate::file_io::read(self.path(&c.id))?;
                         files.push((self.trash_path(&c.id), None, Some(bytes.clone())));
                         files.push((self.path(&c.id), Some(bytes), None));
                     }
@@ -125,7 +125,7 @@ impl Store {
                     let saved = trash.remove(&c.id).ok_or_else(|| anyhow::anyhow!("恢复内容已不在回收站，无法重做或撤销"))?;
                     if !target.folder {
                         anyhow::ensure!(!self.path(&c.id).try_exists()?, "目标文档已存在，未覆盖");
-                        let bytes = std::fs::read(self.trash_path(&c.id))?;
+                        let bytes = crate::file_io::read(self.trash_path(&c.id))?;
                         files.push((self.path(&c.id), None, Some(bytes.clone())));
                         files.push((self.trash_path(&c.id), Some(bytes), None));
                     }
@@ -140,7 +140,7 @@ impl Store {
                         if to.folder { m.folder = Some(to.title.clone()); }
                         else if m.markdown { m.name = Some(to.title.clone()); }
                         else {
-                            let path = self.path(&c.id); let bytes = std::fs::read(&path)?;
+                            let path = self.path(&c.id); let bytes = crate::file_io::read(&path)?;
                             let mut doc = docxml::parse(std::str::from_utf8(&bytes)?)?;
                             doc.title = crate::model::RichText::plain(&to.title);
                             files.push((path, Some(bytes), Some(docxml::serialize(&doc).into_bytes())));
@@ -164,28 +164,45 @@ impl Store {
                 parent = m.parent.as_deref();
             }
         }
-        std::fs::create_dir_all(self.trash_dir())?;
+        crate::file_io::create_dir_all(self.trash_dir())?;
+        let mut applied = vec![];
+        let replace = |path: &std::path::Path, expected: Option<&[u8]>, bytes: Option<&[u8]>| -> Result<()> {
+            crate::file_io::with_write(path, |p| {
+                let current = match crate::file_io::read(p) { Ok(b) => Some(b), Err(e) if e.kind() == std::io::ErrorKind::NotFound => None, Err(e) => return Err(e.into()) };
+                anyhow::ensure!(current.as_deref() == expected, "文件已在别处修改，未覆盖：{}", path.display());
+                match bytes { Some(b) => write_atomic(p, b), None => { crate::file_io::remove_file(p)?; Ok(()) } }
+            })
+        };
         let result = (|| -> Result<()> {
             // Copy destinations first. A crash may leave a duplicate, never lose both copies.
-            for (path, _, bytes) in &files { if let Some(bytes) = bytes { write_atomic(path, bytes)?; } }
-            save_json(&self.root.join("trash/index.json"), &trash)?;
-            save_json(&self.root.join("index.json"), &index)?;
-            for (path, _, bytes) in &files { if bytes.is_none() { std::fs::remove_file(path)?; } }
+            for (i, (path, before, bytes)) in files.iter().enumerate() {
+                if let Some(bytes) = bytes { replace(path, before.as_deref(), Some(bytes))?; applied.push(i); }
+            }
+            self.write_trash(&trash)?;
+            self.write_index(&index)?;
+            for (i, (path, before, bytes)) in files.iter().enumerate() {
+                if bytes.is_none() { replace(path, before.as_deref(), None)?; applied.push(i); }
+            }
             Ok(())
         })();
         if let Err(error) = result {
             let mut rollback = vec![];
-            for (path, bytes, _) in &files {
-                let r = if let Some(bytes) = bytes { write_atomic(path, bytes) }
-                    else { std::fs::remove_file(path).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }).map_err(Into::into) };
-                if let Err(e) = r { rollback.push(e.to_string()); }
+            for i in applied.into_iter().rev() {
+                let (path, before, after) = &files[i];
+                if let Err(e) = replace(path, after.as_deref(), before.as_deref()) { rollback.push(e.to_string()); }
             }
-            if let Err(e) = save_json(&self.root.join("index.json"), &previous_index) { rollback.push(e.to_string()); }
-            if let Err(e) = save_json(&self.root.join("trash/index.json"), &previous_trash) { rollback.push(e.to_string()); }
+            if let Err(e) = self.write_index(&previous_index) { rollback.push(e.to_string()); }
+            if let Err(e) = self.write_trash(&previous_trash) { rollback.push(e.to_string()); }
             anyhow::bail!("{error}{}", if rollback.is_empty() { String::new() } else { format!("；恢复未完成：{}", rollback.join("；")) });
         }
         self.index = index; self.trash = trash;
-        for c in changes { self.parsed.remove(&c.id); self.loaded.borrow_mut().remove(&c.id); }
+        for c in changes {
+            self.parsed.remove(&c.id); self.loaded.borrow_mut().remove(&c.id);
+            if self.index.get(&c.id).is_some_and(|m| m.folder.is_none() && !m.local()) {
+                let refreshed = self.load(&c.id).and_then(|doc| self.refresh_preview(&c.id, &doc));
+                if let Err(e) = refreshed { self.warnings.push(format!("文档已保存，列表摘要更新失败：{e}")); }
+            }
+        }
         Ok(())
     }
 }

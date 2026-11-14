@@ -3,6 +3,8 @@
 
 pub(crate) const APP_ID: &str = "com.s1dashu.quietmd";
 
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod apple_files;
 mod app;
 mod shared_store;
 mod quick_note;
@@ -39,6 +41,7 @@ mod printing;
 mod search;
 mod sidebar;
 mod space;
+mod space_sync;
 mod local_files;
 mod sidebar_drag;
 mod home_folder;
@@ -110,6 +113,8 @@ fn open_main_window(scripted: bool, cx: &mut App) {
 }
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    apple_files::install();
     logging::init();
     let scripted = devtools::scripted();
     // No single-instance guard: copies may share a library (builds tested
@@ -147,6 +152,7 @@ fn main() {
             Ok(s) => cx.set_global(s),
             Err(err) => logging::fatal("无法打开文档库 / Could not open the library", &err),
         }
+        space_sync::init(cx);
         let quick_enabled = !scripted;
         if quick_enabled { quick_note::install(cx); }
         app::set_menus(cx);
