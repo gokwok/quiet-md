@@ -10,7 +10,7 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-struct Veil { view: *mut AnyObject, glass: *mut AnyObject, frost: *mut AnyObject, smoke: *mut AnyObject, rim: *mut AnyObject, title: *mut AnyObject, sub: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, home: bool, centered: bool, text: (String, String), shown: bool }
+struct Veil { view: *mut AnyObject, glass: *mut AnyObject, frost: *mut AnyObject, smoke: *mut AnyObject, milk: *mut AnyObject, haze: *mut AnyObject, rim: *mut AnyObject, title: *mut AnyObject, sub: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, home: bool, centered: bool, text: (String, String), shown: bool }
 thread_local! { static VEIL: RefCell<Option<Veil>> = const { RefCell::new(None) }; }
 /// 首页左上角的空间头像（系统视图：外框、图片、上次的样子）。
 /// `blur`：同一个头像的高斯模糊版（比头像四周各大 `BLUR_PAD`），过渡完露面时先是它、再化成清楚的（`reveal`）。
@@ -138,6 +138,26 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
             let _: () = msg_send![smoke, setColors: shades];
             let host: *mut AnyObject = msg_send![view, layer];
             let _: () = msg_send![host, addSublayer: smoke];
+            // 首页浅色照 Craft（IMG_9146）：下面的字只剩约 13% 的深浅、微微发糊，还认得出。系统材质糊得太开（字整个没了），
+            // 所以这时不用玻璃和材质：一层只糊一点点的磨砂（`haze`，系统模糊停在动画的一小段上），上面一层八成的白。
+            let milk: *mut AnyObject = msg_send![AnyClass::get(c"CALayer").unwrap(), layer];
+            let wash: *const CGColor = msg_send![super::glass::ui_color(crate::theme::rgbaf(255, 255, 255, 0.8)), CGColor];
+            let _: () = msg_send![milk, setBackgroundColor: wash];
+            let _: () = msg_send![milk, setHidden: true];
+            let _: () = msg_send![host, addSublayer: milk];
+            let haze: *mut AnyObject = msg_send![effect_view, alloc];
+            let haze: *mut AnyObject = msg_send![haze, initWithEffect: std::ptr::null_mut::<AnyObject>()];
+            let _: () = msg_send![haze, setHidden: true];
+            let _: () = msg_send![view, insertSubview: haze, atIndex: 0isize];
+            let soft: *mut AnyObject = msg_send![blur, effectWithStyle: 1isize];
+            let (haze_addr, soft_addr) = (haze as usize, soft as usize);
+            let body = block2::RcBlock::new(move || { let _: () = msg_send![haze_addr as *mut AnyObject, setEffect: soft_addr as *mut AnyObject]; });
+            let animator: *mut AnyObject = msg_send![AnyClass::get(c"UIViewPropertyAnimator").unwrap(), alloc];
+            // 3 = UIViewAnimationCurveLinear。动画一直停着、一直留着（停着的动画不能放掉）。
+            let animator: *mut AnyObject = msg_send![animator, initWithDuration: 1f64, curve: 3isize, animations: &*body];
+            let _: () = msg_send![animator, setPausesOnCompletion: true];
+            let _: () = msg_send![animator, pauseAnimation];
+            let _: () = msg_send![animator, setFractionComplete: 0.08f64];
             // 底边的窄高光随横向位置变化，强调玻璃厚度，不给整块面板描边。
             let rim: *mut AnyObject = msg_send![AnyClass::get(c"CAGradientLayer").unwrap(), layer];
             let colors: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
@@ -158,7 +178,7 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
                 let _: () = msg_send![content, addSubview: l];
                 l
             };
-            *slot = Some(Veil { view, glass: material, frost, smoke, rim, title: make(15., 0.3), sub: make(11., 0.), frame: Bounds::default(), dark: None, home: false, centered: false, text: Default::default(), shown: false });
+            *slot = Some(Veil { view, glass: material, frost, smoke, milk, haze, rim, title: make(15., 0.3), sub: make(11., 0.), frame: Bounds::default(), dark: None, home: false, centered: false, text: Default::default(), shown: false });
         }
         let veil = slot.as_mut().unwrap();
         if veil.frame != frame || veil.dark != Some(dark) || veil.home != home {
@@ -172,6 +192,8 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
             let glass = CGRect::new(glass.origin, CGSize::new(glass.size.width, glass.size.height + if smoked { 3. } else { 0. }));
             let _: () = msg_send![veil.glass, setFrame: glass];
             let _: () = msg_send![veil.smoke, setFrame: CGRect::new(CGPoint::new(0., 0.), rect.size)];
+            let _: () = msg_send![veil.milk, setFrame: CGRect::new(CGPoint::new(0., 0.), rect.size)];
+            let _: () = msg_send![veil.haze, setFrame: CGRect::new(CGPoint::new(0., 0.), rect.size)];
             let _: () = msg_send![veil.rim, setFrame: CGRect::new(CGPoint::new(0., rect.size.height - 1.), CGSize::new(rect.size.width, 1.))];
         }
         if veil.dark != Some(dark) || veil.home != home {
@@ -179,7 +201,12 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
             veil.home = home;
             let _: () = msg_send![veil.view, setOverrideUserInterfaceStyle: if dark { 2isize } else { 1isize }];
             let _: () = msg_send![veil.smoke, setHidden: !smoked];
-            let _: () = msg_send![veil.rim, setOpacity: if smoked { 0.28f32 } else { 1f32 }];
+            let milky = home && !dark;
+            let _: () = msg_send![veil.glass, setHidden: milky];
+            let _: () = msg_send![veil.frost, setHidden: milky];
+            let _: () = msg_send![veil.haze, setHidden: !milky];
+            let _: () = msg_send![veil.milk, setHidden: !milky];
+            let _: () = msg_send![veil.rim, setOpacity: if smoked { 0.28f32 } else if milky { 0.5f32 } else { 1f32 }];
         }
         if !veil.shown { veil.shown = true; fade(veil.view, 1.); }
     });
