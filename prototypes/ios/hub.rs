@@ -193,10 +193,12 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let all = layout.all.then(|| row("hub-all".into(), crate::ui::icon("doc", 20., Theme::icon()), tr("所有文档", "All documents").to_string(), None, false)
         .on_click(cx.listener(|_, _, _, cx| { super::set_home_page(super::HomePage::All); cx.notify(); })));
     // 回收站不在底栏里了：照 Craft 放在主页最后，前面一道通栏的线，右边是篇数。
-    let trash = row("hub-trash".into(), crate::ui::icon("bin", 20., Theme::icon()), tr("最近删除", "Recently deleted").to_string(), (!w.trash.is_empty()).then_some(w.trash.len()), false)
+    // 照 Craft（IMG_9138）：回收站的图标是淡一档的灰（实测约 130/255），不像别的行那样近黑。
+    let trash = row("hub-trash".into(), crate::ui::icon("bin", 20., Theme::text_caption()), tr("最近删除", "Recently deleted").to_string(), (!w.trash.is_empty()).then_some(w.trash.len()), false)
         .on_click(cx.listener(|w, _, _, cx| w.show_view(View::Trash, cx)));
-    let customise_button = div().id("hub-customise").mt(px(36.)).mx_auto().h(px(44.)).px(px(24.)).flex().items_center().rounded_full()
-        .bg(Theme::fill_hover()).active(|s| s.bg(Theme::fill_pressed())).text_size(px(16.)).text_color(Theme::text_caption()).child(tr("自定义主页", "Customize Home"))
+    // 照 Craft（IMG_9138 实测）：42pt 高的胶囊，底色比页面只深一点点（247→243），字是浅灰（约 167/255）、中等粗细，不抢眼。
+    let customise_button = div().id("hub-customise").mt(px(34.)).mx_auto().h(px(42.)).px(px(19.)).flex().items_center().rounded_full()
+        .bg(Theme::fill_hover().opacity(0.4)).active(|s| s.bg(Theme::fill_hover())).text_size(px(16.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_placeholder()).child(tr("自定义主页", "Customize Home"))
         .on_click(|_, _, _| customise::open());
 
     let space = crate::space::current(w).map(|s| (s.icon.clone(), crate::space::color(&s.id), crate::space::name(s), s.id.clone()));
