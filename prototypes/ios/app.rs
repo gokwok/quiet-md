@@ -22,6 +22,7 @@ pub mod spaces;
 pub mod crop;
 pub mod customise;
 pub mod starpick;
+pub mod tilt;
 pub mod style;
 pub mod search;
 pub mod toast;

@@ -230,7 +230,7 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let avatar = space.as_ref().map(|(icon, _, _, id)| {
         let b = avatar_bounds();
         div().id("hub-space").absolute().left(b.origin.x).top(b.origin.y).size(b.size.width)
-            .when(!native, |d| d.child(crate::space::icon_el(icon.as_deref(), id, AVATAR))
+            .when(!native, |d| d.child(super::tilt::element(icon.as_deref(), id, AVATAR, super::tilt::ANGLE))
                 // 系统头像还没稳住：接着出帧，等它稳了这份就不画（见 `veil::avatar_settled`）。
                 .child(canvas(|_, window, _| if super::veil::on() { window.request_animation_frame() }, |_, _, _, _| {}).absolute().size_0()))
             .on_click(cx.listener(|w, _, _, cx| { super::set_settings_detail(false); w.show_view(View::Settings, cx); }))
