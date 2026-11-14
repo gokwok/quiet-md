@@ -74,6 +74,8 @@ fn section_head(id: &'static str, title: &'static str, open: Option<Box<dyn Fn(&
 /// 长按出这一项的菜单，和主页的卡片一样挂在右键上。
 fn with_menu(w: &Workspace, row: Stateful<Div>, e: &Entry, cx: &mut Context<Workspace>) -> Stateful<Div> {
     let id = e.id.clone();
+    // 菜单开着时这一行浮在菜单上，原处不再留一份。
+    let row = if super::menu::context_hidden(&e.id) { row.opacity(0.) } else { row };
     row.children(super::row_context(w, &e.id, 12.)).on_mouse_down(MouseButton::Right, cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
         w.row_menu = Some(RowMenu { id: id.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch: false });
         cx.notify();

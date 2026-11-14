@@ -168,6 +168,11 @@ thread_local! { static CONTEXT: Cell<*mut AnyObject> = const { Cell::new(std::pt
 thread_local! { static CONTEXT_OPEN: Cell<bool> = const { Cell::new(false) }; }
 thread_local! { static CONTEXT_PICK: Cell<Option<&'static str>> = const { Cell::new(None) }; }
 thread_local! { static CONTEXT_FOR: RefCell<Option<(SharedString, Bounds<Pixels>, f32)>> = const { RefCell::new(None) }; }
+// 长按那一刻拍下的那一块：浮起和落回都用它（不在落回时重拍——那时它已经藏起来了，样子也可能变了），
+// 和一张一样的，落回后盖在原处，等 GPUI 把它画回来（`context_hidden`）。
+thread_local! { static CONTEXT_SNAP: RefCell<Option<(objc2::rc::Retained<AnyObject>, objc2::rc::Retained<AnyObject>)>> = const { RefCell::new(None) }; }
+// 菜单开着时，长按的那一块在 GPUI 里画成空的：浮起来的那张就是它，原处不再留一份（照 Craft，不叠影、不闪）。
+thread_local! { static CONTEXT_HIDE: Cell<bool> = const { Cell::new(false) }; }
 
 /// 放在卡片或行里的占位：长按这一块弹出系统的上下文菜单（卡片浮起、其余压暗），菜单项被点后
 /// `ios::menu_action` 用 `context_target` 知道是对谁。每帧（prepaint）报一次位置，被滚到可见范围外的部分不算。
@@ -185,6 +190,8 @@ pub fn context(target: impl Into<SharedString>, title: impl Into<SharedString>, 
 pub fn context_at(at: Point<Pixels>) -> bool { REGIONS.with(|r| r.borrow().iter().any(|g| g.bounds.contains(&at))) }
 /// 上下文菜单是给谁弹的。
 pub fn context_target() -> Option<SharedString> { CONTEXT_FOR.with(|c| c.borrow().as_ref().map(|c| c.0.clone())) }
+/// `id` 这一块正浮在上下文菜单上：原处画成空的。
+pub fn context_hidden(id: &str) -> bool { CONTEXT_HIDE.with(|h| h.get()) && CONTEXT_FOR.with(|c| c.borrow().as_ref().is_some_and(|c| c.0.as_ref() == id)) }
 
 /// 交互挂在 GPUI 的视图上：长按要从它那里认出来。只挂一次。
 fn install(window: &Window) {
@@ -215,6 +222,9 @@ define_class!(
             let hit = REGIONS.with(|r| r.borrow().iter().rev().find(|g| g.bounds.contains(&at)).map(|g| (g.target.clone(), g.title.clone(), g.bounds, g.radius, g.items.clone())));
             let Some((target, title, bounds, radius, items)) = hit else { return std::ptr::null_mut(); };
             CONTEXT_FOR.with(|c| *c.borrow_mut() = Some((target, bounds, radius)));
+            // 趁它还原样在屏幕上拍两张（浮起用一张，落回后盖原处用一张）。原处等浮起的那张真出来了再空出来（`highlight`）。
+            let snaps = super::shot::snapshot(bounds).zip(super::shot::snapshot(bounds));
+            CONTEXT_SNAP.with(|c| *c.borrow_mut() = snaps);
             CONTEXT_OPEN.with(|o| o.set(true));
             CONTEXT_PICK.with(|p| p.set(None));
             let provider = block2::RcBlock::new(move |_suggested: *mut AnyObject| -> *mut AnyObject { unsafe { menu(&title, std::ptr::null_mut(), &items, true) } });
@@ -225,23 +235,54 @@ define_class!(
         }
 
         #[unsafe(method(contextMenuInteraction:configuration:highlightPreviewForItemWithIdentifier:))]
-        fn highlight(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, _id: *mut AnyObject) -> *mut AnyObject { preview() }
+        fn highlight(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, _id: *mut AnyObject) -> *mut AnyObject {
+            let p = preview();
+            // 系统从这一刻起把浮起的那张盖在原处：GPUI 那份可以空出来了。
+            if !p.is_null() && CONTEXT_SNAP.with(|c| c.borrow().is_some()) && !CONTEXT_HIDE.with(|h| h.replace(true)) { dispatch(|_, _, cx| cx.notify()); }
+            p
+        }
 
         #[unsafe(method(contextMenuInteraction:configuration:dismissalPreviewForItemWithIdentifier:))]
         fn dismissal(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, _id: *mut AnyObject) -> *mut AnyObject { preview() }
 
         #[unsafe(method(contextMenuInteraction:willEndForConfiguration:animator:))]
         fn will_end(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, animator: *mut AnyObject) {
-            let done = block2::RcBlock::new(|| { CONTEXT_OPEN.with(|o| o.set(false)); if let Some(id) = CONTEXT_PICK.with(|p| p.take()) { chosen(id); } });
+            let done = block2::RcBlock::new(|| {
+                CONTEXT_OPEN.with(|o| o.set(false));
+                settle_context();
+                if let Some(id) = CONTEXT_PICK.with(|p| p.take()) { chosen(id); }
+            });
             if animator.is_null() { done.call(()); } else { unsafe { let _: () = msg_send![animator, addCompletion: &*done]; } }
         }
     }
 );
 
-/// 浮起来的那张：长按的那一块的快照，按它的圆角剪，放回原处（系统负责浮起和落回的动画）。
+/// 菜单收完了：那一块让 GPUI 画回来；系统拿走浮着的那张以后到 GPUI 真画出来之间，先用备好的那张盖着，再淡掉。
+fn settle_context() {
+    let cover = CONTEXT_SNAP.with(|c| c.borrow_mut().take()).map(|(_, cover)| cover);
+    let was_hidden = CONTEXT_HIDE.with(|h| h.replace(false));
+    if !was_hidden { return; }
+    if let (Some(cover), Some(container)) = (cover, super::shot::container()) {
+        unsafe {
+            let _: () = msg_send![container, addSubview: &*cover];
+            let keep = cover.clone();
+            let fade = block2::RcBlock::new(move |_timer: *mut AnyObject| {
+                let keep = keep.clone();
+                let body = block2::RcBlock::new({ let k = keep.clone(); move || { let _: () = msg_send![&*k, setAlpha: 0f64]; } });
+                let done = block2::RcBlock::new(move |_: objc2::runtime::Bool| { let _: () = msg_send![&*keep, removeFromSuperview]; });
+                let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.12f64, animations: &*body, completion: &*done];
+            });
+            // GPUI 画回来要一两帧：等 0.1 秒再淡。
+            let _: *mut AnyObject = msg_send![AnyClass::get(c"NSTimer").unwrap(), scheduledTimerWithTimeInterval: 0.1f64, repeats: false, block: &*fade];
+        }
+    }
+    dispatch(|_, _, cx| cx.notify());
+}
+
+/// 浮起来的那张：长按那一刻拍下的那一块，按它的圆角剪，放回原处（系统负责浮起和落回的动画）。
 fn preview() -> *mut AnyObject {
     let Some((_, bounds, radius)) = CONTEXT_FOR.with(|c| c.borrow().clone()) else { return std::ptr::null_mut(); };
-    let Some(clip) = super::shot::snapshot(bounds) else { return std::ptr::null_mut(); };
+    let Some(clip) = CONTEXT_SNAP.with(|c| c.borrow().as_ref().map(|(p, _)| p.clone())).or_else(|| super::shot::snapshot(bounds)) else { return std::ptr::null_mut(); };
     let Some(container) = super::shot::container() else { return std::ptr::null_mut(); };
     unsafe {
         let size = CGSize::new(f64::from(bounds.size.width), f64::from(bounds.size.height));
