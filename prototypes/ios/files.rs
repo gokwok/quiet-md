@@ -29,10 +29,10 @@ unsafe extern "C" {}
 /// 只在主线程上传递。
 pub struct Reply<T>(Rc<RefCell<(Option<T>, Option<Waker>)>>);
 impl<T> Reply<T> {
-    fn pending() -> Self { Reply(Rc::new(RefCell::new((None, None)))) }
-    fn ready(value: T) -> Self { Reply(Rc::new(RefCell::new((Some(value), None)))) }
-    fn handle(&self) -> Self { Reply(self.0.clone()) }
-    fn send(&self, value: T) {
+    pub(super) fn pending() -> Self { Reply(Rc::new(RefCell::new((None, None)))) }
+    pub(super) fn ready(value: T) -> Self { Reply(Rc::new(RefCell::new((Some(value), None)))) }
+    pub(super) fn handle(&self) -> Self { Reply(self.0.clone()) }
+    pub(super) fn send(&self, value: T) {
         let waker = { let mut slot = self.0.borrow_mut(); slot.0 = Some(value); slot.1.take() };
         if let Some(waker) = waker { waker.wake(); }
     }
