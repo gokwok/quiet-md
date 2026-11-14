@@ -123,8 +123,9 @@ pub fn page(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> 
     let (sort, scoped, in_folder) = (SORT.with(|s| s.get()), SCOPED.with(|s| s.get()), w.view == View::Folder && w.folder_current.is_some());
     let from = FROM.with(|f| f.get());
 
-    let field = div().flex_1().min_w_0().h(px(40.)).px(px(12.)).flex().items_center().gap(px(8.)).rounded(px(12.)).bg(Theme::fill_hover())
-        .child(crate::ui::icon("search", 17., Theme::text_caption()))
+    // 和主页的搜索条同一个样子（`ios::search_bar_with`）：它从那里滑上来。
+    let field = div().flex_1().min_w_0().h(px(super::SEARCH_H)).px(px(14.)).flex().items_center().gap(px(8.)).rounded_full().bg(super::search_fill())
+        .child(crate::ui::icon("search", 18., Theme::text_caption()))
         .child(div().flex_1().min_w_0().flex().child(w.search.clone()))
         .when(has_text, |d| d.child(div().id("find-clear").flex_none().size(px(28.)).mr(px(-6.)).flex().items_center().justify_center().child(crate::ui::icon("search-clear", 18., Theme::text_disabled()))
             .on_click(cx.listener(|w, _, window, cx| {
@@ -133,9 +134,9 @@ pub fn page(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> 
                 w.search_scroll.set_offset(point(px(0.), px(0.)));
                 cx.notify();
             }))));
-    let cancel = div().id("find-cancel").flex_none().h(px(40.)).pl(px(12.)).flex().items_center().text_size(px(16.)).text_color(Theme::primary()).child(tr("取消", "Cancel"))
+    let cancel = div().id("find-cancel").flex_none().h(px(super::SEARCH_H)).pl(px(12.)).flex().items_center().text_size(px(16.)).text_color(Theme::primary()).child(tr("取消", "Cancel"))
         .on_click(cx.listener(|w, _, window, cx| { w.close_search(window, cx); window.focus(&w.focus, cx); }));
-    let bar = div().flex_none().h(px(52.)).px(px(20.)).flex().items_center().child(field).child(cancel);
+    let bar = div().flex_none().h(px(56.)).px(px(16.)).flex().items_center().child(field).child(cancel);
 
     let set_sort = |s: Sort| cx.listener(move |w: &mut Workspace, _: &ClickEvent, _, cx| { SORT.with(|c| c.set(s)); w.search_scroll.set_offset(point(px(0.), px(0.))); cx.notify(); });
     let set_scope = |on: bool| cx.listener(move |w: &mut Workspace, _: &ClickEvent, _, cx| { SCOPED.with(|c| c.set(on)); w.search_scroll.set_offset(point(px(0.), px(0.))); cx.notify(); });

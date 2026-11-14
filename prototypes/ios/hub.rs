@@ -1,39 +1,74 @@
-//! 手机上的首页：不是文档库的平铺，而是几个去处——搜索、收藏、所有文档、文件夹、最近打开。
-//! 文档库的网格 / 列表是从「所有文档」进去的下一级。
+//! 手机上的首页：不是文档库的平铺，而是几个去处——搜索、收藏、所有文档、文件夹、最近删除（照 Craft，IMG_9111/9112）。
+//! 文档库的网格 / 列表是从「所有文档」进去的下一级。显示哪几栏、什么顺序由「自定义主页」决定（`customise.rs`）。
+use std::cell::RefCell;
+use std::collections::HashSet;
+
 use gpui::{prelude::FluentBuilder as _, *};
 
-use crate::app::{RowMenu, Workspace};
+use crate::app::{RowMenu, View, Workspace};
 use crate::settings::{display_title, tr};
 use crate::store::Entry;
 use crate::theme::Theme;
+use super::customise::{self, Quick, Section};
 
-/// 最近打开只列这么多篇。
-const RECENT: usize = 5;
 /// 收藏卡片的宽度；高度按主页网格里卡片的比例。
 const CARD_W: f32 = 148.;
 pub const TOP_GAP: f32 = 12.;
 pub const SECTION_TITLE_SIZE: f32 = 18.;
 pub const SECTION_TITLE_LINE: f32 = 24.;
+/// 左上角空间头像的大小（Craft 实测约 29pt）和左边距（和大标题的字对齐）。
+const AVATAR: f32 = 30.;
+const AVATAR_X: f32 = 24.;
+/// 一行的高度（Craft 实测 48pt）。
+const ROW_H: f32 = 48.;
+/// 快速访问那排卡片最多几张（最近使用、收藏都是）。
+const QUICK_MAX: usize = 10;
+/// 卡片之间的空隙。
+const QUICK_GAP: f32 = 12.;
 thread_local! { static SCROLL: ScrollHandle = ScrollHandle::new(); }
 
-fn section(title: &'static str) -> Div {
-    div().mt(px(24.)).mb(px(4.)).px(px(24.)).text_size(px(SECTION_TITLE_SIZE)).line_height(px(SECTION_TITLE_LINE)).font_weight(FontWeight::BOLD).text_color(Theme::text()).child(title)
-}
-
-/// 一行去处：图标、名字、右边的数目和箭头。
-fn row(id: SharedString, icon: impl IntoElement, title: String, count: Option<usize>) -> Stateful<Div> {
-    div().id(id).w_full().h(px(50.)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(16.)).rounded(px(10.)).active(|s| s.bg(Theme::fill_pressed()))
+/// 一行去处：图标、名字，右边可选的数目和箭头。
+fn row(id: SharedString, icon: impl IntoElement, title: String, count: Option<usize>, chevron: bool) -> Stateful<Div> {
+    div().id(id).w_full().h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(17.)).rounded(px(10.)).active(|s| s.bg(Theme::fill_pressed()))
         .child(div().size(px(22.)).flex_none().flex().items_center().justify_center().child(icon))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
-        .children(count.map(|n| div().flex_none().text_size(px(15.)).text_color(Theme::text_caption()).child(n.to_string())))
-        .child(crate::ui::icon("chevron-right", 14., Theme::text_caption()))
+        .children(count.map(|n| div().flex_none().text_size(px(16.)).text_color(Theme::text_caption()).child(n.to_string())))
+        .when(chevron, |d| d.child(crate::ui::icon("chevron-right", 14., Theme::text_caption())))
 }
 
-/// 一组行：直接铺在页面的底色上，不进卡片，行与行之间一道缩进的细线（走查 V4；设置页的 `settings::group` 是带描边的卡片）。
-fn group(rows: Vec<AnyElement>) -> Div {
+/// 一组行：直接铺在页面的底色上，不进卡片，行与行之间一道细线，左边和字对齐，右边离屏幕 16（走查 V4；设置页的 `settings::group` 是带描边的卡片）。
+fn group(rows: Vec<AnyElement>) -> Div { indented_group(rows.into_iter().map(|r| (r, 0)).collect()) }
+/// 同上，每行带缩进的层级（展开的文件夹里的东西）：细线和那一行的字对齐。
+fn indented_group(rows: Vec<(AnyElement, usize)>) -> Div {
     let n = rows.len();
-    div().w_full().flex().flex_col()
-        .children(rows.into_iter().enumerate().map(move |(i, r)| div().w_full().flex().flex_col().child(r).when(i + 1 < n, |d| d.child(div().ml(px(50.)).mr(px(16.)).h(px(1.)).bg(crate::ui::list_line())))))
+    div().w_full().px(px(8.)).flex().flex_col()
+        .children(rows.into_iter().enumerate().map(move |(i, (r, depth))| div().w_full().flex().flex_col().child(r)
+            .when(i + 1 < n, |d| d.child(div().ml(px(50. + depth as f32 * INDENT)).mr(px(8.)).h(px(1.)).bg(crate::ui::list_line())))))
+}
+
+/// 展开的文件夹里每深一层往右缩进多少（照 Craft，IMG_9121：约 16pt）。
+const INDENT: f32 = 16.;
+// 首页上展开着的文件夹（只在这次运行里记着）。
+thread_local! { static EXPANDED: RefCell<HashSet<String>> = RefCell::new(HashSet::new()); }
+fn expanded(id: &str) -> bool { EXPANDED.with(|e| e.borrow().contains(id)) }
+/// 展开或收起一个文件夹，轻轻震一下。
+fn toggle(id: &str) {
+    EXPANDED.with(|e| { let mut e = e.borrow_mut(); if !e.remove(id) { e.insert(id.to_string()); } });
+    super::glass::haptic();
+}
+
+/// 一栏的标题：粗体，可选右边的箭头（点了进这一栏的整页）和「…」（系统菜单）。
+fn section_head(id: &'static str, title: &'static str, open: Option<Box<dyn Fn(&mut Workspace, &mut Context<Workspace>)>>, more: Option<(&'static str, Vec<super::menu::Item>)>, cx: &mut Context<Workspace>) -> Div {
+    let chevron = open.is_some();
+    let mut label = div().id(id).h_full().flex().items_center().gap(px(6.)).text_size(px(SECTION_TITLE_SIZE)).font_weight(FontWeight::BOLD).text_color(Theme::text())
+        .child(title).when(chevron, |d| d.child(crate::ui::icon("chevron-right", 14., Theme::text_caption())));
+    if let Some(open) = open { label = label.on_click(cx.listener(move |w, _, _, cx| open(w, cx))); }
+    div().relative().mt(px(16.)).pl(px(24.)).pr(px(12.)).h(px(40.)).flex().items_center()
+        .child(label)
+        .child(div().flex_1())
+        // 「…」是系统菜单（上面盖着透明的原生按钮）。
+        .children(more.map(|(key, items)| div().relative().size(px(40.)).flex().items_center().justify_center().child(crate::ui::icon("ellipsis", 20., Theme::text_caption()))
+            .child(super::menu::button(key, items))))
 }
 
 /// 长按出这一项的菜单，和主页的卡片一样挂在右键上。
@@ -45,64 +80,195 @@ fn with_menu(w: &Workspace, row: Stateful<Div>, e: &Entry, cx: &mut Context<Work
     }))
 }
 
+/// 左上角空间头像的位置：顶栏那一行里竖直居中。
+fn avatar_bounds() -> Bounds<Pixels> {
+    Bounds::new(point(px(AVATAR_X), super::insets().top + px((crate::app::HEADER_H - AVATAR) / 2.)), size(px(AVATAR), px(AVATAR)))
+}
+
+/// 一行的图标：都画在行首那个 22 的格子里、同一个大小（搜索结果的 `entry_icon` 自带 24 的格子和右边距，放进来会偏左、偏小）。
+/// 文档没有自己的图标时是一页小缩略图（照 Craft，`Workspace::mini_thumb`）。
+fn entry_icon(w: &Workspace, e: &Entry) -> AnyElement {
+    match &e.icon {
+        _ if e.meta.folder.is_some() => super::folder_icons::glyph(e, 20.).into_any_element(),
+        _ if e.meta.markdown => crate::ui::icon("doc-md", 20., Theme::icon()).into_any_element(),
+        Some(em) => div().text_size(px(18.)).child(em.clone()).into_any_element(),
+        None => w.mini_thumb(e, 20.),
+    }
+}
+
+/// 文件夹那一行，展开着就接着它里面的东西（文件夹也能再展开），`depth` 是缩进的层数。
+fn folder_rows(w: &Workspace, e: &Entry, depth: usize, out: &mut Vec<(AnyElement, usize)>, cx: &mut Context<Workspace>) {
+    let open_id = e.id.clone();
+    let key = if depth == 0 { "folder" } else { "folder-in" };
+    let mut r = row(SharedString::from(format!("hub-{key}-{}", e.id)), entry_icon(w, e), display_title(&e.title), None, false);
+    if e.meta.folder.is_some() {
+        let n = w.entries.iter().filter(|c| c.meta.parent.as_deref() == Some(e.id.as_str())).count();
+        let open = expanded(&e.id);
+        let flip = e.id.clone();
+        r = r.child(div().flex_none().text_size(px(16.)).text_color(Theme::text_caption()).child(n.to_string()))
+            // 箭头的点击区比箭头大，伸到行的右边缘；点它不进文件夹。
+            .child(div().id(SharedString::from(format!("hub-fold-{}", e.id))).flex_none().h_full().w(px(36.)).mr(px(-12.)).flex().items_center().justify_center()
+                .child(crate::ui::icon(if open { "chevron-down" } else { "chevron-right" }, 14., Theme::text_caption()))
+                .on_click(cx.listener(move |_, _, _, cx| { cx.stop_propagation(); toggle(&flip); cx.notify(); })));
+    }
+    let r = with_menu(w, r, e, cx).pl(px(16. + depth as f32 * INDENT))
+        .on_click(cx.listener(move |w, _, window, cx| w.open(&open_id, window, cx)));
+    out.push((r.into_any_element(), depth));
+    if e.meta.folder.is_some() && expanded(&e.id) {
+        for c in w.level_entries(Some(&e.id)) { folder_rows(w, &c, depth + 1, out, cx); }
+    }
+}
+
 pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let scroll = SCROLL.with(Clone::clone);
+    let layout = customise::layout();
     // 最近收藏的在前。
     let mut starred: Vec<Entry> = w.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.starred > 0).cloned().collect();
     starred.sort_by(|a, b| b.meta.starred.cmp(&a.meta.starred));
     let folders: Vec<Entry> = w.level_entries(None).into_iter().filter(|e| e.meta.folder.is_some()).collect();
-    let mut recent: Vec<Entry> = w.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.opened > 0).cloned().collect();
-    recent.sort_by(|a, b| b.meta.opened.cmp(&a.meta.opened));
-    recent.truncate(RECENT);
 
+    // 快速访问：最上面一排横着滑的卡片，放最近打开的或收藏的文档（「自定义主页」里选）。
     let card_h = CARD_W * (264. / 236.);
-    let favourites = if starred.is_empty() {
-        div().mx(px(16.)).h(px(132.)).rounded(px(16.)).bg(Theme::fill_hover()).flex().flex_col().items_center().justify_center().gap(px(10.))
-            .child(crate::ui::icon("star", 24., Theme::text_caption()))
-            .child(div().text_size(px(14.)).text_color(Theme::text_caption()).child(tr("收藏的文档会出现在这里。", "Starred documents show up here.")))
+    let quick = match layout.quick {
+        Quick::Off => None,
+        Quick::Starred => Some((starred.iter().take(QUICK_MAX).cloned().collect::<Vec<_>>(), tr("收藏的文档会出现在这里。", "Starred documents show up here."))),
+        Quick::Recent => {
+            let mut recent: Vec<Entry> = w.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.opened > 0).cloned().collect();
+            recent.sort_by(|a, b| b.meta.opened.cmp(&a.meta.opened));
+            recent.truncate(QUICK_MAX);
+            Some((recent, tr("最近打开的文档会出现在这里。", "Documents you open show up here.")))
+        }
+    };
+    let quick = quick.map(|(docs, empty)| if docs.is_empty() {
+        // 空着时照 Craft 空标签那一块：矮一些，只有一行字。
+        div().mx(px(16.)).h(px(98.)).rounded(px(16.)).bg(Theme::fill_hover()).flex().items_center().justify_center()
+            .child(div().text_size(px(15.)).text_color(Theme::text_caption()).child(empty))
             .into_any_element()
     } else {
-        div().id("hub-starred").w_full().overflow_x_scroll().restrict_scroll_to_axis().child(div().flex().gap(px(12.)).px(px(16.))
-            .children(starred.iter().map(|e| div().w(px(CARD_W)).flex_none().child(w.render_home_card(e, card_h, cx)))))
+        // 横着拖：里面那一条要有自己的实际宽度（不然它和外框一样宽，卡片只是溢出，滚动区量不出能滚多远）。
+        let n = docs.len() as f32;
+        let strip = n * CARD_W + (n - 1.).max(0.) * QUICK_GAP + 32.;
+        div().id("hub-quick").w_full().overflow_x_scroll().restrict_scroll_to_axis().child(div().w(px(strip)).flex_none().flex().gap(px(QUICK_GAP)).px(px(16.))
+            .children(docs.iter().map(|e| div().w(px(CARD_W)).flex_none().child(w.render_home_card(e, card_h, cx)))))
             .into_any_element()
-    };
-    let all = row("hub-all".into(), crate::ui::icon("doc", 20., Theme::icon()), tr("所有文档", "All documents").to_string(), Some(w.entries.iter().filter(|e| e.meta.folder.is_none()).count()))
-        .on_click(cx.listener(|_, _, _, cx| { super::set_home_page(super::HomePage::All); cx.notify(); })).into_any_element();
+    });
     let open = |e: &Entry, key: &str, count: Option<usize>, cx: &mut Context<Workspace>| {
         let id = e.id.clone();
-        // 都画在行首那个 22 的格子里、同一个大小（搜索结果的 `entry_icon` 自带 24 的格子和右边距，放进来会偏左、偏小）。
-        let icon = match &e.icon {
-            _ if e.meta.folder.is_some() => super::folder_icons::glyph(e, 20.).into_any_element(),
-            _ if e.meta.markdown => crate::ui::icon("doc-md", 20., Theme::icon()).into_any_element(),
+        with_menu(w, row(SharedString::from(format!("hub-{key}-{}", e.id)), entry_icon(w, e), display_title(&e.title), count, true), e, cx)
+            .on_click(cx.listener(move |w, _, window, cx| w.open(&id, window, cx))).into_any_element()
+    };
+
+    // 照「自定义主页」的顺序排各栏。
+    let mut sections: Vec<AnyElement> = vec![];
+    for (section, on) in &layout.sections {
+        if !on { continue; }
+        match section {
+            Section::Folders => {
+                let head = section_head("hub-folders", tr("文件夹", "Folders"), Some(Box::new(|_, cx| { super::set_home_page(super::HomePage::Folders); cx.notify(); })), Some(("hub-folders-more", super::hub_menu_items())), cx);
+                // 文件夹的箭头可以点：就地展开、收起（照 Craft，IMG_9121）；点行的其余地方照旧进文件夹。
+                let mut rows: Vec<(AnyElement, usize)> = vec![];
+                if !super::folders_folded() { for e in &folders { folder_rows(w, e, 0, &mut rows, cx); } }
+                sections.push(head.into_any_element());
+                if !rows.is_empty() { sections.push(indented_group(rows).into_any_element()); }
+            }
+            Section::Starred => {
+                // 照 Craft：标题带箭头，点了进「收藏」整页；右边「…」是收藏文档、自定义主页、折叠收藏。
+                sections.push(section_head("hub-starred-head", tr("收藏", "Starred"), Some(Box::new(|_, cx| { super::set_home_page(super::HomePage::Starred); cx.notify(); })), Some(("hub-starred-more", super::hub_starred_items())), cx).into_any_element());
+                if super::starred_folded() { continue; }
+                let rows: Vec<AnyElement> = starred.iter().map(|e| open(e, "starred", None, cx)).collect();
+                sections.push(if rows.is_empty() {
+                    div().mx(px(16.)).mt(px(4.)).h(px(64.)).rounded(px(16.)).bg(Theme::fill_hover()).flex().items_center().justify_center()
+                        .child(div().text_size(px(15.)).text_color(Theme::text_caption()).child(tr("还没有收藏的文档。", "No starred documents yet."))).into_any_element()
+                } else { group(rows).into_any_element() });
+            }
+        }
+    }
+
+    let all = layout.all.then(|| row("hub-all".into(), crate::ui::icon("doc", 20., Theme::icon()), tr("所有文档", "All documents").to_string(), None, false)
+        .on_click(cx.listener(|_, _, _, cx| { super::set_home_page(super::HomePage::All); cx.notify(); })));
+    // 回收站不在底栏里了：照 Craft 放在主页最后，前面一道通栏的线，右边是篇数。
+    let trash = row("hub-trash".into(), crate::ui::icon("bin", 20., Theme::icon()), tr("最近删除", "Recently deleted").to_string(), (!w.trash.is_empty()).then_some(w.trash.len()), false)
+        .on_click(cx.listener(|w, _, _, cx| w.show_view(View::Trash, cx)));
+    let customise_button = div().id("hub-customise").mt(px(36.)).mx_auto().h(px(44.)).px(px(24.)).flex().items_center().rounded_full()
+        .bg(Theme::fill_hover()).active(|s| s.bg(Theme::fill_pressed())).text_size(px(16.)).text_color(Theme::text_caption()).child(tr("自定义主页", "Customize Home"))
+        .on_click(|_, _, _| customise::open());
+
+    let space = crate::space::current(w).map(|s| (s.icon.clone(), crate::space::color(&s.id), crate::space::name(s), s.id.clone()));
+    let search_label: SharedString = match &space {
+        // 中文里只在西文名字两边空一格（「在 AveMujica 中搜索」「在我的空间中搜索」）。
+        Some((_, _, name, _)) if crate::settings::english() => format!("Search in {name}").into(),
+        Some((_, _, name, _)) => {
+            let pad = |c: Option<char>| if c.is_some_and(|c| c.is_ascii_alphanumeric()) { " " } else { "" };
+            format!("在{}{name}{}中搜索", pad(name.chars().next()), pad(name.chars().last())).into()
+        }
+        None => tr("搜索文档", "Search documents").into(),
+    };
+    let content = div().w_full().flex().flex_col().pt(px(super::chrome_top() + TOP_GAP)).pb(px(super::dock_bottom()))
+        .child(super::large_title(tr("主页", "Home")))
+        .child(div().mb(px(20.)).child(super::lead_search(search_label, cx)))
+        .children(quick)
+        .children(all.map(|r| div().mt(px(12.)).child(group(vec![r.into_any_element()]))))
+        .children(sections)
+        .child(div().mt(px(24.)).mx(px(20.)).h(px(1.)).bg(crate::ui::list_line()))
+        .child(div().mt(px(8.)).child(group(vec![trash.into_any_element()])))
+        .child(div().w_full().flex().child(customise_button));
+    // 顶栏：左边是当前空间的头像（点了去设置），右边一颗玻璃「…」（导入、自定义）。都钉在顶上，不跟内容滚走。
+    // 有顶部玻璃时头像是浮层里那个系统视图（`veil::home_header`），这里只留点击区；没有时（换页滑动、旧系统）照常画。
+    // 换页过渡（返回首页的滑动、缩回卡片）里不画：照 Craft，顶上这时还是文档页的返回键，下面不透出头像；
+    // 过渡完了系统头像自己长出来（`veil::write_avatar`），也不要 GPUI 这份垫在下面。
+    let native = super::veil::avatar_settled() || super::shot::sliding() || super::shot::just_slid();
+    let avatar = space.as_ref().map(|(icon, _, _, id)| {
+        let b = avatar_bounds();
+        div().id("hub-space").absolute().left(b.origin.x).top(b.origin.y).size(b.size.width)
+            .when(!native, |d| d.child(crate::space::icon_el(icon.as_deref(), id, AVATAR))
+                // 系统头像还没稳住：接着出帧，等它稳了这份就不画（见 `veil::avatar_settled`）。
+                .child(canvas(|_, window, _| if super::veil::on() { window.request_animation_frame() }, |_, _, _, _| {}).absolute().size_0()))
+            .on_click(cx.listener(|w, _, _, cx| { super::set_settings_detail(false); w.show_view(View::Settings, cx); }))
+    });
+    let more = div().absolute().top(super::insets().top + px((crate::app::HEADER_H - 44.) / 2.)).right(px(16.)).size(px(44.))
+        .child(super::menu::glass_button("hub-more", "ellipsis", Theme::text(), super::hub_more_items()));
+    div().flex_1().min_w_0().h_full().relative()
+        // 只认竖着的拖动：不然横着拖那排卡片时，GPUI 会把横向的位移也算成整页往上滚。
+        .child(div().id("hub").size_full().overflow_y_scroll().restrict_scroll_to_axis().track_scroll(&scroll).child(content))
+        .child(super::veil::home_header(&scroll, tr("主页", "Home").into(), space.map(|(icon, color, _, _)| (avatar_bounds(), icon, color))))
+        .children(avatar)
+        .child(more)
+        .into_any_element()
+}
+
+/// 「最近删除」（回收站）：和「所有文档」同一套——左上玻璃返回、右上玻璃「…」（清空回收站），大标题跟着内容滚走，
+/// 下面是首页那样铺在底色上的行：图标、标题、右边还剩几天。长按一行出「恢复 / 彻底删除」。
+pub fn trash_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let rows: Vec<AnyElement> = w.trash.iter().map(|t| {
+        let title: SharedString = display_title(&t.title).into();
+        let icon = match &t.icon {
             Some(em) => div().text_size(px(18.)).child(em.clone()).into_any_element(),
             None => crate::ui::icon("doc", 20., Theme::icon()).into_any_element(),
         };
-        with_menu(w, row(SharedString::from(format!("hub-{key}-{}", e.id)), icon, display_title(&e.title), count), e, cx)
-            .on_click(cx.listener(move |w, _, window, cx| w.open(&id, window, cx))).into_any_element()
-    };
-    let folder_rows: Vec<AnyElement> = folders.iter().map(|e| { let n = w.entries.iter().filter(|c| c.meta.parent.as_deref() == Some(e.id.as_str())).count(); open(e, "folder", Some(n), cx) }).collect();
-    let recent_rows: Vec<AnyElement> = recent.iter().map(|e| open(e, "recent", None, cx)).collect();
-
-    // 「文件夹」一栏的标题：点了进文件夹页；右边的「…」是系统菜单（上面盖着透明的原生按钮）：新建文件夹、折叠 / 展开这一栏。
-    let folders_head = div().relative().mt(px(16.)).mb(px(0.)).pl(px(24.)).pr(px(12.)).h(px(40.)).flex().items_center()
-        .child(div().id("hub-folders").h_full().flex().items_center().gap(px(6.)).text_size(px(SECTION_TITLE_SIZE)).font_weight(FontWeight::BOLD).text_color(Theme::text())
-            .child(tr("文件夹", "Folders")).child(crate::ui::icon("chevron-right", 14., Theme::text_caption()))
-            .on_click(cx.listener(|_, _, _, cx| { super::set_home_page(super::HomePage::Folders); cx.notify(); })))
+        div().id(SharedString::from(format!("trash-row-{}", t.id))).w_full().h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(17.)).rounded(px(10.)).active(|s| s.bg(Theme::fill_pressed()))
+            .child(div().size(px(22.)).flex_none().flex().items_center().justify_center().child(icon))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.clone()))
+            .child(div().flex_none().text_size(px(15.)).text_color(Theme::text_caption()).child(crate::trash::remaining(t.deleted)))
+            .children(super::trash_context(&t.id, title))
+            .into_any_element()
+    }).collect();
+    let list = if rows.is_empty() {
+        div().mx(px(16.)).h(px(98.)).rounded(px(16.)).bg(Theme::fill_hover()).flex().items_center().justify_center()
+            .child(div().text_size(px(15.)).text_color(Theme::text_caption()).child(tr("删除的文档会在这里保留 30 天。", "Deleted documents stay here for 30 days."))).into_any_element()
+    } else { group(rows).into_any_element() };
+    let content = div().w_full().flex().flex_col().pt(px(super::chrome_top())).pb(px(40.))
+        .child(super::large_title(tr("最近删除", "Recently deleted")))
+        .when(!w.trash.is_empty(), |d| d.child(div().px(px(24.)).pb(px(12.)).text_size(px(14.)).line_height(px(20.)).text_color(Theme::text_caption())
+            .child(tr("删除的文档保留 30 天，长按可以恢复或彻底删除。", "Deleted documents are kept for 30 days. Long-press one to restore or delete it."))))
+        .child(list);
+    let mut items = vec![];
+    if !w.trash.is_empty() { items.push(super::menu::Item::new("trash-empty-all", tr("清空回收站", "Empty Trash"), "trash", 0).danger()); }
+    let chrome = div().absolute().top(super::insets().top).left_0().right_0().h(px(crate::app::HEADER_H)).px(px(16.)).flex().items_center()
+        .child(super::glass_button("trash-back", "editor-icons/chevron-left", 22.).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx))))
         .child(div().flex_1())
-        .child(div().relative().size(px(40.)).flex().items_center().justify_center().child(crate::ui::icon("ellipsis", 20., Theme::text_caption()))
-            .child(super::menu::button("hub-folders-more", super::hub_menu_items())));
-    // 左上角是当前空间的头像（照 Craft），点了去设置。跟着内容滚走。
-    let content = div().relative().w_full().flex().flex_col().pt(px(super::chrome_top() + TOP_GAP)).pb(px(super::dock_bottom()))
-        .children(super::spaces::avatar(w, cx))
-        .child(super::large_title(tr("主页", "Home")))
-        .child(div().mb(px(16.)).child(super::lead_search(tr("搜索文档", "Search documents"), cx)))
-        .child(favourites)
-        .child(div().mt(px(12.)).px(px(8.)).child(group(vec![all])))
-        .child(folders_head)
-        .when(!folder_rows.is_empty() && !super::folders_folded(), |d| d.child(div().px(px(8.)).child(group(folder_rows))))
-        .when(!recent_rows.is_empty(), |d| d.child(section(tr("最近打开", "Recently opened"))).child(div().px(px(8.)).child(group(recent_rows))));
+        .when(!items.is_empty(), |d| d.child(div().relative().flex_none().size(px(44.)).child(super::menu::glass_button("trash-options", "ellipsis", Theme::text(), items))));
     div().flex_1().min_w_0().h_full().relative()
-        .child(div().id("hub").size_full().overflow_y_scroll().track_scroll(&scroll).child(content))
-        .child(super::veil::home_header(&scroll, tr("主页", "Home").into()))
+        .child(div().id("trash-page").size_full().overflow_y_scroll().child(content))
+        .child(chrome)
         .into_any_element()
 }

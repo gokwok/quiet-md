@@ -50,7 +50,7 @@ pub fn default_name() -> &'static str { tr("我的空间", "My Space") }
 pub fn name(s: &Space) -> String { s.name.clone().unwrap_or_else(|| default_name().to_string()) }
 
 /// A space without an image: a plain square in a colour of its own (照 Craft).
-fn color(id: &str) -> Hsla {
+pub fn color(id: &str) -> Hsla {
     const HUES: [&str; 6] = ["blue", "purple", "green", "orange", "red", "yellow"];
     let n = id.bytes().fold(7u32, |a, b| a.wrapping_mul(31).wrapping_add(b as u32));
     crate::theme::callout_border_swatch(HUES[n as usize % HUES.len()]).unwrap_or_else(Theme::primary)
