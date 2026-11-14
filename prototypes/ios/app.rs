@@ -561,13 +561,13 @@ pub fn row_context(w: &Workspace, id: &str, radius: f32) -> Option<AnyElement> {
     let e = w.entries.iter().find(|e| e.id == id)?;
     let title = crate::settings::display_title(&e.title);
     let items = if e.meta.folder.is_some() {
+        // 照 Craft（IMG_9144）：「编辑…」一项改名称、描述、图标、颜色；分组之间一道线，最后是删除。
         vec![
-            Item::new("ctx-new-doc", tr("新建文档", "New document"), "doc.badge.plus", 0),
-            Item::new("ctx-new-folder", tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
-            Item::new("ctx-rename", tr("重命名", "Rename"), "pencil", 0),
-            Item::new("ctx-icon", tr("更改图标", "Change icon"), "square.grid.2x2", 0),
-            Item::new("ctx-move", tr("移动到", "Move to"), "folder", 0),
-            Item::new("ctx-delete", tr("删除", "Delete"), "trash", 1).danger(),
+            Item::new("ctx-edit-folder", tr("编辑…", "Edit…"), "character.cursor.ibeam", 0),
+            Item::new("ctx-new-doc", tr("新建文档", "New document"), "doc.badge.plus", 1),
+            Item::new("ctx-new-folder", tr("新建文件夹", "New folder"), "folder.badge.plus", 1),
+            Item::new("ctx-move", tr("移动到…", "Move to…"), "arrowshape.turn.up.right.fill", 2),
+            Item::new("ctx-delete", tr("删除", "Delete"), "trash", 3).danger(),
         ]
     } else if e.meta.local() {
         return None;
@@ -700,6 +700,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 "ctx-new-doc" => w.new_child(&target, window, cx),
                 "ctx-new-folder" => w.new_folder(Some(target), window, cx),
                 "ctx-icon" => { pick_icon(Some(target)); cx.notify(); }
+                "ctx-edit-folder" => edit_folder(w, &target, cx),
                 "ctx-restore" => { w.confirm = Some(crate::app::Confirm::Restore(target)); cx.notify(); }
                 "ctx-purge" => { w.confirm = Some(crate::app::Confirm::Purge(target)); cx.notify(); }
                 _ => {}
@@ -730,7 +731,20 @@ thread_local! { static NEW_FOLDER: std::cell::RefCell<Option<Option<String>>> = 
 /// 正在填、还没建出来的新文件夹建在哪一层（`Some(None)` 是根目录）。手机上新建文件夹先在卡片（`card.rs`）里填好，点「创建」才真的建，
 /// 建好就进到里面；关掉卡片什么也不留下（桌面是先建一个「未命名文件夹」再就地改名）。
 pub fn new_folder_parent() -> Option<Option<String>> { NEW_FOLDER.with(|n| n.borrow().clone()) }
-pub fn set_new_folder(parent: Option<Option<String>>) { NEW_FOLDER.with(|n| *n.borrow_mut() = parent); }
+pub fn set_new_folder(parent: Option<Option<String>>) { if parent.is_none() { EDIT_FOLDER.with(|e| e.borrow_mut().take()); } NEW_FOLDER.with(|n| *n.borrow_mut() = parent); }
+thread_local! { static EDIT_FOLDER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
+/// 卡片正在编辑的那个已有文件夹（没有就是在新建）。
+pub fn editing_folder() -> Option<String> { EDIT_FOLDER.with(|e| e.borrow().clone()) }
+/// 长按文件夹的「编辑…」：同一张卡片，填上它现在的名称、描述、图标、颜色（照 Craft，IMG_9145）。
+fn edit_folder(w: &mut Workspace, id: &str, cx: &mut Context<Workspace>) {
+    let Some(e) = w.entries.iter().find(|e| e.id == id && e.meta.folder.is_some()) else { return };
+    card::prefill(Some(card::Draft { name: e.title.clone(), note: e.meta.folder_note.clone().unwrap_or_default(), icon: e.meta.folder_icon.clone(), color: e.meta.folder_color.clone() }));
+    let parent = e.meta.parent.clone();
+    set_new_folder(Some(parent));
+    EDIT_FOLDER.with(|f| *f.borrow_mut() = Some(id.to_string()));
+    w.row_menu = None;
+    cx.notify();
+}
 
 /// 手机上的重命名：没有侧栏，名字在屏幕上方的一张卡片里改。回车或点别处保存。
 /// 新建文件夹是另一张原生的卡片（`card.rs`），也从这里挂出来。

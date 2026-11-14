@@ -29,6 +29,11 @@ struct Card { view: *mut AnyObject, name: *mut AnyObject, note: *mut AnyObject, 
 thread_local! { static CARD: RefCell<Option<Card>> = const { RefCell::new(None) }; }
 thread_local! { static PICKED: RefCell<(Option<String>, Option<&'static str>)> = const { RefCell::new((None, None)) }; }
 thread_local! { static SEEN: Cell<bool> = const { Cell::new(false) }; }
+// 编辑一个已有的文件夹（照 Craft 的「编辑」，IMG_9145）：卡片一露面就填上它现在的样子，标题「编辑」、按钮「更新」。
+thread_local! { static PREFILL: RefCell<Option<Draft>> = const { RefCell::new(None) }; }
+
+/// 下一次露面是编辑这个样子的文件夹（`None` 是新建）。
+pub fn prefill(draft: Option<Draft>) { PREFILL.with(|p| *p.borrow_mut() = draft); }
 
 /// 每帧开头调用：这一帧没有占位，卡片就收起（键盘跟着下去），填的内容清掉。
 pub fn begin(window: &Window) {
@@ -86,9 +91,24 @@ fn place(frame: Bounds<Pixels>, window: &Window) {
         }
         if !card.shown {
             card.shown = true;
-            PICKED.with(|p| *p.borrow_mut() = (None, None));
-            // 上一次留下的亮着的「创建」：名字是空的，先灰掉。
-            let _: () = msg_send![card.create, setEnabled: false];
+            let edit = PREFILL.with(|p| p.borrow_mut().take());
+            let content: *mut AnyObject = msg_send![card.view, contentView];
+            let title: *mut AnyObject = msg_send![content, viewWithTag: 1isize];
+            let _: () = msg_send![title, setText: ns_string(if edit.is_some() { tr("编辑", "Edit") } else { tr("新建文件夹", "New folder") })];
+            let config: *mut AnyObject = msg_send![card.create, configuration];
+            let _: () = msg_send![config, setTitle: ns_string(if edit.is_some() { tr("更新", "Update") } else { tr("创建", "Create") })];
+            let _: () = msg_send![card.create, setConfiguration: config];
+            match &edit {
+                Some(d) => {
+                    let _: () = msg_send![card.name, setText: ns_string(&d.name)];
+                    let _: () = msg_send![card.note, setText: ns_string(&d.note)];
+                    let color = d.color.as_deref().and_then(|c| COLORS.iter().find(|(n, _, _)| *n == c).map(|(n, _, _)| *n));
+                    PICKED.with(|p| *p.borrow_mut() = (d.icon.clone(), color));
+                }
+                None => PICKED.with(|p| *p.borrow_mut() = (None, None)),
+            }
+            // 新建时名字是空的，「创建」先灰掉；编辑时名字已经有了。
+            let _: () = msg_send![card.create, setEnabled: edit.as_ref().is_some_and(|d| !d.name.trim().is_empty())];
             refresh(card);
             let _: () = msg_send![parent, bringSubviewToFront: card.view];
             let _: () = msg_send![card.view, setHidden: false];
