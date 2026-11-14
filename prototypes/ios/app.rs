@@ -19,6 +19,9 @@ pub mod menu;
 pub mod panel;
 pub mod shot;
 pub mod spaces;
+pub mod crop;
+pub mod customise;
+pub mod starpick;
 pub mod style;
 pub mod search;
 pub mod toast;
@@ -97,6 +100,8 @@ pub fn set_layout(compact: bool, safe: Edges<Pixels>, viewport: Size<Pixels>) {
     // 状态栏的字跟着应用的深浅色走（应用可以不跟随系统）。
     thread_local! { static BAR_DARK: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) }; }
     let dark = crate::theme::dark();
+    // 跟手返回、旧页的快照还原样盖着整屏时不换：状态栏底下还是旧页（有样式的文档常是浅色的纸）；快照一动就换。
+    if shot::covering() { return; }
     if BAR_DARK.with(|b| b.replace(Some(dark))) != Some(dark) {
         gpui_ios::ios::set_status_bar_style(if dark { gpui_ios::StatusBarContentStyle::Light } else { gpui_ios::StatusBarContentStyle::Dark });
     }
@@ -155,8 +160,10 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>) -> AnyE
         View::Doc => PageKey { stack: 0, depth: 100, folder: 0 },
         View::Folder => PageKey { stack: 0, depth: 2 + folder.map_or(0, |f| f.1) as i32, folder: folder.map_or(0, |f| { use std::hash::{Hash, Hasher}; let mut h = std::hash::DefaultHasher::new(); f.0.hash(&mut h); h.finish() }) },
         View::Home => PageKey { stack: 0, depth: (home_page() != HomePage::Hub) as i32, folder: 0 },
-        View::Settings => PageKey { stack: 1, depth: settings_detail() as i32, folder: 0 },
-        View::Trash => PageKey { stack: 2, depth: 0, folder: 0 },
+        // 设置也是从首页（左上角的空间头像）点进去的一页，第二级再往里一层。
+        View::Settings => PageKey { stack: 0, depth: 1 + settings_detail() as i32, folder: 2 },
+        // 首页「最近删除」点进去的一页：和「所有文档」同一层，用 `folder` 分开。
+        View::Trash => PageKey { stack: 0, depth: 1, folder: 1 },
     };
     let restoring = RESTORING.with(|r| r.replace(false));
     let (epoch, motion) = PAGE.with(|p| {
@@ -176,13 +183,15 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>) -> AnyE
     if shot::page_pending() && !matches!(motion, Motion::Follow | Motion::Return(_)) { shot::drop_page(); }
     let page = div().flex_1().min_w_0().h_full().flex().relative().child(main)
         // 旧页滑走的这段时间里一直出帧：只属于这一页的玻璃要等它走完才露面。
-        .child(canvas(|_, window, _| { let parked = shot::parked_tick(); if parked || shot::sliding() { window.request_animation_frame() } }, |_, _, _, _| {}).absolute().size_0());
+        .child(canvas(|_, window, _| { shot::below_drawn(); let parked = shot::parked_tick(); if parked || shot::sliding() { window.request_animation_frame() } }, |_, _, _, _| {}).absolute().size_0());
     if !is_compact() || epoch == 0 { return page.into_any_element(); }
     let w = f32::from(LAYOUT.with(|l| l.get().2.width));
     let off = move |p: f32| px(-shot::PARALLAX * w * (1. - p));
     let slide = |span: f32| Animation::new(shot::slide_time(span)).with_easing(shot::ease_out_cubic);
     match motion {
         Motion::Enter(dir) => page.with_animation(("page", epoch), Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()), move |d, t| d.left(px(dir * (1. - t) * 72.)).opacity(t)).into_any_element(),
+        // 缩回卡片（`shot::zooming`）时下面那页原地不动。
+        Motion::Back(_) | Motion::Return(_) | Motion::Follow if shot::zooming() => page.into_any_element(),
         Motion::Back(from) => page.with_animation(("page", epoch), slide(1. - from), move |d, t| d.left(off(from + (1. - from) * t))).into_any_element(),
         Motion::Return(from) => page.with_animation(("page", epoch), slide(from), move |d, t| d.left(off(from * (1. - t)))).into_any_element(),
         Motion::Follow => page.left(off(GESTURE.with(|g| g.get()).unwrap_or(0.))).into_any_element(),
@@ -352,11 +361,11 @@ fn dock_inset() -> Pixels { insets().bottom.max(px(12.)) + px(4.) }
 pub fn dock_bottom() -> f32 { f32::from(dock_inset()) + 72. }
 
 /// 主页的大标题和它下面的工具行一共多高（含悬浮按钮那一段）：网格开头留出这么多。
-pub fn home_lead_h() -> f32 { chrome_top() + 56. + LEAD_SEARCH_H + 12. }
+pub fn home_lead_h() -> f32 { chrome_top() + 56. + LEAD_SEARCH_H + 12. + if home_page() == HomePage::Starred { CAPTION_H + 14. } else { 0. } }
 /// 大标题下面那条搜索占的高度。
-pub const LEAD_SEARCH_H: f32 = 52.;
+pub const LEAD_SEARCH_H: f32 = 56.;
 /// 大标题下面的搜索条，和首页的是同一条。
-pub fn lead_search(label: &'static str, cx: &mut Context<Workspace>) -> impl IntoElement { div().h(px(LEAD_SEARCH_H)).pt(px(4.)).child(search_bar_with(label, cx)) }
+pub fn lead_search(label: impl Into<SharedString>, cx: &mut Context<Workspace>) -> impl IntoElement { div().h(px(LEAD_SEARCH_H)).pt(px(4.)).child(search_bar_with(label, cx)) }
 /// 主页的底色。悬浮版式下是窗口的浅灰，白色的卡片从上面浮出来；否则照旧是页面的白。
 /// 深色下浏览页是纯黑，比文档页的深灰暗一档：两种页面一眼能分开（走查 V3）。
 pub fn home_bg() -> Hsla { if !floating() { Theme::bg_body() } else if crate::theme::dark() { crate::theme::rgbaf(0, 0, 0, 1.) } else { Theme::window() } }
@@ -370,9 +379,9 @@ pub fn large_title_icon(title: impl Into<SharedString>, icon: Option<AnyElement>
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.into()))
 }
 
-/// 手机上主页分三页：首页（`hub`）、「所有文档」和「文件夹」（顶层的文件夹）。
+/// 手机上主页分几页：首页（`hub`）、「所有文档」、「文件夹」（顶层的文件夹）和「收藏」。
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum HomePage { Hub, All, Folders }
+pub enum HomePage { Hub, All, Folders, Starred }
 thread_local! { static HOME_PAGE: std::cell::Cell<HomePage> = const { std::cell::Cell::new(HomePage::Hub) }; }
 pub fn home_page() -> HomePage { HOME_PAGE.with(|p| p.get()) }
 /// 换页。回首页时先拍下这一页（`ios::page` 把它滑走）。
@@ -423,6 +432,15 @@ pub fn browse_lead_icon(title: impl Into<SharedString>, note: Option<String>, ic
 }
 /// 文件夹图标的颜色：它自己选的那个（`Meta::folder_color`，文档里的颜色名），没选就是平常的图标色。
 pub fn folder_tint(e: &crate::store::Entry) -> Hsla { e.meta.folder_color.as_deref().and_then(crate::theme::callout_border_swatch).unwrap_or_else(Theme::icon) }
+/// 「收藏」页开头（照 Craft）：大标题、搜索，下面一块浅色圆角底上的一句说明。
+pub fn browse_lead_caption(title: impl Into<SharedString>, caption: &'static str, cx: &mut Context<Workspace>) -> AnyElement {
+    div().pt(px(chrome_top())).child(large_title(title)).child(lead_search(crate::settings::tr("搜索", "Search"), cx))
+        .child(div().mt(px(10.)).mx(px(16.)).px(px(12.)).h(px(CAPTION_H)).flex().items_center().justify_center().rounded_full().bg(Theme::fill_hover())
+            .text_size(px(13.)).text_color(Theme::text_caption()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(caption))
+        .into_any_element()
+}
+/// 「收藏」页说明那一块的高度；网格开头多留这么多再加上下的空（`home_lead_h`）。
+const CAPTION_H: f32 = 40.;
 /// 浏览页的骨架：内容在下，状态栏的渐隐和那排玻璃在上。
 pub fn browse_page(body: AnyElement, chrome: impl IntoElement) -> AnyElement {
     div().flex_1().min_w_0().size_full().flex().flex_col().relative().child(body).child(top_fade(home_bg(), false)).child(chrome).into_any_element()
@@ -455,6 +473,21 @@ pub fn batch_page(w: &Workspace, ids: Vec<String>, body: AnyElement, cx: &mut Co
 }
 
 thread_local! { static FOLDERS_FOLDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! { static STARRED_FOLDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// 首页的收藏一栏折叠着没有（只在这次运行里记着）。
+pub fn starred_folded() -> bool { STARRED_FOLDED.with(|f| f.get()) }
+/// 收藏的金色星。照 Craft 实测（截屏 2026-11-14 16.46.22 卡片上的星 197,165,54，压在面板的暗下面；按同图页面底色 199→242 还原）。
+pub fn star_color() -> Hsla { crate::theme::rgbaf(240, 201, 66, 1.) }
+/// 首页「收藏」一栏右边「…」的系统菜单（照 Craft）：收藏文档；自定义主页、折叠 / 展开收藏。
+pub fn hub_starred_items() -> Vec<menu::Item> {
+    let tr = crate::settings::tr;
+    let folded = starred_folded();
+    vec![
+        menu::Item::new("hub-star-pick", tr("收藏文档", "Star documents"), "star", 0),
+        menu::Item::new("hub-customise", tr("自定义主页", "Customize Home"), "slider.horizontal.3", 1),
+        menu::Item::new("hub-starred-fold", if folded { tr("展开收藏", "Expand starred") } else { tr("折叠收藏", "Collapse starred") }, if folded { "arrow.up.left.and.arrow.down.right" } else { "arrow.down.right.and.arrow.up.left" }, 1),
+    ]
+}
 /// 首页的文件夹一栏折叠着没有（只在这次运行里记着）。
 pub fn folders_folded() -> bool { FOLDERS_FOLDED.with(|f| f.get()) }
 /// 这里自己的底部面板有没有开着（开着时玻璃让开）。
@@ -465,8 +498,18 @@ pub fn hub_menu_items() -> Vec<menu::Item> {
     vec![
         menu::Item::new("hub-new-folder", crate::settings::tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
         menu::Item::new("hub-fold", if folded { crate::settings::tr("展开文件夹", "Expand folders") } else { crate::settings::tr("折叠文件夹", "Collapse folders") }, if folded { "arrow.up.left.and.arrow.down.right" } else { "arrow.down.right.and.arrow.up.left" }, 0),
-        menu::Item::new("browse-import-md", crate::settings::tr("导入 Markdown 文件…", "Import Markdown Files…"), "square.and.arrow.down", 1),
-        menu::Item::new("browse-import-folder", crate::settings::tr("导入文件夹…", "Import Folder…"), "folder", 1),
+    ]
+}
+/// 首页右上角玻璃「…」的系统菜单（照 Craft，IMG_9114）：导入（子菜单），自定义主页。
+pub fn hub_more_items() -> Vec<menu::Item> {
+    let tr = crate::settings::tr;
+    vec![
+        menu::Item::new("hub-import", tr("导入", "Import"), "square.and.arrow.down", 0).kids(vec![
+            menu::Item::new("browse-import-md", tr("导入 Markdown 文件…", "Import Markdown Files…"), "doc.text", 0),
+            menu::Item::new("browse-import-folder", tr("导入文件夹…", "Import Folder…"), "folder", 0),
+            menu::Item::new("browse-import-xml", tr("导入 DocxXML…", "Import DocxXML…"), "doc", 0),
+        ]),
+        menu::Item::new("hub-customise", tr("自定义", "Customize"), "slider.horizontal.3", 1),
     ]
 }
 /// 文档页「…」的系统菜单：和桌面的文档菜单同样的项、顺序和文案，子菜单就地展开。
@@ -571,6 +614,9 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
     match id {
         "hub-new-folder" => w.new_folder(None, window, cx),
         "hub-fold" => { FOLDERS_FOLDED.with(|f| f.set(!f.get())); cx.notify(); }
+        "hub-customise" => customise::open(),
+        "hub-star-pick" => starpick::open(w),
+        "hub-starred-fold" => { STARRED_FOLDED.with(|f| f.set(!f.get())); cx.notify(); }
         "browse-new-folder" => { let parent = if w.view == View::Folder { w.folder_current.clone() } else { None }; w.new_folder(parent, window, cx); }
         "browse-import-md" | "browse-import-folder" | "browse-import-xml" => {
             use crate::transfer::ImportKind;
@@ -585,10 +631,9 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         "batch-delete" => w.ask_batch_delete(cx),
         "browse-grid" => w.set_home_grid(true, cx),
         "browse-list" => w.set_home_grid(false, cx),
-        // 底栏和新建按钮：玻璃自己接的触摸。
-        "tab-home" => { set_home_page(HomePage::Hub); if w.view != View::Home { w.show_view(View::Home, cx) } else { cx.notify() } }
+        // 删除后提示里的「打开回收站」。新建按钮是玻璃自己接的触摸。
         "tab-trash" => if w.view != View::Trash { w.show_view(View::Trash, cx) },
-        "tab-settings" => { set_settings_detail(false); if w.view != View::Settings { w.show_view(View::Settings, cx) } }
+        "trash-empty-all" => { w.trash_menu = None; w.confirm = Some(crate::app::Confirm::EmptyTrash); cx.notify(); }
         "new-doc" | "fab-new-doc" => { glass::haptic(); w.new_doc(window, cx); }
         // 原生的新建文件夹卡片（`card.rs`）。
         "new-folder-create" => w.finish_new_folder(true, window, cx),
@@ -735,26 +780,21 @@ pub fn icon_picker(cx: &mut Context<Workspace>) -> Option<AnyElement> {
     Some(div().absolute().inset_0().child(sheet_scrim()).child(deferred(place(Anchor::BottomCenter, point(px(0.), px(0.))).child(panel)).with_priority(3)).into_any_element())
 }
 
-/// 底部的玻璃标签栏：主页、回收站、设置，当前页那格垫着底色。右边是新建按钮。
-/// 搜索不在这里：它是各页大标题下面的那一条。
-pub fn tab_bar(view: View) -> impl IntoElement {
-    // 文件夹是主页里的一层，仍算在主页那格。
-    let picked = match view { View::Trash => 1, View::Settings => 2, _ => 0 };
-    let tabs = ["home", "bin", "settings-gear"].iter().enumerate().map(|(i, name)| (*name, 22., if i == picked { Theme::primary() } else { Theme::text() })).collect();
-    // 玻璃自己接触摸（按下的反馈是系统的），各格点了走 `menu_action`；这里只占住位置。
-    div().id("tab-bar").absolute().left(px(20.)).w(px(204.)).bottom(dock_inset()).h(px(48.)).rounded_full().occlude()
-        .child(glass::tab_pane("tab-bar", tabs, Some((picked, Theme::fill_hover_strong())), vec!["tab-home", "tab-trash", "tab-settings"]))
-}
-/// 有标签栏的页面，内容的下沿让到它上面。
-pub fn tab_bar_h() -> Pixels { dock_inset() + px(56.) }
+
+/// 搜索条的高度，搜索页的输入框也是这么高（从它这里滑上去）。
+pub const SEARCH_H: f32 = 44.;
+/// 搜索条的底色。深色下 `fill_hover`（约 11/255）在纯黑上几乎看不出来；Craft 深色实测约 29/255（IMG_9111），取同样的亮度。
+pub fn search_fill() -> Hsla { if crate::theme::dark() { crate::theme::ca(crate::theme::craft::N1000, 0.11) } else { Theme::fill_hover() } }
 
 /// 大标题下的搜索条：点了打开搜索。
 pub fn search_bar(cx: &mut Context<Workspace>) -> impl IntoElement { search_bar_with(crate::settings::tr("搜索文档", "Search documents"), cx) }
-pub fn search_bar_with(label: &'static str, cx: &mut Context<Workspace>) -> impl IntoElement {
-    div().id("home-search-bar").relative().flex_none().mx(px(20.)).mt(px(4.)).h(px(40.)).px(px(12.)).flex().items_center().gap(px(8.))
-        .rounded(px(12.)).bg(Theme::fill_hover()).active(|s| s.bg(Theme::fill_pressed()))
-        .child(crate::ui::icon("search", 17., Theme::text_caption()))
-        .child(div().text_size(px(16.)).text_color(Theme::text_caption()).child(label))
+/// 照 Craft（IMG_9111）：高 44 的胶囊，左右离屏幕 16，字 17。
+pub fn search_bar_with(label: impl Into<SharedString>, cx: &mut Context<Workspace>) -> impl IntoElement {
+    let label: SharedString = label.into();
+    div().id("home-search-bar").relative().flex_none().mx(px(16.)).mt(px(4.)).h(px(SEARCH_H)).px(px(14.)).flex().items_center().gap(px(8.))
+        .rounded_full().bg(search_fill()).active(|s| s.bg(Theme::fill_pressed()))
+        .child(crate::ui::icon("search", 18., Theme::text_caption()))
+        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(17.)).text_color(Theme::text_caption()).child(label))
         // 记下自己画在哪：点了以后搜索页的输入框从这儿滑上去。
         .child(canvas(|bounds, _, _| search::bar_at(bounds), |_, _, _, _| {}).absolute().inset_0())
         .on_click(cx.listener(|w, _, window, cx| { search::opened(); w.open_search(window, cx) }))
@@ -836,16 +876,17 @@ pub fn entered_doc(from: View) { DOC_FROM.with(|f| f.set(from)); }
 /// 文档页的返回：回到进来的那一页。从文件夹进的回那个文件夹（滚动位置还在），文件夹没了就回主页；
 /// 从主页进的回主页，首页、「所有文档」「文件夹」哪一页由 `home_page` 记着。
 pub fn doc_back(w: &mut Workspace, cx: &mut Context<Workspace>) {
+    shot::leaving(w.current.clone());
     let folder = DOC_FROM.with(|f| f.get()) == View::Folder && w.folder_current.as_ref().is_some_and(|id| w.entries.iter().any(|e| &e.id == id && e.meta.folder.is_some()));
     w.show_view(if folder { View::Folder } else { View::Home }, cx);
 }
 
 /// 跟手返回取消后要回到哪一页。
 #[derive(Clone)]
-enum Restore { Doc, Folder(String), Home(HomePage), Settings }
+enum Restore { Doc, Folder(String), Home(HomePage), Settings, SettingsRoot, Trash }
 thread_local! { static RESTORE: std::cell::RefCell<Option<Restore>> = const { std::cell::RefCell::new(None) }; }
 
-/// 左缘右滑：文档回进来的那一页，文件夹和回收站回主页，设置返回，主页拉出抽屉。文档、文件夹、主页的子页和设置的第二级
+/// 左缘右滑：文档回进来的那一页，文件夹、回收站和设置回主页，设置的第二级回第一级，主页拉出抽屉。文档、文件夹、主页的子页、回收站和设置
 /// 跟着手指：一动就切到下面那一页，旧页的快照跟着手指走（`shot::follow`）；松手过半就滑走，没过半滑回来、
 /// 再恢复原来那页。
 pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &mut Context<Workspace>) {
@@ -864,7 +905,10 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
                 View::Folder => match w.folder_current.clone() { Some(id) => Restore::Folder(id), None => return },
                 View::Home if home_page() != HomePage::Hub => Restore::Home(home_page()),
                 View::Settings if settings_detail() => Restore::Settings,
-                _ => return,
+                // 设置第一级和「最近删除」都是从首页点进去的，同样跟手回首页。
+                View::Settings => Restore::SettingsRoot,
+                View::Trash => Restore::Trash,
+                View::Home => return,
             };
             // 切到下面那一页：这几条路都会先拍下这一页。
             pop(w, window, cx);
@@ -902,7 +946,7 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
         View::Folder | View::Trash => w.show_view(View::Home, cx),
         View::Home if home_page() != HomePage::Hub => { set_home_page(HomePage::Hub); cx.notify(); }
         View::Settings if settings_detail() => { set_settings_detail(false); cx.notify(); }
-        View::Settings => w.close_settings(cx),
+        View::Settings => w.show_view(View::Home, cx),
         // 有标签栏时主页不拉抽屉。
         View::Home => { w.drawer = compact(window) && !floating(); cx.notify(); }
     }
@@ -915,7 +959,7 @@ fn pop(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
             None => w.show_view(View::Home, cx),
         },
         View::Home => { set_home_page(HomePage::Hub); cx.notify(); }
-        View::Settings => { set_settings_detail(false); cx.notify(); }
+        View::Settings if settings_detail() => { set_settings_detail(false); cx.notify(); }
         View::Doc => doc_back(w, cx),
         _ => w.show_view(View::Home, cx),
     }
@@ -931,6 +975,8 @@ fn restore(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) 
         Restore::Folder(id) => { w.open(&id, window, cx); }
         Restore::Home(page) => { set_home_page(page); cx.notify(); }
         Restore::Settings => { set_settings_detail(true); cx.notify(); }
+        Restore::SettingsRoot => { set_settings_detail(false); w.show_view(View::Settings, cx); }
+        Restore::Trash => w.show_view(View::Trash, cx),
     }
 }
 
