@@ -393,6 +393,7 @@ pub fn covering() -> bool { page_pending() && BELOW.with(|b| b.get().0) < 2 }
 pub fn below_drawn() {
     // 这一帧画了哪些卡片（换页那一层的 prepaint 在页面内容之后，卡片都已经报过了）。
     let cards = CARDS.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    if !cards.is_empty() { LAST_CARDS.with(|l| *l.borrow_mut() = cards.clone()); }
     ZOOM.with(|z| if let Some(z) = z.borrow_mut().as_mut() && z.card.is_none() {
         let (w, h) = screen();
         z.card = cards.iter().find(|(id, _)| *id == z.id).map(|(_, b)| CGRect::new(CGPoint::new(f64::from(b.origin.x), f64::from(b.origin.y)), CGSize::new(f64::from(b.size.width), f64::from(b.size.height))))
@@ -637,13 +638,110 @@ thread_local! { static FROM_CARD: RefCell<Option<String>> = const { RefCell::new
 thread_local! { static LEAVING: RefCell<Option<String>> = const { RefCell::new(None) }; }
 // 这一帧画了的卡片和它们的位置。
 thread_local! { static CARDS: RefCell<Vec<(String, Bounds<Pixels>)>> = const { RefCell::new(Vec::new()) }; }
+// 上一帧画了的卡片（点卡片时从这里找它在哪）。
+thread_local! { static LAST_CARDS: RefCell<Vec<(String, Bounds<Pixels>)>> = const { RefCell::new(Vec::new()) }; }
+// 点开时拍下的那张卡片的样子（卡片 id、位置、快照）：打开时从它放大，返回时飞回去的路上渐渐变回它。
+thread_local! { static FACE: RefCell<Option<(String, CGRect, Retained<AnyObject>)>> = const { RefCell::new(None) }; }
+// 这次换页是从卡片放大打开。
+thread_local! { static OPENING: Cell<bool> = const { Cell::new(false) }; }
+// 点卡片那一刻的整屏（首页）：放大时垫在文档下面。打开文档不一定经过 `capture_page`。
+thread_local! { static UNDER: RefCell<Option<Retained<AnyObject>>> = const { RefCell::new(None) }; }
 // 点返回键时等着知道卡片位置的快照。
 thread_local! { static OUT: RefCell<Option<(Retained<AnyObject>, Option<Retained<AnyObject>>, f32)>> = const { RefCell::new(None) }; }
 /// 卡片的圆角（`render_home_card` 的 20）。
 const CARD_RADIUS: f64 = 20.;
 
-/// 点卡片打开文档。
-pub fn from_card(id: &str) { FROM_CARD.with(|f| *f.borrow_mut() = Some(id.to_string())); }
+/// 点卡片打开文档：记下是哪张，趁它还在屏幕上拍下它的样子，接下来的换页从它放大（`open_zoom`）。
+pub fn from_card(id: &str) {
+    FROM_CARD.with(|f| *f.borrow_mut() = Some(id.to_string()));
+    FACE.with(|f| f.borrow_mut().take());
+    OPENING.with(|o| o.set(false));
+    if !super::is_compact() { return; }
+    let (w, h) = screen();
+    let Some(b) = LAST_CARDS.with(|l| l.borrow().iter().rev().find(|(i, _)| i == id).map(|(_, b)| *b)) else { return };
+    let r = CGRect::new(CGPoint::new(f64::from(b.origin.x), f64::from(b.origin.y)), CGSize::new(f64::from(b.size.width), f64::from(b.size.height)));
+    let (cx, cy) = (r.origin.x + r.size.width / 2., r.origin.y + r.size.height / 2.);
+    if r.size.width < 20. || !(0. ..w).contains(&cx) || !(0. ..h).contains(&cy) { return; }
+    // 拍成一张真的图：Metal 视图的轻量快照（`snapshotView`）过一会儿再拿出来用就是空的，返回时要用的就是它。
+    let Some(face) = bitmap(r) else { return };
+    unsafe { let layer: *mut AnyObject = msg_send![&*face, layer]; let _: () = msg_send![layer, setCornerRadius: CARD_RADIUS]; let _: () = msg_send![layer, setCornerCurve: ns_string("continuous")]; }
+    FACE.with(|f| *f.borrow_mut() = Some((id.to_string(), r, face)));
+    let under: Option<Retained<AnyObject>> = metal().and_then(|m| unsafe { msg_send![m, snapshotViewAfterScreenUpdates: false] });
+    if let Some(u) = &under { unsafe { let _: () = msg_send![&**u, setUserInteractionEnabled: false]; } }
+    UNDER.with(|u| *u.borrow_mut() = under);
+    OPENING.with(|o| o.set(true));
+}
+
+/// 换页那一帧（`ios::page`）：这次是从卡片打开的话，开始放大，返回真（这一页就不再做自己的滑入）。
+/// 照 Craft：文档从卡片的位置和大小长到整屏（Metal 视图整个缩放、剪成卡片的形状，下面垫着首页的快照），
+/// 卡片的样子盖在上面一起放大、很快淡掉。
+pub fn open_zoom() -> bool {
+    if !OPENING.with(|o| o.replace(false)) { return false; }
+    let Some(card) = FACE.with(|f| f.borrow().as_ref().map(|(_, r, _)| *r)) else { return false };
+    let (Some(metal), Some(sup)) = (metal(), superview()) else { return false };
+    let (w, h) = screen();
+    if w <= 0. { return false; }
+    const DUR: f64 = 0.46;
+    slide_until(Instant::now() + Duration::from_secs_f64(DUR));
+    // 首页的样子挪到 Metal 下面垫着：点卡片时拍的那张；`capture_page` 刚拍的那张不要。
+    if let Some(v) = PAGE_SHOT.with(|s| s.borrow_mut().take()) { unsafe { let _: () = msg_send![&*v, removeFromSuperview]; } }
+    if let Some(v) = DIM.with(|d| d.borrow_mut().take()) { unsafe { let _: () = msg_send![&*v, removeFromSuperview]; } }
+    let home = UNDER.with(|u| u.borrow_mut().take());
+    BELOW.with(|b| b.set((2, None)));
+    let s = card.size.width / w;
+    unsafe {
+        if let Some(home) = &home {
+            let frame: CGRect = msg_send![metal, frame];
+            let _: () = msg_send![&**home, setFrame: frame];
+            let _: () = msg_send![sup, insertSubview: &**home, belowSubview: metal];
+        }
+        // Metal 视图：缩到卡片的宽、左上角对齐卡片；只露出卡片那么高（遮罩在缩放前的坐标里）。
+        let start = Affine { a: s, b: 0., c: 0., d: s, tx: card.origin.x + s * w / 2. - w / 2., ty: card.origin.y + s * h / 2. - h / 2. };
+        let mask: Retained<AnyObject> = msg_send![AnyClass::get(c"UIView").unwrap(), new];
+        let black: *mut AnyObject = msg_send![AnyClass::get(c"UIColor").unwrap(), blackColor];
+        let _: () = msg_send![&*mask, setBackgroundColor: black];
+        let _: () = msg_send![&*mask, setFrame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(w, card.size.height / s))];
+        let ml: *mut AnyObject = msg_send![&*mask, layer];
+        let _: () = msg_send![ml, setCornerRadius: CARD_RADIUS / s];
+        let _: () = msg_send![ml, setCornerCurve: ns_string("continuous")];
+        let _: () = msg_send![metal, setMaskView: &*mask];
+        let _: () = msg_send![metal, setTransform: start];
+        // 卡片的样子：放在原处，跟着一起放大到整屏的宽，很快淡掉。
+        let face = FACE.with(|f| f.borrow().as_ref().map(|(_, _, v)| v.clone()));
+        if let Some(face) = &face {
+            let _: () = msg_send![&**face, removeFromSuperview];
+            let _: () = msg_send![&**face, setTransform: scale(1.)];
+            let _: () = msg_send![&**face, setFrame: card];
+            let _: () = msg_send![&**face, setAlpha: 1f64];
+            let _: () = msg_send![sup, insertSubview: &**face, aboveSubview: metal];
+        }
+        let (m, mk) = (metal as usize, &*mask as *const AnyObject as usize);
+        let radius = corner_radius();
+        let end_face = face.as_ref().map(|f| &**f as *const AnyObject as usize);
+        let grow = 1. / s;
+        let face_end = Affine { a: grow, b: 0., c: 0., d: grow, tx: w / 2. - (card.origin.x + card.size.width / 2.) + (grow - 1.) * 0., ty: card.size.height * grow / 2. - (card.origin.y + card.size.height / 2.) };
+        let (keep_mask, keep_home, keep_face) = (mask.clone(), home.clone(), face.clone());
+        spring(DUR, move || {
+            let _: () = msg_send![m as *mut AnyObject, setTransform: scale(1.)];
+            let _: () = msg_send![mk as *mut AnyObject, setFrame: CGRect::new(CGPoint::new(0., 0.), CGSize::new(w, h))];
+            let ml: *mut AnyObject = msg_send![mk as *mut AnyObject, layer];
+            let _: () = msg_send![ml, setCornerRadius: radius];
+            if let Some(f) = end_face { let _: () = msg_send![f as *mut AnyObject, setTransform: face_end]; }
+        }, move || {
+            let _: () = msg_send![m as *mut AnyObject, setMaskView: std::ptr::null_mut::<AnyObject>()];
+            let _ = &keep_mask;
+            if let Some(h) = &keep_home { let _: () = msg_send![&**h, removeFromSuperview]; }
+            if let Some(f) = &keep_face { let _: () = msg_send![&**f, removeFromSuperview]; let _: () = msg_send![&**f, setTransform: scale(1.)]; }
+        });
+        // 卡片的样子很快淡掉（约 0.16 秒），露出下面长大的文档，不叠出两份标题。
+        if let Some(f) = end_face {
+            let fade = RcBlock::new(move || { let _: () = msg_send![f as *mut AnyObject, setAlpha: 0f64]; });
+            let none: Option<&block2::Block<dyn Fn(objc2::runtime::Bool)>> = None;
+            let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.16f64, delay: 0.02f64, options: 0usize, animations: &*fade, completion: none];
+        }
+    }
+    true
+}
 /// 要从文档 `id` 返回了（下一步就拍快照）。
 pub fn leaving(id: Option<String>) { LEAVING.with(|l| *l.borrow_mut() = id); }
 /// 这次返回是缩回卡片：下面那页原地不动（没有视差）。
@@ -655,6 +753,31 @@ fn zoom_card() -> Option<CGRect> { ZOOM.with(|z| z.borrow().as_ref().and_then(|z
 pub fn card_marker(id: &str) -> impl IntoElement {
     let id = id.to_string();
     canvas(move |b, _, _| CARDS.with(|c| c.borrow_mut().push((id.clone(), b))), |_, _, _, _| {}).absolute().inset_0()
+}
+
+/// 屏幕上 `r` 那一块拍成一张图，装在一个图片视图里（位置就是 `r`）。
+fn bitmap(r: CGRect) -> Option<Retained<AnyObject>> {
+    let metal = metal()?;
+    unsafe {
+        let window: *mut AnyObject = msg_send![metal, window];
+        if window.is_null() { return None; }
+        let bounds: CGRect = msg_send![window, bounds];
+        let at: CGRect = msg_send![metal, convertRect: r, toView: window];
+        let format: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRendererFormat").unwrap(), preferredFormat];
+        let renderer: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRenderer").unwrap(), alloc];
+        let renderer: *mut AnyObject = msg_send![renderer, initWithSize: r.size, format: format];
+        let draw = CGRect::new(CGPoint::new(-at.origin.x, -at.origin.y), bounds.size);
+        let actions = RcBlock::new(move |_ctx: *mut AnyObject| { let _: bool = msg_send![window, drawViewHierarchyInRect: draw, afterScreenUpdates: false]; });
+        let image: *mut AnyObject = msg_send![renderer, imageWithActions: &*actions];
+        let _: () = msg_send![renderer, release];
+        if image.is_null() { return None; }
+        let view: Retained<AnyObject> = msg_send![AnyClass::get(c"UIImageView").unwrap(), new];
+        let _: () = msg_send![&*view, setImage: image];
+        let _: () = msg_send![&*view, setFrame: r];
+        let _: () = msg_send![&*view, setClipsToBounds: true];
+        let _: () = msg_send![&*view, setUserInteractionEnabled: false];
+        Some(view)
+    }
 }
 
 fn screen() -> (f64, f64) { metal().map_or((0., 0.), |m| unsafe { let f: CGRect = msg_send![m, frame]; (f.size.width, f.size.height) }) }
@@ -708,7 +831,10 @@ unsafe fn spring(dur: f64, body: impl Fn() + 'static, done: impl Fn() + 'static)
 fn zoom_out(snap: Retained<AnyObject>, dim: Option<Retained<AnyObject>>, card: CGRect) {
     let (w, _) = screen();
     const DUR: f64 = 0.42;
-    slide_until(Instant::now() + Duration::from_secs_f64(DUR + 0.2));
+    // 照 Craft：飞到后半程，真的卡片已经在下面画好了，快照一边落一边淡成它（真正的交叉淡化，不靠拍下来的卡片图——
+    // Metal 的画面拍不成能留着用的图）。`REVEAL` 之后卡片不再空着。
+    const REVEAL: f64 = 0.3;
+    slide_until(Instant::now() + Duration::from_secs_f64(DUR + 0.1));
     unsafe {
         let view = &*snap as *const AnyObject as *mut AnyObject;
         zoom_dress(view);
@@ -720,25 +846,20 @@ fn zoom_out(snap: Retained<AnyObject>, dim: Option<Retained<AnyObject>>, card: C
             place(v as *mut AnyObject, target, w, card.size.height / se, se, CARD_RADIUS);
             if let Some(d) = d { let _: () = msg_send![d as *mut AnyObject, setAlpha: 0f64]; }
         }, move || {
-            // 卡片画回来，等它上屏再淡掉快照。
+            let _: () = msg_send![&*keep, removeFromSuperview];
+            if let Some(dim) = &keep_dim { let _: () = msg_send![&**dim, removeFromSuperview]; }
+        });
+        // 到 `REVEAL`：卡片画回来（`zoom_slot` 不再为真），快照在剩下的路上淡掉。
+        let reveal = RcBlock::new(move |_timer: *mut AnyObject| {
             ZOOM.with(|z| z.borrow_mut().take());
             LANDED.with(|l| l.set(true));
             super::menu::dispatch(|_, _, cx| cx.notify());
-            let (gone, dim_gone) = (keep.clone(), keep_dim.clone());
-            let done = RcBlock::new(move || {
-                let _: () = msg_send![&*gone, removeFromSuperview];
-                if let Some(dim) = &dim_gone { let _: () = msg_send![&**dim, removeFromSuperview]; }
-            });
-            transaction(&done, || {
-                let layer: *mut AnyObject = msg_send![&*keep, layer];
-                let anim = basic("opacity", 1., 0., 0.12, [0.42, 0., 1., 1.]);
-                let now: f64 = msg_send![layer, convertTime: ca_now(), fromLayer: std::ptr::null_mut::<AnyObject>()];
-                let _: () = msg_send![anim, setBeginTime: now + 0.05];
-                let _: () = msg_send![anim, setFillMode: ns_string("backwards")];
-                let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("fade")];
-                let _: () = msg_send![layer, setOpacity: 0f32];
-            });
+            let fade = RcBlock::new(move || { let _: () = msg_send![v as *mut AnyObject, setAlpha: 0f64]; });
+            let none: Option<&block2::Block<dyn Fn(objc2::runtime::Bool)>> = None;
+            // 先等一帧，让卡片真的画出来再开始淡。
+            let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: DUR * 0.5, delay: 0.02f64, options: 0usize, animations: &*fade, completion: none];
         });
+        let _: *mut AnyObject = msg_send![AnyClass::get(c"NSTimer").unwrap(), scheduledTimerWithTimeInterval: DUR * REVEAL, repeats: false, block: &*reveal];
     }
 }
 /// 跟手没过半：放大回整屏，再交给 GPUI 恢复原来那页（和 `slide_back` 一样）。

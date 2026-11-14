@@ -176,7 +176,9 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>) -> AnyE
                 epoch += 1;
                 let dir = if last.stack == key.stack { (key.depth - last.depth).signum() as f32 } else { 0. };
                 motion = if restoring { Motion::Still } else if GESTURE.with(|g| g.get()).is_some() { Motion::Follow }
-                    else if dir < 0. && shot::slide_out(0.) { Motion::Back(0.) } else { Motion::Enter(dir) };
+                    else if dir < 0. && shot::slide_out(0.) { Motion::Back(0.) }
+                    // 从卡片打开：文档从卡片放大（`shot::open_zoom`），这一页自己不滑入。
+                    else if dir > 0. && shot::open_zoom() { Motion::Still } else { Motion::Enter(dir) };
             }
             p.set((Some(key), epoch, motion));
         }
