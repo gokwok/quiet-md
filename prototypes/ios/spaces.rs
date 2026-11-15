@@ -98,14 +98,14 @@ pub fn spaces_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                 .child(div().truncate().text_size(px(17.)).text_color(if s.available { crate::settings::row_ink() } else { Theme::text_disabled() }).child(name(s)))
                 .child(div().text_size(px(13.)).text_color(Theme::text_caption()).child(if s.available { place } else { tr("找不到文件夹", "Missing") })))
             .when(on, |d| d.child(crate::ui::icon("check", 18., Theme::primary())))
-            .when(s.available && !on, |d| d.on_click(move |_, _, cx| { let id = id.clone(); cx.defer(move |cx| { space::switch(id, cx); }); }))
+            .when(s.available && !on, |d| d.on_click(move |_, _, cx| { super::glass::haptic(); let id = id.clone(); cx.defer(move |cx| { space::switch(id, cx); }); }))
             .into_any_element()
     }).collect();
     rows.push(div().id("settings-space-new").w_full().h(px(52.)).px(px(16.)).flex().items_center().gap(px(14.)).rounded(px(10.)).active(|d| d.bg(Theme::fill_pressed()))
         .text_size(px(17.)).text_color(Theme::primary())
         .child(div().w(px(30.)).flex().justify_center().child(crate::ui::icon("plus", 20., Theme::primary()))).child(tr("新建空间…", "New Space…"))
-        .on_click(cx.listener(|w, _, window, cx| w.open_space_form(window, cx))).into_any_element());
-    crate::settings::flat_group(None, rows, 60.).into_any_element()
+        .on_click(cx.listener(|w, _, window, cx| { super::glass::haptic(); w.open_space_form(window, cx); })).into_any_element());
+    div().w_full().pt(px(8.)).child(super::general::card(rows)).into_any_element()
 }
 
 // 统计里「占用空间」要把整个文件夹走一遍：按文件夹缓存，打开这一页时才重算。
@@ -149,7 +149,7 @@ pub fn diagnostics_page(_w: &Workspace, cx: &mut Context<Workspace>) -> AnyEleme
     let icloud = if fdl_core::spaces::icloud_root().is_some() { tr("可用", "Available") } else { tr("不可用", "Unavailable") };
     let export = div().id("settings-export-log").w_full().h(px(52.)).px(px(16.)).flex().items_center().rounded(px(10.)).active(|d| d.bg(Theme::fill_pressed()))
         .text_size(px(17.)).text_color(Theme::primary()).child(tr("导出日志…", "Export Log…"))
-        .on_click(cx.listener(|w, _, _, cx| export_log(w, cx)));
+        .on_click(cx.listener(|w, _, _, cx| { super::glass::haptic(); export_log(w, cx); }));
     div().w_full().flex().flex_col().gap(px(24.))
         .child(crate::settings::group(None, vec![
             info_row(tr("版本", "Version"), env!("CARGO_PKG_VERSION")),
@@ -279,53 +279,75 @@ fn move_space(w: &mut Workspace, id: String, to: Location, cx: &mut Context<Work
 /// 设置 › 空间设置（照 Craft）：图标带相机钮，名称，危险区里的删除（第一个空间没有）。
 pub fn space_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let Some(s) = space::current(w).cloned() else { return div().into_any_element() };
-    let card = || div().w_full().rounded(px(14.)).bg(Theme::fill_hover()).overflow_hidden();
     let (pick, del, label) = (s.id.clone(), s.id.clone(), name(&s));
-    div().w_full().pt(px(8.)).flex().flex_col().gap(px(20.))
+    // 和别的子页同一套卡片（`general::card`）：名称、存放位置、恢复默认图标在一张卡片里，删除单独在「危险区」。
+    let mut rows = vec![
+        div().w_full().px(px(18.)).py(px(12.)).flex().flex_col().gap(px(2.))
+            .child(div().text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(tr("空间名称", "Name")))
+            .child(div().h(px(26.)).flex().items_center().text_size(px(17.)).child(w.space_name.clone())).into_any_element(),
+    ];
+    rows.extend(storage(&s));
+    if s.icon.is_some() {
+        let id = s.id.clone();
+        rows.push(div().id("space-icon-reset").w_full().h(px(52.)).px(px(18.)).flex().items_center().text_size(px(17.)).text_color(Theme::primary())
+            .active(|s| s.bg(Theme::fill_pressed())).child(tr("恢复默认图标", "Use the default icon"))
+            .on_click(cx.listener(move |w, _, _, cx| { super::glass::haptic(); let _ = fdl_core::spaces::set_icon(&id, None); w.reload_spaces(cx); })).into_any_element());
+    }
+    div().w_full().pt(px(8.)).flex().flex_col().gap(px(28.))
         .child(div().w_full().flex().justify_center().child(div().id("space-page-icon").relative().child(space_icon(&s, 96.))
             .child(div().absolute().right(px(-6.)).bottom(px(-6.)).size(px(32.)).rounded_full().flex().items_center().justify_center()
                 .bg(theme::raised(Theme::bg_body())).border_1().border_color(Theme::button_border()).shadow(theme::shadow_button()).child(crate::ui::icon("pen-line", 16., Theme::icon())))
             .on_click(cx.listener(move |w, _, window, cx| w.pick_space_icon(pick.clone(), window, cx)))))
-        .child(card().px(px(16.)).py(px(10.)).flex().flex_col().gap(px(2.))
-            .child(div().text_size(px(13.)).text_color(Theme::text_caption()).child(tr("空间名称", "Name")))
-            .child(div().h(px(28.)).flex().items_center().child(w.space_name.clone())))
-        .child(storage(&s, cx))
-        .when(s.icon.is_some(), |d| { let id = s.id.clone(); d.child(card().child(div().id("space-icon-reset").h(px(ROW_H)).px(px(16.)).flex().items_center().text_size(px(16.)).text_color(Theme::primary())
-            .active(|s| s.bg(Theme::fill_pressed())).child(tr("恢复默认图标", "Use the default icon"))
-            .on_click(cx.listener(move |w, _, _, cx| { let _ = fdl_core::spaces::set_icon(&id, None); w.reload_spaces(cx); })))) })
-        .when(!s.primary, |d| d
-            .child(div().px(px(4.)).mt(px(8.)).text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr("危险区", "Danger zone")))
-            .child(card().child(div().id("space-delete").px(px(16.)).py(px(12.)).flex().flex_col().gap(px(4.)).active(|s| s.bg(Theme::fill_pressed()))
-                .child(div().text_size(px(16.)).text_color(Theme::danger()).child(tr("删除空间", "Delete space")))
-                .child(div().text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(tr("删除后，这个空间和里面的所有文档都无法恢复。", "Deleting the space removes it and every document in it for good.")))
-                .on_click(cx.listener(move |w, _, _, cx| { w.confirm = Some(Confirm::RemoveSpace { id: del.clone(), name: label.clone() }); cx.notify(); })))))
+        .child(super::general::card(rows))
+        .when(!s.primary, |d| d.child(super::general::titled(Some(tr("危险区", "Danger zone")), vec![
+            div().id("space-delete").w_full().px(px(18.)).py(px(12.)).flex().flex_col().gap(px(2.)).active(|s| s.bg(Theme::fill_pressed()))
+                .child(div().text_size(px(17.)).line_height(px(22.)).text_color(Theme::danger()).child(tr("删除空间", "Delete space")))
+                .child(div().text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(tr("删除后，这个空间和里面的所有文档都无法恢复。", "Deleting the space removes it and every document in it for good.")))
+                .on_click(cx.listener(move |w, _, _, cx| { super::glass::haptic(); w.confirm = Some(Confirm::RemoveSpace { id: del.clone(), name: label.clone() }); cx.notify(); }))
+                .into_any_element()])))
         .into_any_element()
 }
 
-/// 「存放位置」：这个空间在本机还是 iCloud，下面一行把它移到另一边。两边都在应用自己的文件夹里。
-fn storage(s: &fdl_core::spaces::Space, cx: &mut Context<Workspace>) -> Div {
-    let card = || div().w_full().rounded(px(14.)).bg(Theme::fill_hover()).overflow_hidden();
+/// 不能移的原因（空就是能移）。
+fn move_blocked(s: &fdl_core::spaces::Space, to: Location) -> Option<&'static str> {
+    if s.root == fdl_core::spaces::home() { Some(tr("这是应用主文件夹里的第一个空间，暂不能移动。", "This is the first space in the app's main folder and can't be moved yet.")) }
+    else if to == Location::ICloud && fdl_core::spaces::icloud_root().is_none() { Some(tr("iCloud 不可用：请登录 iCloud 并打开 iCloud 云盘。", "iCloud is unavailable. Sign in to iCloud and turn on iCloud Drive.")) }
+    else { None }
+}
+
+/// 「存放位置」（照 Craft 的选项行）：点一下就地选本机或 iCloud，选了另一边就把空间移过去。两边都在应用自己的文件夹里。
+/// 移不了时不出菜单，下面一行说为什么；移动中值写「正在移动…」。
+fn storage(s: &fdl_core::spaces::Space) -> Vec<AnyElement> {
     let here = s.location;
-    let label = match here { Location::ICloud => "iCloud", Location::Local => tr("本机", "On this device") };
     let to = if here == Location::ICloud { Location::Local } else { Location::ICloud };
-    // 不能移的原因（空就是能移）。
-    let blocked = if s.root == fdl_core::spaces::home() { Some(tr("这是应用主文件夹里的第一个空间，暂不能移动。", "This is the first space in the app's main folder and can't be moved yet.")) }
-        else if to == Location::ICloud && fdl_core::spaces::icloud_root().is_none() { Some(tr("iCloud 不可用：请登录 iCloud 并打开 iCloud 云盘。", "iCloud is unavailable. Sign in to iCloud and turn on iCloud Drive.")) }
-        else { None };
+    let label = |l: Location| match l { Location::ICloud => "iCloud", Location::Local => tr("本机", "On this device") };
+    let blocked = move_blocked(s, to);
     let moving = MOVING.with(|m| m.get());
-    let action = if moving { tr("正在移动…", "Moving…") } else if to == Location::ICloud { tr("移到 iCloud", "Move to iCloud") } else { tr("移到本机", "Move to this device") };
-    let id = s.id.clone();
-    div().flex().flex_col().gap(px(8.))
-        .child(card()
-            .child(div().h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(16.))
-                .child(crate::ui::icon("storage", 18., Theme::icon())).child(div().flex_1().child(tr("存放位置", "Location")))
-                .child(div().text_color(Theme::text_caption()).child(label)))
-            .child(div().ml(px(46.)).h(px(1.)).bg(crate::ui::list_line()))
-            .child(div().id("space-move").h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(16.))
-                .text_color(if blocked.is_some() || moving { Theme::text_disabled() } else { Theme::primary() })
-                .child(crate::ui::icon("folder-input", 18., if blocked.is_some() || moving { Theme::text_disabled() } else { Theme::primary() })).child(action)
-                .when(blocked.is_none() && !moving, |d| d.active(|s| s.bg(Theme::fill_pressed())).on_click(cx.listener(move |w, _, _, cx| move_space(w, id.clone(), to, cx))))))
-        .children(blocked.map(|why| div().px(px(4.)).text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(why)))
+    let value = if moving { tr("正在移动…", "Moving…") } else { label(here) };
+    let mut rows = vec![];
+    if blocked.is_some() || moving {
+        rows.push(div().w_full().px(px(18.)).py(px(12.)).flex().flex_col().gap(px(2.))
+            .child(div().text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(tr("存放位置", "Location")))
+            .child(div().text_size(px(17.)).line_height(px(22.)).text_color(crate::settings::row_ink()).child(value))
+            .children(blocked.filter(|_| !moving).map(|why| div().pt(px(4.)).text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(why)))
+            .into_any_element());
+    } else {
+        let items = vec![
+            super::menu::Item::new("space-loc-local", label(Location::Local), "iphone", 0).checked(here == Location::Local),
+            super::menu::Item::new("space-loc-icloud", "iCloud", "icloud", 0).checked(here == Location::ICloud),
+        ];
+        rows.push(super::general::choice("space-location", tr("存放位置", "Location"), value, items));
+    }
+    rows
+}
+
+/// 「存放位置」菜单里选了一边。
+pub fn pick_location(w: &mut Workspace, icloud: bool, cx: &mut Context<Workspace>) {
+    let Some(s) = space::current(w).cloned() else { return };
+    let to = if icloud { Location::ICloud } else { Location::Local };
+    if s.location == to || MOVING.with(|m| m.get()) || move_blocked(&s, to).is_some() { return; }
+    super::glass::haptic();
+    move_space(w, s.id.clone(), to, cx);
 }
 
 /// 名字输入框外面那一圈。

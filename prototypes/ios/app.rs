@@ -11,6 +11,9 @@ pub mod appicon;
 pub mod card;
 pub mod editmenu;
 pub mod files;
+pub mod pick;
+pub mod general;
+pub mod lock;
 pub mod folder_icons;
 pub mod glass;
 pub mod hub;
@@ -46,6 +49,8 @@ pub fn run() {
     fdl_core::spaces::set_icloud_root(icloud);
     // 要打开的空间，或者「创建第一个空间」（`space::prepare`）。冒烟测试用一篇固定的样例笔记，不放「开始指南」。
     crate::space::prepare(sample_library());
+    // 设置 › 安全：进后台盖上、回来验证（偏好要在文档库打开后才读得到）。
+    lock::install();
     crate::logging::write(&format!("library {}", crate::store::Store::root_dir().display()));
     gpui_platform::application().with_assets(crate::assets::Assets).run(|cx| {
         crate::editor::math::load_fonts(cx);
@@ -373,7 +378,12 @@ fn dock_inset() -> Pixels { insets().bottom.max(px(12.)) + px(4.) }
 pub fn dock_bottom() -> f32 { f32::from(dock_inset()) + 72. }
 
 /// 主页的大标题和它下面的工具行一共多高（含悬浮按钮那一段）：网格开头留出这么多。
-pub fn home_lead_h() -> f32 { chrome_top() + 56. + LEAD_SEARCH_H + 12. + if home_page() == HomePage::Starred { CAPTION_H + 14. } else { 0. } }
+pub fn home_lead_h() -> f32 { chrome_top() + 56. + LEAD_SEARCH_H + 12. + if home_page() == HomePage::Starred || trash_view() || lead_note() { CAPTION_H + 14. } else { 0. } }
+fn lead_note() -> bool { LEAD_NOTE.with(|n| n.get()) }
+thread_local! { static TRASH_VIEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// 这一帧画的是「最近删除」（工作区每帧开头告诉这里）：开头那段多一块说明，网格往下让。
+pub fn set_trash_view(on: bool) { TRASH_VIEW.with(|t| t.set(on)); }
+pub fn trash_view() -> bool { TRASH_VIEW.with(|t| t.get()) }
 /// 大标题下面那条搜索占的高度。
 pub const LEAD_SEARCH_H: f32 = 56.;
 /// 大标题下面的搜索条，和首页的是同一条。
@@ -405,6 +415,10 @@ pub fn set_home_page(page: HomePage) {
 /// 浏览页（所有文档、文件夹、某个文件夹里）是同一套：左上返回，右上「选择」（进批量管理）和「…」
 /// （新建文件夹、显示方式、排序），大标题和搜索跟着内容滚走。
 pub fn browse_chrome(w: &Workspace, cx: &mut Context<Workspace>, back: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) -> impl IntoElement {
+    browse_chrome_with(w, browse_menu_items(w), cx, back)
+}
+/// 同上，「…」里是 `items`（「最近删除」：清空回收站）。
+pub fn browse_chrome_with(_w: &Workspace, items: Vec<menu::Item>, cx: &mut Context<Workspace>, back: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) -> impl IntoElement {
     let select = crate::settings::tr("选择", "Select");
     div().absolute().top(insets().top).left_0().right_0().h(px(crate::app::HEADER_H)).px(px(16.)).flex().items_center().gap(px(10.))
         .child(glass_button("browse-back", "editor-icons/chevron-left", 22.).on_click(cx.listener(move |w, _, window, cx| back(w, window, cx))))
@@ -414,7 +428,7 @@ pub fn browse_chrome(w: &Workspace, cx: &mut Context<Workspace>, back: impl Fn(&
             .on_mouse_down(MouseButton::Left, |_, _, _| glass::pulse("browse-select"))
             .on_click(cx.listener(|w, _, _, cx| { w.batch = Some(vec![]); w.row_menu = None; w.home.sort_menu = false; cx.notify(); })))
         // 「…」是一颗系统的玻璃钮，挂着系统菜单。
-        .child(div().relative().flex_none().size(px(44.)).child(menu::glass_button("browse-options", "ellipsis", Theme::text(), browse_menu_items(w))))
+        .child(div().relative().flex_none().size(px(44.)).child(menu::glass_button("browse-options", "ellipsis", Theme::text(), items)))
 }
 /// 浏览页「…」的系统菜单：新建文件夹（所有文档是平铺的，没有）、显示方式、排序。
 fn browse_menu_items(w: &Workspace) -> Vec<menu::Item> {
@@ -435,20 +449,34 @@ fn browse_menu_items(w: &Workspace) -> Vec<menu::Item> {
 }
 /// 浏览页开头跟着内容滚走的一段：大标题和搜索。
 pub fn browse_lead(title: impl Into<SharedString>, cx: &mut Context<Workspace>) -> AnyElement { browse_lead_with(title, None, cx) }
-/// 同上，大标题下面多一行说明（文件夹的描述）。
+/// 同上，带一句说明（文件夹的描述）。
 pub fn browse_lead_with(title: impl Into<SharedString>, note: Option<String>, cx: &mut Context<Workspace>) -> AnyElement { browse_lead_icon(title, note, None, cx) }
+/// 照 Craft（文件夹「工作」）：说明不在标题下面，而在搜索下面一块浅色圆角底上，和「收藏」页那块一样。
+/// 有说明时网格要多让出这一块（`set_lead_note` → `home_lead_h`）。
 pub fn browse_lead_icon(title: impl Into<SharedString>, note: Option<String>, icon: Option<AnyElement>, cx: &mut Context<Workspace>) -> AnyElement {
+    let note = note.filter(|n| !n.trim().is_empty());
+    set_lead_note(note.is_some());
     div().pt(px(chrome_top())).child(large_title_icon(title, icon))
-        .children(note.map(|n| div().px(px(24.)).pb(px(8.)).text_size(px(14.)).line_height(px(20.)).text_color(Theme::text_caption()).child(n)))
-        .child(lead_search(crate::settings::tr("搜索", "Search"), cx)).into_any_element()
+        .child(lead_search(crate::settings::tr("搜索", "Search"), cx))
+        .children(note.map(|n| caption_pill(n)))
+        .into_any_element()
 }
+/// 搜索下面那块说明：浅色圆角底，一行灰字，放不下就省略。
+fn caption_pill(text: impl Into<SharedString>) -> Div {
+    div().mt(px(10.)).mx(px(16.)).px(px(16.)).h(px(CAPTION_H)).flex().items_center().justify_center().rounded_full().bg(Theme::fill_hover())
+        .text_size(px(13.)).text_color(Theme::text_caption()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(text.into())
+}
+thread_local! { static LEAD_NOTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+/// 这一帧的文件夹页开头有没有说明那一块。
+fn set_lead_note(on: bool) { LEAD_NOTE.with(|n| n.set(on)); }
+/// 每帧开头清掉：只有画了带说明的开头的那一页才算。
+pub fn clear_lead_note() { set_lead_note(false); }
 /// 文件夹图标的颜色：它自己选的那个（`Meta::folder_color`，文档里的颜色名），没选就是平常的图标色。
 pub fn folder_tint(e: &crate::store::Entry) -> Hsla { e.meta.folder_color.as_deref().and_then(crate::theme::callout_border_swatch).unwrap_or_else(Theme::icon) }
 /// 「收藏」页开头（照 Craft）：大标题、搜索，下面一块浅色圆角底上的一句说明。
 pub fn browse_lead_caption(title: impl Into<SharedString>, caption: &'static str, cx: &mut Context<Workspace>) -> AnyElement {
     div().pt(px(chrome_top())).child(large_title(title)).child(lead_search(crate::settings::tr("搜索", "Search"), cx))
-        .child(div().mt(px(10.)).mx(px(16.)).px(px(12.)).h(px(CAPTION_H)).flex().items_center().justify_center().rounded_full().bg(Theme::fill_hover())
-            .text_size(px(13.)).text_color(Theme::text_caption()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(caption))
+        .child(caption_pill(caption))
         .into_any_element()
 }
 /// 「收藏」页说明那一块的高度；网格开头多留这么多再加上下的空（`home_lead_h`）。
@@ -463,25 +491,38 @@ pub fn browse_empty(lead: AnyElement, text: &'static str) -> AnyElement {
 }
 /// 批量管理时的浏览页（照 Craft）：顶上左边「全选」和已选几项，右边一颗主色的 ✓ 收起；动作在底部，标签栏的位置换成一条玻璃动作栏
 /// （创建副本 / 移动到 / 删除）。全选和计数是我们多出来的，留着。
-pub fn batch_page(w: &Workspace, ids: Vec<String>, body: AnyElement, cx: &mut Context<Workspace>) -> AnyElement {
+/// 「选择」时的浏览页（照 Craft，「如何使用 Craft」）：页面本身不变（大标题、搜索、卡片），选中的卡片外面一圈强调色（`pick_ring`）；
+/// 顶上左边照常返回，右边「选择」和「…」换成一颗强调色的 ✓（收起）；底部左边一条玻璃动作栏，右边一颗玻璃「…」（全选 / 取消全选）。
+/// `body` 是整页内容（含开头），`back` 是左上角返回做的事。
+pub fn batch_page(w: &Workspace, ids: Vec<String>, body: AnyElement, back: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> AnyElement {
     let n = w.batch.as_ref().map_or(0, |s| s.len());
-    let all = n > 0 && w.batch.as_ref().is_some_and(|s| ids.iter().all(|id| s.contains(id)));
-    let label = if all { crate::settings::tr("取消全选", "Deselect all") } else { crate::settings::tr("全选", "Select all") };
-    let bar = div().h(px(crate::app::HEADER_H)).flex_none().px(px(16.)).flex().items_center().gap(px(10.))
-        .child(div().id("batch-all").flex_none().h(px(44.)).w(px(if crate::settings::english() { 116. } else if all { 96. } else { 64. })).rounded_full().occlude()
-            .child(glass::pane("batch-all", None, None, Some((label.into(), Theme::text()))))
-            .on_mouse_down(MouseButton::Left, |_, _, _| glass::pulse("batch-all"))
-            .on_click(cx.listener(move |w, _, _, cx| { w.batch = Some(if all { vec![] } else { ids.clone() }); cx.notify(); })))
-        .child(div().flex_1().min_w_0().text_center().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(crate::localized_format!("已选 {n} 项", "Selected: {n}")))
-        // 和左边那颗一样宽的位置里靠右放 ✓：中间的字才在正中。
-        .child(div().flex_none().w(px(if crate::settings::english() { 116. } else if all { 96. } else { 64. })).flex().justify_end()
-            .child(done_button().on_click(cx.listener(|w, _, _, cx| { w.batch = None; w.row_menu = None; cx.notify(); }))));
-    // 没选东西时三格是灰的，点了也不做事（`menu_action` 里看 `batch` 空不空）。
     let ink = if n > 0 { Theme::text() } else { Theme::text_disabled() };
-    let (_, _, viewport) = layout();
-    let actions = div().id("batch-bar").absolute().left((viewport.width - px(204.)) / 2.).w(px(204.)).bottom(dock_inset()).h(px(48.)).rounded_full().occlude()
-        .child(glass::tab_pane("batch-bar", vec![("sf:plus.square.on.square", 22., ink), ("sf:folder", 22., ink), ("sf:trash", 22., if n > 0 { Theme::danger() } else { ink })], None, vec!["batch-copy", "batch-move", "batch-delete"]));
-    div().flex_1().min_w_0().size_full().flex().flex_col().relative().pt(insets().top).child(bar).child(body).child(actions).into_any_element()
+    // 照 Craft：收藏（全都收藏着时是取消收藏）、导出、删除。
+    let all_starred = n > 0 && w.batch.as_ref().is_some_and(|s| s.iter().all(|id| w.entries.iter().any(|e| &e.id == id && e.meta.starred > 0)));
+    batch_page_with(w, ids, body, vec![(if all_starred { "sf:star.slash" } else { "sf:star" }, ink, "batch-star"), ("sf:square.and.arrow.up", ink, "batch-export"), ("sf:trash", if n > 0 { Theme::danger() } else { ink }, "batch-delete")], back, cx)
+}
+thread_local! { static BATCH_IDS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
+/// 同上，底部那条换成别的动作（「最近删除」：恢复、彻底删除）。每格：图标、颜色、菜单项 id（`menu_action` 里接）。
+pub fn batch_page_with(w: &Workspace, ids: Vec<String>, body: AnyElement, actions: Vec<(&'static str, Hsla, &'static str)>, back: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> AnyElement {
+    let all = !ids.is_empty() && w.batch.as_ref().is_some_and(|s| ids.iter().all(|id| s.contains(id)));
+    BATCH_IDS.with(|b| *b.borrow_mut() = ids);
+    let chrome = div().absolute().top(insets().top).left_0().right_0().h(px(crate::app::HEADER_H)).px(px(16.)).flex().items_center()
+        .child(glass_button("batch-back", "editor-icons/chevron-left", 22.).on_click(cx.listener(move |w, _, window, cx| { w.batch = None; w.row_menu = None; back(w, window, cx); })))
+        .child(div().flex_1())
+        .child(done_button().on_click(cx.listener(|w, _, _, cx| { glass::haptic(); w.batch = None; w.row_menu = None; cx.notify(); })));
+    // 没选东西时几格是灰的，点了也不做事（`menu_action` 里看 `batch` 空不空）。
+    let width = px(54. * actions.len() as f32 + 12.);
+    let (icons, keys): (Vec<_>, Vec<_>) = actions.into_iter().map(|(sym, color, key)| ((sym, 22., color), key)).unzip();
+    let bar = div().id("batch-bar").absolute().left(px(20.)).w(width).bottom(dock_inset()).h(px(52.)).rounded_full().occlude()
+        .child(glass::tab_pane("batch-bar", icons, None, keys));
+    let more = vec![menu::Item::new("batch-all", if all { crate::settings::tr("取消全选", "Deselect All") } else { crate::settings::tr("全选", "Select All") }, if all { "circle" } else { "checkmark.circle" }, 0)];
+    let more = div().absolute().right(px(20.)).bottom(dock_inset()).size(px(52.)).occlude().child(menu::glass_button("batch-more", "ellipsis", Theme::text(), more));
+    // 和 `browse_page` 一样是竖着的 flex：网格（`uniform_list`）靠它撑出高度，不然有文件夹的那种网格高度是 0、整页空掉。
+    div().flex_1().min_w_0().size_full().flex().flex_col().relative().child(body).child(top_fade(home_bg(), false)).child(chrome).child(bar).child(more).into_any_element()
+}
+/// 选中的卡片外面那一圈（强调色，压在卡片的边上）。
+pub fn pick_ring(radius: f32) -> Div {
+    div().absolute().inset_0().rounded(px(radius)).border(px(3.)).border_color(Theme::primary())
 }
 
 thread_local! { static FOLDERS_FOLDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -561,21 +602,41 @@ pub fn doc_menu_items(w: &Workspace) -> Vec<menu::Item> {
 
 /// 长按卡片、行出的系统上下文菜单：项、顺序和文案照桌面右键菜单（`render_row_menu`、`folder_row_menu`）。
 /// 「本地文件」不在这里（仍是动作面板），也就不放占位。
-pub fn row_context(w: &Workspace, id: &str, radius: f32) -> Option<AnyElement> {
+pub fn row_context(w: &Workspace, id: &str, radius: f32) -> Option<AnyElement> { row_context_at(w, id, id, radius) }
+/// 同上，长按的这一处用 `key`（「id#位置」）区分：同一篇文档出现在别处的那一块不会跟着藏起来。
+pub fn row_context_at(w: &Workspace, id: &str, key: &str, radius: f32) -> Option<AnyElement> {
     if !floating() { return None; }
+    // 「最近删除」的卡片：恢复、彻底删除。
+    if w.view == View::Trash {
+        let title = hub::trash_entries(w).into_iter().find(|e| e.id == id).map(|e| crate::settings::display_title(&e.title))?;
+        return trash_context_r(id, title.into(), radius);
+    }
     use crate::settings::{text, tr};
     use menu::Item;
     let e = w.entries.iter().find(|e| e.id == id)?;
     let title = crate::settings::display_title(&e.title);
     let items = if e.meta.folder.is_some() {
-        // 照 Craft（IMG_9144）：「编辑…」一项改名称、描述、图标、颜色；分组之间一道线，最后是删除。
-        vec![
+        // 照 Craft（IMG_9173–9175）：没有标题；编辑… / 排序方式（下面一行是当前的排法，点开就地选）/ 移动到…、
+        // 把里面的东西导出为 Markdown / 删除。排法和文件夹页「…」里的是同一个。
+        // Craft 的「复制为 › 深层链接」我们还没有（没有 App 的链接），不放。
+        let sorts = w.sort_choices();
+        // 照 Craft 的顺序和短名字：手动、名称、上次浏览、创建日期、更新日期（`sort_choices` 的顺序是 手动、上次浏览、更新、创建、名称）。
+        let order: [(usize, &'static str, &'static str); 5] = [
+            (0, "ctx-sort-0", tr("手动", "Manual")), (4, "ctx-sort-4", tr("名称", "Name")), (1, "ctx-sort-1", tr("上次浏览", "Last Viewed")),
+            (3, "ctx-sort-3", tr("创建日期", "Date Created")), (2, "ctx-sort-2", tr("更新日期", "Date Modified")),
+        ];
+        let current = order.iter().find(|o| sorts.get(o.0).is_some_and(|s| s.1)).map_or("", |o| o.2);
+        let sort_items = order.iter().map(|&(i, id, name)| Item::new(id, name, "", 0).checked(sorts.get(i).is_some_and(|s| s.1))).collect();
+        let n = w.entries.iter().filter(|c| c.meta.parent.as_deref() == Some(id)).count();
+        let export = if n == 1 { tr("将 1 个项目导出为", "Export 1 Item As").to_string() } else { crate::localized_format!("将 {} 个项目导出为", "Export {} Items As", n) };
+        let mut items = vec![
             Item::new("ctx-edit-folder", tr("编辑…", "Edit…"), "character.cursor.ibeam", 0),
-            Item::new("ctx-new-doc", tr("新建文档", "New document"), "doc.badge.plus", 1),
-            Item::new("ctx-new-folder", tr("新建文件夹", "New folder"), "folder.badge.plus", 1),
+            Item::new("", tr("排序方式", "Sort By"), "arrow.up.arrow.down", 1).sub(current).kids(sort_items),
             Item::new("ctx-move", tr("移动到…", "Move to…"), "arrowshape.turn.up.right.fill", 2),
-            Item::new("ctx-delete", tr("删除", "Delete"), "trash", 3).danger(),
-        ]
+        ];
+        if n > 0 { items.push(Item::new("", export, "square.and.arrow.up", 2).kids(vec![Item::new("ctx-export-md", "Markdown", "", 0)])); }
+        items.push(Item::new("ctx-delete", tr("删除", "Delete"), "trash", 3).danger());
+        items
     } else if e.meta.local() {
         return None;
     } else {
@@ -593,17 +654,21 @@ pub fn row_context(w: &Workspace, id: &str, radius: f32) -> Option<AnyElement> {
             Item::new("ctx-delete", text("删除"), "trash", 2).danger(),
         ]
     };
-    Some(menu::context(SharedString::from(id.to_string()), title, radius, items).into_any_element())
+    // 文件夹的菜单照 Craft 不带标题。
+    let title = if e.meta.folder.is_some() { String::new() } else { title };
+    Some(menu::context(SharedString::from(key.to_string()), title, radius, items).into_any_element())
 }
 /// 回收站的行：恢复、彻底删除。
-pub fn trash_context(id: &str, title: SharedString) -> Option<AnyElement> {
+pub fn trash_context(id: &str, title: SharedString) -> Option<AnyElement> { trash_context_r(id, title, 10.) }
+/// 同上，浮起来的那块圆角是 `radius`（「最近删除」的卡片是 20）。
+pub fn trash_context_r(id: &str, title: SharedString, radius: f32) -> Option<AnyElement> {
     if !floating() { return None; }
     use crate::settings::text;
     let items = vec![
         menu::Item::new("ctx-restore", text("恢复"), "arrow.uturn.backward", 0),
         menu::Item::new("ctx-purge", text("彻底删除"), "trash", 0).danger(),
     ];
-    Some(menu::context(SharedString::from(id.to_string()), title, 10., items).into_any_element())
+    Some(menu::context(SharedString::from(id.to_string()), title, radius, items).into_any_element())
 }
 
 /// 块动作栏剪掉 / 删掉了 `n` 块：这时正文没有焦点、键盘条（带撤销）不在，顶上一条提示带「撤销」。
@@ -637,8 +702,32 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
             w.open_import_kind(kind, parent, window, cx);
         }
         // 批量管理底部的动作栏：没选东西时不做事。
-        "batch-copy" | "batch-move" | "batch-delete" if w.batch.as_ref().is_none_or(|s| s.is_empty()) => {}
-        "batch-copy" => w.batch_copy(cx),
+        "batch-copy" | "batch-move" | "batch-delete" | "batch-restore" | "batch-purge" | "batch-star" | "batch-export" if w.batch.as_ref().is_none_or(|s| s.is_empty()) => {}
+        // 收藏：选中的有没收藏的就全收藏上，全都收藏着就全取消（文件夹不能收藏，跳过）。
+        "batch-star" => {
+            glass::haptic();
+            let ids = w.batch.clone().unwrap_or_default();
+            let docs: Vec<String> = ids.into_iter().filter(|id| w.entries.iter().any(|e| &e.id == id && e.meta.folder.is_none())).collect();
+            let on = docs.iter().any(|id| w.entries.iter().any(|e| &e.id == id && e.meta.starred == 0));
+            for id in &docs {
+                if let Ok(t) = w.store.set_starred(id, on) && let Some(e) = w.entries.iter_mut().find(|e| &e.id == id) { e.meta.starred = t; }
+            }
+            w.batch = None;
+            let msg = if on { crate::localized_format!("已收藏 {} 篇文档", "Starred {} documents", docs.len()) } else { crate::localized_format!("已取消收藏 {} 篇文档", "Unstarred {} documents", docs.len()) };
+            w.show_toast(&msg, cx);
+            cx.notify();
+        }
+        "batch-export" => { glass::haptic(); let ids = w.batch.take().unwrap_or_default(); w.export_selected_md(&ids, cx); cx.notify(); }
+        "batch-restore" => { glass::haptic(); w.restore_batch(cx); }
+        "batch-all" => {
+            let ids = BATCH_IDS.with(|b| b.borrow().clone());
+            let all = w.batch.as_ref().is_some_and(|s| ids.iter().all(|id| s.contains(id)));
+            w.batch = Some(if all { vec![] } else { ids.into_iter().take(crate::sidebar::BATCH_LIMIT).collect() });
+            cx.notify();
+        }
+        "batch-purge" => { let ids = w.batch.clone().unwrap_or_default(); w.confirm = Some(crate::app::Confirm::PurgeMany(ids)); cx.notify(); }
+        // 文件夹不能「创建副本」：只复制选中的文档。
+        "batch-copy" => { let docs: Vec<String> = w.batch.clone().unwrap_or_default().into_iter().filter(|id| w.entries.iter().any(|e| &e.id == id && e.meta.folder.is_none())).collect(); w.batch = Some(docs); w.batch_copy(cx) }
         "batch-move" => w.batch_move(window, cx),
         "batch-delete" => w.ask_batch_delete(cx),
         "browse-grid" => w.set_home_grid(true, cx),
@@ -646,6 +735,14 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         // 删除后提示里的「打开回收站」。新建按钮是玻璃自己接的触摸。
         "tab-trash" => if w.view != View::Trash { w.show_view(View::Trash, cx) },
         "trash-empty-all" => { w.trash_menu = None; w.confirm = Some(crate::app::Confirm::EmptyTrash); cx.notify(); }
+        _ if id.starts_with("find-") && search::menu_action(id, w, cx) => {}
+        // 设置子页的选项行（`general::choice`）。
+        "pref-lang-zh" | "pref-lang-en" => { let en = id == "pref-lang-en"; if crate::settings::prefs().english != en { w.set_pref(|p| p.english = en, cx); } }
+        _ if id.starts_with("theme-pick-") => {
+            let picked = id["theme-pick-".len()..].parse::<usize>().ok().and_then(|i| crate::themes::themes().get(i).map(|t| t.id.clone()));
+            if let Some(theme) = picked { crate::settings::apply_theme(w, theme, cx); }
+        }
+        "space-loc-local" | "space-loc-icloud" => spaces::pick_location(w, id == "space-loc-icloud", cx),
         "new-doc" | "fab-new-doc" => { glass::haptic(); w.new_doc(window, cx); }
         // 原生的新建文件夹卡片（`card.rs`）。
         "new-folder-create" => w.finish_new_folder(true, window, cx),
@@ -704,6 +801,13 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 "ctx-md" => w.open_export_md(&target, cx),
                 "ctx-rename" => w.start_rename(&target, window, cx),
                 "ctx-delete" => w.ask_delete(&target, cx),
+                // 文件夹的「排序方式」：和浏览页「…」里的是同一个排法。
+                "ctx-sort-0" => w.pick_home_sort(0, cx),
+                "ctx-sort-1" => w.pick_home_sort(1, cx),
+                "ctx-sort-2" => w.pick_home_sort(2, cx),
+                "ctx-sort-3" => w.pick_home_sort(3, cx),
+                "ctx-sort-4" => w.pick_home_sort(4, cx),
+                "ctx-export-md" => w.export_folder_md(&target, cx),
                 "ctx-new-doc" => w.new_child(&target, window, cx),
                 "ctx-new-folder" => w.new_folder(Some(target), window, cx),
                 "ctx-icon" => { pick_icon(Some(target)); cx.notify(); }
@@ -925,7 +1029,9 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
             return;
         }
         BackGesturePhase::Progressed => {
-            if ev.progress <= 0. || !floating() || w.search_open || w.batch.is_some() || w.rename.is_some() || new_folder_parent().is_some() { return; }
+            if ev.progress <= 0. || !floating() || w.search_open || w.rename.is_some() || new_folder_parent().is_some() { return; }
+            // 「选择」时跟手返回和左上角的返回一样：先退出选择，再回上一页。
+            if w.batch.is_some() { w.batch = None; w.row_menu = None; }
             let restore = match w.view {
                 View::Doc => Restore::Doc,
                 View::Folder => match w.folder_current.clone() { Some(id) => Restore::Folder(id), None => return },
@@ -967,6 +1073,7 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
         _ => return,
     }
     if w.search_open { return w.close_search(window, cx); }
+    w.batch = None;
     match w.view {
         View::Doc => doc_back(w, cx),
         View::Folder | View::Trash => w.show_view(View::Home, cx),

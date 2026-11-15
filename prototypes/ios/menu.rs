@@ -16,18 +16,25 @@ use crate::app::Workspace;
 /// 前面打不打勾、属于第几组（组和组之间系统画分隔线）、是不是删除一类（系统画成红字）、
 /// 子菜单（有子项时它自己不能点，系统就地展开）。
 #[derive(Clone, PartialEq, Default)]
-pub struct Item { pub id: &'static str, pub title: SharedString, pub symbol: &'static str, pub checked: bool, pub group: u8, pub danger: bool, pub kids: Vec<Item> }
+pub struct Item { pub id: &'static str, pub title: SharedString, pub symbol: &'static str, pub checked: bool, pub group: u8, pub danger: bool, pub kids: Vec<Item>,
+    /// 标题下面一行小字（照 Craft「排序方式」下面写着当前的「手动」）。iOS 15 起才有。
+    pub subtitle: Option<SharedString> }
 impl Item {
     pub fn new(id: &'static str, title: impl Into<SharedString>, symbol: &'static str, group: u8) -> Self { Item { id, title: title.into(), symbol, group, ..Default::default() } }
     pub fn checked(mut self, on: bool) -> Self { self.checked = on; self }
     pub fn danger(mut self) -> Self { self.danger = true; self }
     pub fn kids(mut self, kids: Vec<Item>) -> Self { self.kids = kids; self }
+    pub fn sub(mut self, text: impl Into<SharedString>) -> Self { self.subtitle = Some(text.into()); self }
 }
 
 struct Button { key: &'static str, view: *mut AnyObject, frame: Bounds<Pixels>, items: Vec<Item>, dark: bool, seen: bool, shown: bool }
 
 thread_local! { static BUTTONS: RefCell<Vec<Button>> = const { RefCell::new(Vec::new()) }; }
 thread_local! { static ALLOWED: Cell<bool> = const { Cell::new(false) }; }
+// 搜索页开着：只有它自己的按钮（`find-…`）能出来，底下那页的都藏着；长按菜单也不出。
+thread_local! { static FIND_ONLY: Cell<bool> = const { Cell::new(false) }; }
+/// 这一帧是不是只放搜索页的按钮。
+pub fn find_only(on: bool) { FIND_ONLY.with(|f| f.set(on)); }
 thread_local! { static TARGET: RefCell<Option<(AsyncApp, AnyWindowHandle, WeakEntity<Workspace>)>> = const { RefCell::new(None) }; }
 
 /// 每帧开头调用，和 `glass::begin` 一样的规矩：`allowed` 为假时全部藏起，这一帧没被点到的下一帧藏起。
@@ -37,6 +44,7 @@ pub fn begin(allowed: bool, window: &Window, cx: &mut Context<Workspace>) {
     REGIONS.with(|r| r.borrow_mut().clear());
     super::files::attach(window);
     follow_appearance(window);
+    follow_accent(window);
     super::editmenu::responder_actions(window);
     TARGET.with(|t| if t.borrow().is_none() { *t.borrow_mut() = Some((cx.to_async(), window.window_handle(), cx.weak_entity())); });
     BUTTONS.with(|b| for button in b.borrow_mut().iter_mut() { button.seen = false; if !allowed { button.set_shown(false); } });
@@ -93,7 +101,7 @@ fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, 
         };
         let button = &mut buttons[ix];
         button.seen = true;
-        button.set_shown(ALLOWED.with(|a| a.get()));
+        button.set_shown(ALLOWED.with(|a| a.get()) && (!FIND_ONLY.with(|f| f.get()) || key.starts_with("find-")));
         if button.frame != frame {
             let rect = CGRect::new(CGPoint::new(f64::from(frame.origin.x), f64::from(frame.origin.y)), CGSize::new(f64::from(frame.size.width), f64::from(frame.size.height)));
             let _: () = msg_send![button.view, setFrame: rect];
@@ -129,7 +137,11 @@ unsafe fn menu(title: &str, image: *mut AnyObject, items: &[Item], wait: bool) -
 unsafe fn element(item: &Item, wait: bool) -> *mut AnyObject {
     unsafe {
         let image: *mut AnyObject = if item.symbol.is_empty() { std::ptr::null_mut() } else { msg_send![AnyClass::get(c"UIImage").unwrap(), systemImageNamed: ns_string(item.symbol)] };
-        if !item.kids.is_empty() { return menu(&item.title, image, &item.kids, wait); }
+        let subtitle = |e: *mut AnyObject| if let Some(s) = &item.subtitle {
+            let ok: bool = msg_send![e, respondsToSelector: objc2::sel!(setSubtitle:)];
+            if ok { let _: () = msg_send![e, setSubtitle: ns_string(s)]; }
+        };
+        if !item.kids.is_empty() { let m = menu(&item.title, image, &item.kids, wait); subtitle(m); return m; }
         let id = item.id;
         let handler = block2::RcBlock::new(move |_action: *mut AnyObject| if wait && CONTEXT_OPEN.with(|o| o.get()) { CONTEXT_PICK.with(|p| p.set(Some(id))) } else { chosen(id) });
         let action: *mut AnyObject = msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(&item.title), image: image, identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler];
@@ -137,6 +149,7 @@ unsafe fn element(item: &Item, wait: bool) -> *mut AnyObject {
         if item.checked { let _: () = msg_send![action, setState: 1isize]; }
         // 2 = UIMenuElementAttributesDestructive
         if item.danger { let _: () = msg_send![action, setAttributes: 2usize]; }
+        subtitle(action);
         action
     }
 }
@@ -155,6 +168,23 @@ fn follow_appearance(window: &Window) {
         let _: () = msg_send![ui, setOverrideUserInterfaceStyle: style];
     }
     STYLE.with(|s| s.set(Some(style)));
+}
+
+/// 设置 › 外观 › 界面强调色也压在窗口上：系统画的开关、菜单里的勾、提示框的按钮都换成同一个颜色。
+fn follow_accent(window: &Window) {
+    thread_local! { static TINT: RefCell<Option<String>> = const { RefCell::new(None) }; }
+    let key = crate::settings::prefs().accent;
+    if TINT.with(|t| t.borrow().as_deref() == Some(key.as_str())) { return; }
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
+    let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
+    unsafe {
+        let ui: *mut AnyObject = msg_send![handle.ui_view.as_ptr() as *mut AnyObject, window];
+        if ui.is_null() { return; }
+        // 默认的蓝不压：用系统自己的。
+        let tint: *mut AnyObject = if key.is_empty() { std::ptr::null_mut() } else { super::glass::ui_color(crate::theme::Theme::primary()) };
+        let _: () = msg_send![ui, setTintColor: tint];
+    }
+    TINT.with(|t| *t.borrow_mut() = Some(key));
 }
 
 // ---- 长按出的上下文菜单
@@ -179,7 +209,7 @@ thread_local! { static CONTEXT_HIDE: Cell<bool> = const { Cell::new(false) }; }
 pub fn context(target: impl Into<SharedString>, title: impl Into<SharedString>, radius: f32, items: Vec<Item>) -> impl IntoElement {
     let (target, title) = (target.into(), title.into());
     canvas(move |bounds, window, _| {
-        if !ALLOWED.with(|a| a.get()) { return; }
+        if !ALLOWED.with(|a| a.get()) || FIND_ONLY.with(|f| f.get()) { return; }
         let bounds = bounds.intersect(&window.content_mask().bounds);
         if bounds.size.width <= px(1.) || bounds.size.height <= px(1.) { return; }
         install(window);
@@ -189,7 +219,9 @@ pub fn context(target: impl Into<SharedString>, title: impl Into<SharedString>, 
 /// 长按落在能出上下文菜单的地方：GPUI 自己的长按（当右键）就不要再管了。
 pub fn context_at(at: Point<Pixels>) -> bool { REGIONS.with(|r| r.borrow().iter().any(|g| g.bounds.contains(&at))) }
 /// 上下文菜单是给谁弹的。
-pub fn context_target() -> Option<SharedString> { CONTEXT_FOR.with(|c| c.borrow().as_ref().map(|c| c.0.clone())) }
+/// 同一篇文档在一页上可能出现好几处（首页快速访问的卡片和下面收藏的一行）：每处的键是「id#位置」，
+/// 这里只交出 id；藏哪一块（`context_hidden`）按整个键比。
+pub fn context_target() -> Option<SharedString> { CONTEXT_FOR.with(|c| c.borrow().as_ref().map(|c| c.0.split('#').next().unwrap_or_default().to_string().into())) }
 /// `id` 这一块正浮在上下文菜单上：原处画成空的。
 pub fn context_hidden(id: &str) -> bool { CONTEXT_HIDE.with(|h| h.get()) && CONTEXT_FOR.with(|c| c.borrow().as_ref().is_some_and(|c| c.0.as_ref() == id)) }
 

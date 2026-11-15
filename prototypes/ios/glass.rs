@@ -98,6 +98,8 @@ pub fn pulse(key: &'static str) {
 
 /// 轻的触感反馈：长按出菜单、点悬浮按钮。
 pub fn haptic() {
+    // 设置 › 外观 › 启用触感 关了就不震。
+    if !crate::settings::prefs().haptics { return; }
     let Some(class) = AnyClass::get(c"UIImpactFeedbackGenerator") else { return; };
     unsafe {
         let generator: *mut AnyObject = msg_send![class, alloc];

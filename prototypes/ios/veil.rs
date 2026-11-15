@@ -93,6 +93,26 @@ pub fn home_header(scroll: &ScrollHandle, title: SharedString, avatar: Option<(B
     }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
 }
 
+/// 设置的子页（照 Craft，IMG_9177）：内容滚到顶栏下面时，顶栏是和首页同一种磨砂（下面的字微微透出来），
+/// 页名写在带子上；没滚时什么都不盖，页名由 GPUI 画在原处。
+pub fn page_header(scroll: &ScrollHandle, title: SharedString) -> impl IntoElement {
+    let scroll = scroll.clone();
+    canvas(move |bounds, window, _| {
+        if !on() { return; }
+        let offset = -scroll.offset().y;
+        if offset <= px(1.) {
+            VEIL.with(|v| if let Some(veil) = v.borrow_mut().as_mut() { unsafe {
+                if veil.shown { veil.shown = false; fade(veil.view, 0.); }
+                if !veil.text.0.is_empty() { veil.text = Default::default(); fade(veil.title, 0.); fade(veil.sub, 0.); }
+            } });
+            return;
+        }
+        place(bounds, crate::theme::dark(), true, window);
+        let frame = Bounds::new(point(bounds.left() + px(72.), bounds.top() + super::insets().top + px(9.)), size(bounds.size.width - px(144.), px(34.)));
+        write(frame, &title, "", crate::theme::Theme::text(), crate::theme::Theme::text_caption(), true);
+    }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
+}
+
 fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
     let smoked = dark && home;
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };

@@ -51,7 +51,10 @@ pub fn grid(w: &Workspace, entries: &[Entry], cols: usize, side: f32, gap: f32, 
     let off = -f32::from(scroll.offset().y);
     let view = f32::from(window.viewport_size().height);
     let (lo, hi) = (off - view, off + view * 2.);
-    let cards: Vec<AnyElement> = slots.into_iter().filter(|(_, _, y, h)| y + h >= lo && *y <= hi)
+    let mut slots: Vec<_> = slots.into_iter().filter(|(_, _, y, h)| y + h >= lo && *y <= hi).collect();
+    // 横滑的那张最后画：挪到旁边一列时压在那一列的卡片上面。
+    super::pick::on_top(&mut slots, |s| entries[s.0].id.clone());
+    let cards: Vec<AnyElement> = slots.into_iter()
         .map(|(i, x, y, h)| div().absolute().left(px(x)).top(px(y)).w(px(cw)).h(px(h)).child(w.render_home_card(&entries[i], h, cx)).into_any_element())
         .collect();
     div().id("home-masonry").flex_1().min_h_0().overflow_y_scroll().track_scroll(scroll)

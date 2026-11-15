@@ -277,7 +277,7 @@ pub fn show(view: *mut AnyObject, on: bool) -> bool {
             if was_hidden && just_slid() { materialize(layer); }
         } else if sliding() && in_top_bar(view) {
             return false;
-        } else if sliding() || just_slid() {
+        } else if sliding() || just_slid() || soft() {
             // 交接时旧的走得快（0.1 秒），新的稍晚再出来，两份不在原处叠着（照 Craft）。
             let anim = basic("opacity", 1., 0., if just_slid() { 0.1 } else { 0.15 }, [0.42, 0., 1., 1.]);
             let _: () = msg_send![anim, setFillMode: ns_string("forwards")];
@@ -334,6 +334,10 @@ pub fn materialize(layer: *mut AnyObject) {
         let _: () = msg_send![ca, commit];
     }
 }
+thread_local! { static SOFT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) }; }
+/// 接下来一小会儿要藏的玻璃按钮淡出，不是一下消失（打开搜索时：照 Craft，顶上和右下的按钮跟着搜索页一起淡掉）。
+pub fn soft_hide() { SOFT.with(|s| s.set(Some(Instant::now()))); }
+fn soft() -> bool { SOFT.with(|s| s.get()).is_some_and(|t| t.elapsed() < Duration::from_millis(300)) }
 /// 过渡刚完（0.3 秒内）：推迟到现在才藏起的顶栏按钮淡出，和新页淡入的按钮交接，不是一下没了。
 pub fn just_slid() -> bool { SLIDING.with(|s| s.get()).is_some_and(|t| { let now = Instant::now(); now >= t && now - t < Duration::from_millis(300) }) }
 

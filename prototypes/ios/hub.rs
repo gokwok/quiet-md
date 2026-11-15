@@ -75,8 +75,10 @@ fn section_head(id: &'static str, title: &'static str, open: Option<Box<dyn Fn(&
 fn with_menu(w: &Workspace, row: Stateful<Div>, e: &Entry, cx: &mut Context<Workspace>) -> Stateful<Div> {
     let id = e.id.clone();
     // 菜单开着时这一行浮在菜单上，原处不再留一份。
-    let row = if super::menu::context_hidden(&e.id) { row.opacity(0.) } else { row };
-    row.children(super::row_context(w, &e.id, 12.)).on_mouse_down(MouseButton::Right, cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
+    // 这一行长按时用自己的键：上面快速访问里同一篇的卡片不跟着藏。
+    let key = format!("{}#row", e.id);
+    let row = if super::menu::context_hidden(&key) { row.opacity(0.) } else { row };
+    row.children(super::row_context_at(w, &e.id, &key, 12.)).on_mouse_down(MouseButton::Right, cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
         w.row_menu = Some(RowMenu { id: id.clone(), pos: ev.position, corner: Anchor::TopLeft, sub: false, batch: false });
         cx.notify();
     }))
@@ -246,39 +248,40 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
-/// 「最近删除」（回收站）：和「所有文档」同一套——左上玻璃返回、右上玻璃「…」（清空回收站），大标题跟着内容滚走，
-/// 下面是首页那样铺在底色上的行：图标、标题、右边还剩几天。长按一行出「恢复 / 彻底删除」。
-pub fn trash_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
-    let rows: Vec<AnyElement> = w.trash.iter().map(|t| {
-        let title: SharedString = display_title(&t.title).into();
-        let icon = match &t.icon {
-            Some(em) => div().text_size(px(18.)).child(em.clone()).into_any_element(),
-            None => crate::ui::icon("doc", 20., Theme::icon()).into_any_element(),
-        };
-        div().id(SharedString::from(format!("trash-row-{}", t.id))).w_full().h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(17.)).rounded(px(10.)).active(|s| s.bg(Theme::fill_pressed()))
-            .child(div().size(px(22.)).flex_none().flex().items_center().justify_center().child(icon))
-            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.clone()))
-            .child(div().flex_none().text_size(px(15.)).text_color(Theme::text_caption()).child(crate::trash::remaining(t.deleted)))
-            .children(super::trash_context(&t.id, title))
-            .into_any_element()
-    }).collect();
-    let list = if rows.is_empty() {
-        div().mx(px(16.)).h(px(98.)).rounded(px(16.)).bg(Theme::fill_hover()).flex().items_center().justify_center()
-            .child(div().text_size(px(15.)).text_color(Theme::text_caption()).child(tr("删除的文档会在这里保留 30 天。", "Deleted documents stay here for 30 days."))).into_any_element()
-    } else { group(rows).into_any_element() };
-    let content = div().w_full().flex().flex_col().pt(px(super::chrome_top())).pb(px(40.))
-        .child(super::large_title(tr("最近删除", "Recently deleted")))
-        .when(!w.trash.is_empty(), |d| d.child(div().px(px(24.)).pb(px(12.)).text_size(px(14.)).line_height(px(20.)).text_color(Theme::text_caption())
-            .child(tr("删除的文档保留 30 天，长按可以恢复或彻底删除。", "Deleted documents are kept for 30 days. Long-press one to restore or delete it."))))
-        .child(list);
+thread_local! { static TRASH: std::cell::RefCell<(Vec<(String, u64)>, Vec<crate::store::Entry>)> = std::cell::RefCell::new(Default::default()); }
+/// 回收站里的全部东西（包括跟着文件夹删掉的文档），当成文档库里的条目。按回收站的列表缓存，删、恢复后才重读。
+pub fn trash_entries(w: &Workspace) -> Vec<crate::store::Entry> {
+    let key: Vec<(String, u64)> = w.trash.iter().map(|t| (t.id.clone(), t.deleted)).collect();
+    TRASH.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != key { *c = (key, w.store.trash_entries()); }
+        c.1.clone()
+    })
+}
+
+pub fn trash_page(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> AnyElement {
+    // 照 Craft（IMG_9181）：和文件夹页同一套——大标题、搜索、一块说明，下面是同样的卡片网格：删掉的文档是那页纸，
+    // 删掉的文件夹是文件夹（露出跟着删掉的文档）。点卡片不打开；长按恢复或彻底删除；右上「…」清空。
+    let all = trash_entries(w);
+    let roots: Vec<crate::store::Entry> = w.trash.iter().filter_map(|t| all.iter().find(|e| e.id == t.id).cloned()).collect();
+    let lead = super::browse_lead_caption(tr("最近删除", "Recently deleted"), tr("文档将保留 30 天。之后，文档将被永久删除。", "Documents are kept for 30 days, then deleted permanently."), cx);
+    // 「选择」（照 Craft）：勾选几项，底部是「恢复」和「彻底删除」。
+    if w.batch.is_some() && !roots.is_empty() {
+        let ids = roots.iter().map(|e| e.id.clone()).collect();
+        let n = w.batch.as_ref().map_or(0, |s| s.len());
+        let ink = if n > 0 { Theme::text() } else { Theme::text_disabled() };
+        let body = w.render_home_grid(&roots, true, Some(lead), window, cx);
+        return super::batch_page_with(w, ids, body, vec![("sf:arrow.uturn.backward", ink, "batch-restore"), ("sf:trash", if n > 0 { Theme::danger() } else { ink }, "batch-purge")], |w, _, cx| w.show_view(View::Home, cx), cx);
+    }
+    let body = if roots.is_empty() { super::browse_empty(lead, tr("没有最近删除的文档", "No recently deleted documents")) } else { w.render_home_grid(&roots, true, Some(lead), window, cx) };
     let mut items = vec![];
     if !w.trash.is_empty() { items.push(super::menu::Item::new("trash-empty-all", tr("清空回收站", "Empty Trash"), "trash", 0).danger()); }
-    let chrome = div().absolute().top(super::insets().top).left_0().right_0().h(px(crate::app::HEADER_H)).px(px(16.)).flex().items_center()
-        .child(super::glass_button("trash-back", "editor-icons/chevron-left", 22.).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx))))
-        .child(div().flex_1())
-        .when(!items.is_empty(), |d| d.child(div().relative().flex_none().size(px(44.)).child(super::menu::glass_button("trash-options", "ellipsis", Theme::text(), items))));
-    div().flex_1().min_w_0().h_full().relative()
-        .child(div().id("trash-page").size_full().overflow_y_scroll().child(content))
-        .child(chrome)
-        .into_any_element()
+    // 和文件夹页同一排：左边返回，右边「选择」和「…」。
+    let chrome = if w.trash.is_empty() {
+        div().absolute().top(super::insets().top).left_0().right_0().h(px(crate::app::HEADER_H)).px(px(16.)).flex().items_center()
+            .child(super::glass_button("trash-back", "editor-icons/chevron-left", 22.).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx)))).into_any_element()
+    } else {
+        super::browse_chrome_with(w, items, cx, |w, _, cx| w.show_view(View::Home, cx)).into_any_element()
+    };
+    super::browse_page(body, chrome)
 }

@@ -57,6 +57,19 @@ fn thumb(ground: u32, s: f32) -> Div {
 /// 现在用着的那张图标（关于页顶上）。
 pub fn current_icon(s: f32) -> Div { thumb(ICONS[current()].3, s) }
 
+/// 设置 › 外观 › 应用图标（照 Craft）：三张大图标平分一行，名字在下面，选中的外面一圈强调色、名字也是强调色。
+pub fn grid(cx: &mut Context<Workspace>) -> Div {
+    let at = current();
+    div().w_full().flex().justify_around().children(ICONS.iter().enumerate().map(|(i, &(zh, en, _, ground))| {
+        let on = i == at;
+        div().id(("app-icon-grid", i)).flex().flex_col().items_center().gap(px(8.))
+            .child(div().p(px(3.)).rounded(px(20.)).border_2().border_color(if on { Theme::primary() } else { gpui::transparent_black() }).child(thumb(ground, 64.)))
+            .child(div().text_size(px(15.)).line_height(px(20.)).font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                .text_color(if on { Theme::primary() } else { crate::settings::row_ink() }).child(crate::settings::tr(zh, en)))
+            .on_click(cx.listener(move |_, _, _, cx| { if i != current() { super::glass::haptic(); set(i); } cx.notify(); }))
+    }))
+}
+
 /// 三张小样排一行，选中的那张外面一圈强调色。
 pub fn picker(cx: &mut Context<Workspace>) -> Div {
     let at = current();

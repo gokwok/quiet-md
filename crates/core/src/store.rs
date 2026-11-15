@@ -256,6 +256,8 @@ pub struct TrashEntry {
     pub deleted: u64,
     /// Where it was: its parent page, `None` for the top of 我的文档库.
     pub parent: Option<String>,
+    /// A deleted folder (its documents went with it).
+    pub folder: bool,
 }
 
 /// The 回收站 is emptied after 30 days.
@@ -999,11 +1001,34 @@ impl Store {
                     icon: doc.icon.clone(),
                     deleted: t.deleted,
                     parent: t.meta.parent.clone(),
+                    folder: t.meta.folder.is_some(),
                 }
             })
             .collect();
         out.sort_by(|a, b| b.deleted.cmp(&a.deleted).then_with(|| a.id.cmp(&b.id)));
         out
+    }
+
+    /// Everything in the 回收站 as entries, including the pages a deleted
+    /// folder took along (their `parent` still points at it), so it can be
+    /// shown like a folder of the library. Nothing is restored.
+    pub fn trash_entries(&self) -> Vec<Entry> {
+        self.trash.iter().map(|(id, t)| {
+            let doc = if t.meta.folder.is_some() { None } else { self.load_trashed(id).ok() };
+            let title = t.meta.folder.clone().or_else(|| t.meta.name.clone()).or_else(|| doc.as_ref().map(|d| d.title.text.clone())).unwrap_or_default();
+            let icon = t.meta.folder_icon.clone().or_else(|| doc.as_ref().and_then(|d| d.icon.clone()));
+            Entry { download: Default::default(), id: id.clone(), meta: t.meta.clone(), title, icon, body: "".into(), reminders: vec![], links: vec![] }
+        }).collect()
+    }
+
+    /// A deleted document as it was, for a preview of the 回收站; it stays where it is.
+    pub fn load_trashed(&self, id: &str) -> Result<Document> {
+        let t = self.trash.get(id).with_context(|| format!("{id} is not in the trash"))?;
+        if t.meta.folder.is_some() { anyhow::bail!("{id} is a folder"); }
+        let text = crate::file_io::read_to_string(self.trash_path(id))?;
+        if !t.meta.markdown { return docxml::parse(&text); }
+        let title = t.meta.name.clone().unwrap_or_default();
+        Ok(crate::markdown::parse_file(&text, &title, None))
     }
 
     /// 恢复: put a deleted page (and the pages that went with it) back. True
@@ -1626,6 +1651,13 @@ mod tests {
         let t = s.list_trash();
         assert_eq!(t.len(), 1, "the page rides along with its folder");
         assert_eq!(t[0].title, "父");
+        assert!(t[0].folder, "a deleted folder says so");
+        // The 回收站 previews deleted pages without restoring them; a folder has no page.
+        assert_eq!(s.load_trashed(&b).unwrap().title.text, "子");
+        assert!(s.load_trashed(&a).is_err());
+        let all = s.trash_entries();
+        assert_eq!(all.len(), 2, "the folder and the page it took along");
+        assert_eq!(all.iter().find(|e| e.id == b).unwrap().meta.parent.as_deref(), Some(a.as_str()));
         let mut s = lib.open();
         assert!(!s.restore(&a).unwrap());
         let list = s.list();

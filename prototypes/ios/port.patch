@@ -68,7 +68,16 @@
      /// 下载 submenu open.
      pub sub: bool,
      /// The 批量操作 menu for the checked rows.
-@@ -209,6 +213,11 @@
+@@ -194,6 +198,8 @@
+     Restore(String),
+     /// 回收站 → 彻底删除.
+     Purge(String),
++    /// 手机「最近删除」→ 选择 → 彻底删除.
++    PurgeMany(Vec<String>),
+     /// 回收站 → 清空回收站: every trashed page, permanently.
+     EmptyTrash,
+     /// 隐藏引用列表 (with 不再提示) / 显示引用列表.
+@@ -209,6 +215,11 @@
  pub type AfterSave = Box<dyn FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
  
  /// Inline 重命名 of a sidebar row.
@@ -80,7 +89,7 @@
  pub struct Rename {
      pub id: String,
      pub field: Entity<TextField>,
-@@ -237,6 +246,8 @@
+@@ -237,6 +248,8 @@
      /// Keyboard highlight inside search results.
      pub search_sel: Option<usize>,
      pub sidebar_open: bool,
@@ -89,7 +98,7 @@
      /// Dragged width (300 by default, 268 to min(800, window − 540)).
      pub sidebar_width: f32,
      /// The resize handle is being dragged.
-@@ -274,7 +285,7 @@
+@@ -274,7 +287,7 @@
      /// 回收站 rows, refreshed when the page opens or changes.
      pub trash: Vec<crate::store::TrashEntry>,
      /// A 回收站 row's menu: the page and where it opens.
@@ -98,7 +107,7 @@
      /// The toast and when it appeared.
      pub toast: Option<(ToastKind, SharedString, Instant)>,
      toast_task: Option<Task<()>>,
-@@ -293,6 +304,8 @@
+@@ -293,6 +306,8 @@
      pub space_menu: bool,
      /// 设置 › 空间's name field.
      pub space_name: Entity<TextField>,
@@ -107,7 +116,7 @@
      /// 导出 Markdown 设置.
      pub export_md: Option<crate::transfer::ExportMd>,
      /// 编辑 / 阅读 dropdown, and the mode button's last-frame bounds.
-@@ -345,6 +358,8 @@
+@@ -345,6 +360,8 @@
          if !cx.has_global::<SharedStore>() { cx.set_global(SharedStore::open().expect("open document library")); }
          let mut store = cx.global::<SharedStore>().clone();
          let entries = store.list();
@@ -116,7 +125,7 @@
          let search = cx.new(|cx| {
              let mut f = TextField::new("搜索", cx);
              f.placeholder_color = Theme::text_disabled();
-@@ -360,6 +375,12 @@
+@@ -360,6 +377,12 @@
              if let Some(s) = spaces.iter().find(|s| s.root == root) { f.set_text(&crate::space::name(s), cx); }
              f
          });
@@ -129,7 +138,7 @@
          let settings_filter = cx.new(|cx| {
              let mut f = TextField::new(crate::settings::tr("搜索快捷键", "Search shortcuts"), cx);
              f.placeholder_color = Theme::text_disabled();
-@@ -372,7 +393,7 @@
+@@ -372,7 +395,7 @@
              // The system switched between light and dark (or the app's own look changed).
              cx.observe_window_appearance(window, |this, _, cx| if crate::settings::sync_dark(cx) { crate::settings::refresh_all(this, cx); }),
              cx.observe_window_activation(window, |this, window, cx| {
@@ -138,7 +147,7 @@
                  else { this.cancel_home_drag(cx); this.end_folder_drag(true, cx); this.cancel_shortcut_recording(cx); this.flush(cx); }
              }),
              cx.subscribe_in(&search, window, |this, _, ev: &TextFieldEvent, window, cx| {
-@@ -440,7 +461,8 @@
+@@ -440,7 +463,8 @@
              editor: None,
              search,
              search_sel: None,
@@ -148,7 +157,7 @@
              sidebar_width,
              sidebar_drag: false,
              folder_current: None,
-@@ -465,7 +487,7 @@
+@@ -465,7 +489,7 @@
              view: View::Doc,
              home: Default::default(),
              settings_scroll: ScrollHandle::new(),
@@ -157,7 +166,7 @@
              trash_menu: None,
              toast: None,
              toast_task: None,
-@@ -482,6 +504,7 @@
+@@ -482,6 +506,7 @@
              space_form: None,
              space_menu: false,
              space_name,
@@ -165,7 +174,7 @@
              export_md: None,
              focus: cx.focus_handle(),
              save_task: None,
-@@ -495,7 +518,8 @@
+@@ -495,7 +520,8 @@
          ws.load_home();
          // An empty library opens on 主页's empty state; only a quick note
          // window starts a document of its own.
@@ -175,7 +184,7 @@
              Some(id) => ws.open(&id, window, cx),
              None if quick => ws.new_doc(window, cx),
              None => ws.view = View::Home,
-@@ -540,7 +564,9 @@
+@@ -540,7 +566,9 @@
              self.show_toast(label, cx); return false;
          }
          if self.entries.iter().any(|e| e.id == id && e.meta.folder.is_some()) { return self.open_folder(id, window, cx); }
@@ -185,7 +194,7 @@
              self.view = View::Doc;
              cx.notify();
          }
-@@ -568,7 +594,7 @@
+@@ -568,7 +596,7 @@
          let pinned = meta.as_ref().is_some_and(|m| !m.catalogue_closed);
          let editor = cx.new(|cx| {
              let mut e = Editor::new(doc, modified, width, window, cx);
@@ -194,7 +203,7 @@
              e.markdown = meta.as_ref().is_some_and(|m| m.markdown);
              if let Some(m) = &meta {
                  e.created = m.created;
-@@ -624,9 +650,8 @@
+@@ -624,9 +652,8 @@
              }
          }));
          // Opening a document puts the caret in it, unless the user is typing a search.
@@ -206,7 +215,7 @@
          if let Some(m) = self.store.touch(id)
              && let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
                  e.meta.opened = m.opened;
-@@ -647,6 +672,15 @@
+@@ -647,6 +674,15 @@
          true
      }
  
@@ -222,7 +231,7 @@
      pub fn new_doc(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          if !self.save_before(cx, |w, window, cx| w.new_doc(window, cx)) {
              return;
-@@ -666,7 +700,7 @@
+@@ -666,7 +702,7 @@
                  self.search.update(cx, |s, cx| s.set_text("", cx));
                  self.open(&id, window, cx);
                  if let Some(ed) = &self.editor {
@@ -231,7 +240,7 @@
                  }
              }
              Err(e) => self.status = SaveStatus::Failed(crate::localized_format!("新建失败：{}", "Could not create document: {}", crate::settings::diagnostic(&e.to_string()))),
-@@ -718,6 +752,8 @@
+@@ -718,6 +754,8 @@
                  return;
              }
          }
@@ -240,7 +249,7 @@
          let file_before = self.store.track_file_changes();
          let mut deleted = vec![];
          let mut errors = vec![];
-@@ -757,12 +793,17 @@
+@@ -757,12 +795,17 @@
          }
          self.remember_files(file_before, crate::settings::tr("删除", "Delete"));
          self.sync_sub_pages(cx);
@@ -262,7 +271,7 @@
          } else {
              let msg = errors.join("；");
              self.show_toast_kind(ToastKind::Error, &msg, cx);
-@@ -800,11 +841,14 @@
+@@ -800,11 +843,16 @@
  
      /// Switch the main pane to 主页 or 回收站 (or back to the document).
      pub fn show_view(&mut self, view: View, cx: &mut Context<Self>) {
@@ -271,13 +280,15 @@
          self.cancel_shortcut_recording(cx);
          if view == View::Trash {
              self.trash = self.store.list_trash();
++            // 手机：「已移到回收站 · 打开回收站」这条提示到了回收站就没用了，而且回收站顶上左右有按钮，胶囊会被挤窄。收起它。
++            if crate::ios::floating() { self.toast = None; crate::ios::toast::clear_link(); }
          }
          self.view = view;
 +        self.drawer = false;
          self.row_menu = None;
          self.trash_menu = None;
          self.theme_menu = None;
-@@ -817,7 +861,17 @@
+@@ -817,7 +865,17 @@
          self.show_toast_kind(ToastKind::Success, msg, cx);
      }
  
@@ -295,7 +306,7 @@
          self.toast = Some((kind, SharedString::from(msg.to_string()), Instant::now()));
          if let Some(ed) = &self.editor {
              ed.update(cx, |e, cx| e.clear_toast(cx));
-@@ -831,6 +885,8 @@
+@@ -831,6 +889,8 @@
  
      fn render_toast(&self, window: &mut Window) -> Option<AnyElement> {
          let (kind, msg, t0) = self.toast.as_ref()?;
@@ -304,7 +315,7 @@
          crate::ui::toast_el(*kind, msg, *t0, window)
      }
  
-@@ -844,7 +900,7 @@
+@@ -844,7 +904,7 @@
              f
          });
          let focus = field.focus_handle(cx);
@@ -313,7 +324,7 @@
          let subs = vec![
              cx.subscribe_in(&field, window, |w, _, ev: &TextFieldEvent, window, cx| match ev {
                  TextFieldEvent::Submit => w.finish_rename(true, window, cx),
-@@ -855,12 +911,60 @@
+@@ -855,12 +915,60 @@
          ];
          self.rename = Some(Rename { id: id.to_string(), field, _subs: subs });
          // From 主页 the row may be hidden: show it in the sidebar.
@@ -375,7 +386,7 @@
      fn finish_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
          let Some(r) = self.rename.take() else { return };
          let refocus = r.field.read(cx).is_focused(window);
-@@ -890,7 +994,7 @@
+@@ -890,7 +998,7 @@
          }
          if refocus
              && let Some(ed) = &self.editor {
@@ -384,7 +395,7 @@
              }
          self.sync_sub_pages(cx);
          cx.notify();
-@@ -934,6 +1038,8 @@
+@@ -934,6 +1042,8 @@
          // caps that at SAVE_MAX_DELAY after the oldest unsaved edit.
          let left = SAVE_MAX_DELAY.saturating_sub(self.dirty_since.map_or(Duration::ZERO, |t| t.elapsed()));
          let delay = SAVE_DELAY.min(left);
@@ -393,7 +404,7 @@
          // Keep the list title live while typing; the body/snippet updates on save.
          if let (Some(id), Some(ed)) = (&self.current, &self.editor) {
              let title = ed.read(cx).core.doc.title.text.clone();
-@@ -1239,6 +1345,24 @@
+@@ -1239,6 +1349,24 @@
              crumbs.push(sep());
          }
          let record_more = self.more_btn_bounds.clone();
@@ -418,7 +429,7 @@
          div()
              .id("top-bar").relative()
              .h(px(HEADER_H))
-@@ -1249,7 +1373,12 @@
+@@ -1249,7 +1377,12 @@
              // Clear of the traffic lights, which sit over the note when the sidebar is closed.
              .pl(if self.sidebar_open { px(18.) } else { px(theme::TRAFFIC_LIGHTS_W) })
              .title_bar()
@@ -432,7 +443,7 @@
                  d.child(
                      div()
                          .id("open-sidebar")
-@@ -1299,7 +1428,7 @@
+@@ -1299,7 +1432,7 @@
                              .child(
                                  div()
                                      .min_w_0()
@@ -441,7 +452,7 @@
                                      .line_height(px(20.))
                                      .font_weight(FontWeight::SEMIBOLD)
                                      .text_color(Theme::text())
-@@ -1321,6 +1450,11 @@
+@@ -1321,6 +1454,11 @@
                      .h(px(HEADER_ACTIONS_H)).flex_none()
                      .flex()
                      .items_center()
@@ -453,7 +464,7 @@
                      .when(self.current.is_some(), |d| {
                          d.child(
                              // No tooltip while its dropdown is open; the menu hangs
-@@ -1337,7 +1471,7 @@
+@@ -1337,7 +1475,7 @@
                                  })),
                          )
                      })
@@ -462,7 +473,7 @@
                          seg("doc-search", "search")
                              .tip_label(crate::shortcuts::keys(crate::settings::text("搜索(⌘ + J)")).into(), TipSide::Below)
                              .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(FocusSearch), cx))),
-@@ -1345,24 +1479,60 @@
+@@ -1345,24 +1483,65 @@
                      .child(
                          // Straight to a new document: no 新建 menu, as 导入 is rare.
                          seg("doc-new", "plus").tip(crate::settings::tr("新建文档", "New document"), None).on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx))),
@@ -507,17 +518,22 @@
 +        // 首页在换页滑动（含跟手返回）时不要玻璃：它和带子上的空间头像是钉在屏幕上的原生视图，不会跟着页面滑，滑完再淡入。
 +        let veiled = glass && crate::ios::glass::supported() && ((self.view == View::Home && crate::ios::home_page() == crate::ios::HomePage::Hub && self.batch.is_none() && !crate::ios::shot::sliding())
 +            // 设置第一级也一样：往上滚过头像后顶上是磨砂玻璃和居中的「设置」。
-+            || (self.view == View::Settings && !crate::ios::settings_detail() && !crate::ios::shot::sliding())
++            // 子页也是：内容滚到顶栏下面时是同一种磨砂。
++            || (self.view == View::Settings && !crate::ios::shot::sliding())
 +            || (self.view == View::Doc && self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled()
 +                || (crate::ios::style::of(self).is_some_and(|s| s.background.is_some()) && e.read(cx).paper_top() < crate::ios::chrome_top()))));
 +        crate::ios::veil::begin(veiled, window);
++        crate::ios::set_trash_view(self.view == View::Trash);
++        crate::ios::clear_lead_note();
 +        crate::ios::alert::begin(window);
 +        crate::ios::card::begin(window);
 +        crate::ios::toast::begin(window);
 +        crate::ios::panel::begin(window);
 +        crate::ios::style::begin(self);
 +        if self.view != View::Doc || crate::ios::editing() { crate::ios::close_history(); }
-+        crate::ios::menu::begin(glass, window, cx);
++        // 搜索页开着时它自己的「…」要能用：只放它的按钮（`menu::find_only`）。
++        crate::ios::menu::find_only(compact && self.search_open && !glass);
++        crate::ios::menu::begin(glass || (compact && self.search_open), window, cx);
 +        let safe = crate::ios::safe(window);
 +        crate::ios::set_layout(compact, safe, window.viewport_size());
 +        crate::ios::set_keyboard(crate::ios::keyboard_up(window));
@@ -528,7 +544,7 @@
          let row_menu = self.render_row_menu(window, cx);
          let resize = self.sidebar_open.then(|| self.render_resize_handle(window, cx));
          let resize_overlay = self.render_resize_overlay(cx);
-@@ -1387,7 +1557,8 @@
+@@ -1387,7 +1566,8 @@
                  .h_full()
                  .flex()
                  .flex_col()
@@ -538,7 +554,7 @@
                  .child(
                      div()
                          .flex_1()
-@@ -1399,10 +1570,19 @@
+@@ -1399,14 +1579,25 @@
                                  .flex_1()
                                  .min_w_0()
                                  .h_full()
@@ -556,16 +572,23 @@
 +                // 悬浮的顶栏画在正文之后，才接得到点击。
 +                .when(crate::ios::floating(), |d| d.children((!crate::ios::veil::on() && !crate::ios::style::banded() && !self.editor.as_ref().is_some_and(|e| e.read(cx).cover_on_top())).then(|| crate::ios::top_fade(crate::editor_theme::Theme::bg_body(), self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled())))).children(crate::ios::veil::on().then(|| div().absolute().top_0().left_0().right_0().h(px(crate::ios::chrome_top())).child(crate::ios::veil::slot(crate::ios::style::chrome_ink().map_or(crate::theme::dark(), |(ink, _)| ink.l > 0.5))))).child(self.top_bar(cx)))
                  .into_any_element(),
++            // 手机：搜索页整个盖住时，底下那页不画（打开后打字更顺）。
++            View::Home | View::Folder | View::Trash if crate::ios::is_compact() && self.search_open && crate::ios::search::covering() => div().flex_1().into_any_element(),
              View::Home => self.render_home(window, cx),
              View::Folder => self.render_folder(window, cx),
-@@ -1418,13 +1598,20 @@
+-            View::Trash => self.render_trash(cx),
++            View::Trash => self.render_trash(window, cx),
+             View::Settings => self.render_settings(cx),
+         };
+         let move_dlg = self.render_move_dialog(cx);
+@@ -1418,13 +1609,20 @@
          // surface beside it; the change of value is the only line between
          // them (no gutter, radius, border or shadow).
          // A document sits on its theme's page colour.
 -        let page = if self.view == View::Doc { crate::editor_theme::Theme::bg_body() } else { Theme::bg_body() };
 -        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).child(main)
 +        let page = if self.view == View::Doc { crate::editor_theme::Theme::bg_body() } else if matches!(self.view, View::Home | View::Folder | View::Trash) || (self.view == View::Settings && crate::ios::floating()) { crate::ios::home_bg() } else { Theme::bg_body() };
-+        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).pt(if (matches!(self.view, View::Doc | View::Home | View::Folder | View::Trash) || (self.view == View::Settings && !crate::ios::settings_detail())) && crate::ios::floating() { px(0.) } else { safe.top }).pb(if !crate::ios::floating() { safe.bottom } else { match self.view { View::Home | View::Folder => px(0.), View::Settings if crate::ios::settings_detail() => safe.bottom, _ if crate::ios::style::banded() => px(0.), _ => safe.bottom } }).pr(safe.right).when(!self.sidebar_open, |d| d.pl(safe.left))
++        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).pt(if matches!(self.view, View::Doc | View::Home | View::Folder | View::Trash | View::Settings) && crate::ios::floating() { px(0.) } else { safe.top }).pb(if !crate::ios::floating() { safe.bottom } else { match self.view { View::Home | View::Folder => px(0.), View::Settings => px(0.), _ if crate::ios::style::banded() => px(0.), _ => safe.bottom } }).pr(safe.right).when(!self.sidebar_open, |d| d.pl(safe.left))
 +            // 文档自己的背景铺在最下面，一直到屏幕的四边；有背景时纸（正文那一块）两侧内缩、上沿让到顶栏下面。
 +            .children(crate::ios::style::backdrop())
 +            .child(crate::ios::page(main, self.view, self.folder_current.as_deref().filter(|_| self.view == View::Folder).map(|id| (id, self.ancestors(id).len()))))
@@ -582,7 +605,7 @@
          div()
              .id("workspace")
              .key_context("Workspace")
-@@ -1448,6 +1635,9 @@
+@@ -1448,6 +1646,9 @@
              // whichever window macOS considers active.
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
              .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
@@ -592,7 +615,7 @@
              .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
                  crate::quick_note::persist(cx);
                  if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
-@@ -1464,7 +1654,7 @@
+@@ -1464,7 +1665,7 @@
              .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
              .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
              .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
@@ -601,7 +624,7 @@
                  cx.notify();
              }))
              .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
-@@ -1501,7 +1691,7 @@
+@@ -1501,7 +1702,7 @@
              }))
              // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
              .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
@@ -610,7 +633,7 @@
                  if ev.keystroke.key == "escape" && w.has_home_drag() {
                      w.cancel_home_drag(cx); cx.stop_propagation(); return;
                  }
-@@ -1533,10 +1723,16 @@
+@@ -1533,10 +1734,16 @@
                  if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
                  cx.stop_propagation();
              }))
@@ -628,7 +651,7 @@
              .children(row_menu)
              .children(doc_menu)
              .children(mode_menu)
-@@ -1548,6 +1744,7 @@
+@@ -1548,6 +1755,7 @@
              .children(move_dlg)
              .children(space_menu)
              .children(space_dialog)
@@ -3756,7 +3779,7 @@
          let file_before = self.store.track_file_changes();
          self.create_menu = None;
          match self.store.create_folder(tr("未命名文件夹", "Untitled folder"), parent.as_deref()) {
-@@ -142,25 +145,45 @@
+@@ -142,25 +145,46 @@
                  .on_click(cx.listener(move |w, _, window, cx| w.new_child(&doc, window, cx))))
              .child(self.view_switch(cx).no_drag().ml(px(12.)));
          let children = self.level_entries(Some(&id));
@@ -3764,11 +3787,6 @@
 +        // 手机上有玻璃：和所有文档、文件夹页是同一套浏览页。
 +        let floating = crate::ios::floating();
 +        if floating {
-+            if self.batch.is_some() {
-+                let ids = children.iter().take(crate::sidebar::BATCH_LIMIT).map(|e| e.id.clone()).collect();
-+                let body = if children.is_empty() { div().flex_1().into_any_element() } else if self.home.grid { self.render_home_grid(&children, true, None, window, cx) } else { self.render_home_list(&children, true, None, cx) };
-+                return crate::ios::batch_page(self, ids, body, cx);
-+            }
 +            let entry = self.entries.iter().find(|e| e.id == id);
 +            let title = entry.map(|e| display_title(&e.title)).unwrap_or_else(|| tr("文件夹", "Folder").to_string());
 +            let note = entry.and_then(|e| e.meta.folder_note.clone());
@@ -3777,7 +3795,13 @@
 +            let body = if children.is_empty() { crate::ios::browse_empty(lead, tr("这个文件夹还是空的", "This folder is empty")) }
 +                else if self.home.grid { self.render_home_grid(&children, true, Some(lead), window, cx) } else { self.render_home_list(&children, true, Some(lead), cx) };
 +            let parent = path.last().map(|e| e.id.clone());
-+            return crate::ios::browse_page(body, crate::ios::browse_chrome(self, cx, move |w, window, cx| match &parent { Some(p) => { w.open(p, window, cx); } None => w.show_view(View::Home, cx) }));
++            let back = move |w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| match &parent { Some(p) => { w.open(p, window, cx); } None => w.show_view(View::Home, cx) };
++            // 「选择」时页面不变，只换顶上和底下的按钮（照 Craft）。
++            if self.batch.is_some() {
++                let ids = children.iter().take(crate::sidebar::BATCH_LIMIT).map(|e| e.id.clone()).collect();
++                return crate::ios::batch_page(self, ids, body, back, cx);
++            }
++            return crate::ios::browse_page(body, crate::ios::browse_chrome(self, cx, back));
 +        }
          let body = if children.is_empty() {
              div().flex_1().pt(px(80.)).text_center().text_size(px(14.)).text_color(Theme::text_caption()).child(tr("这个文件夹还是空的", "This folder is empty")).into_any_element()
@@ -3826,7 +3850,27 @@
      match &e.icon {
          _ if e.meta.markdown => crate::search::doc_icon_named("doc-md").mr(px(12.)).into_any_element(),
          Some(em) => div().size(px(24.)).mr(px(12.)).flex_none().flex().items_center().justify_center().text_size(px(18.)).child(em.clone()).into_any_element(),
-@@ -426,6 +426,13 @@
+@@ -408,6 +408,10 @@
+ impl Workspace {
+     /// In 批量管理 a click checks or unchecks; otherwise it opens.
+     fn home_click(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
++        // 手机：搜索结果的网格里点了一张卡片，先收起搜索。
++        if self.search_open && crate::ios::floating() && self.batch.is_none() { self.close_search(window, cx); }
++        // 「最近删除」的卡片点了不打开（长按恢复或彻底删除；「选择」时照常勾选）。
++        if self.view == crate::app::View::Trash && self.batch.is_none() { return }
+         if self.batch.is_none() { return self.open(id, window, cx) }
+         if !self.toggle_check(id) {
+             self.show_toast_kind(crate::ui::ToastKind::Error, &crate::localized_format!("一次最多选择 {} 项", "Select up to {} items at a time", crate::sidebar::BATCH_LIMIT), cx);
+@@ -416,7 +420,7 @@
+     }
+ 
+     /// The row's / card's checkbox while 批量管理 is on.
+-    fn home_check(&self, e: &Entry) -> Option<Div> {
++    pub(crate) fn home_check(&self, e: &Entry) -> Option<Div> {
+         use crate::sidebar::{BATCH_LIMIT, Check, checkbox};
+         let sel = self.batch.as_ref()?;
+         let on = sel.contains(&e.id);
+@@ -426,6 +430,13 @@
      pub(crate) fn home_entries(&self) -> Vec<Entry> {
          match self.home.tab {
              // 我的文档 is the library's top level.
@@ -3840,7 +3884,7 @@
              HomeTab::Recent => self.level_entries(None),
              HomeTab::Starred => self.sorted_entries(self.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.starred > 0).cloned().collect()),
          }
-@@ -483,7 +490,7 @@
+@@ -483,7 +494,7 @@
          fn subpages(blocks: &mut [crate::model::Block], entries: &[&Entry], budget: &mut usize) {
              for b in blocks {
                  if matches!(b.kind, BlockKind::SubPageList) {
@@ -3849,7 +3893,17 @@
                      *budget -= b.children.len();
                  } else {
                      subpages(&mut b.children, entries, budget);
-@@ -514,14 +521,14 @@
+@@ -494,7 +505,8 @@
+         let mut budget = 64;
+         let mut eqnos = HashMap::new();
+         let mut cover = None;
+-        let mut blocks = self.store.load(&e.id).map(|doc| {
++        // 「最近删除」里的卡片读回收站里的那份（不恢复它）。
++        let mut blocks = self.store.load(&e.id).or_else(|_| self.store.load_trashed(&e.id)).map(|doc| {
+             cover = doc.cover.clone();
+             let numbers = crate::editor::equation_numbers(&doc);
+             thumb_blocks(&doc.blocks, &mut budget, 0, &numbers, &mut eqnos)
+@@ -514,14 +526,14 @@
      fn open_row_menu(&mut self, id: &str, key: &str, cx: &mut Context<Self>) {
          let b = self.more_bounds.borrow().get(key).copied();
          let Some(b) = b else { return };
@@ -3866,7 +3920,7 @@
          div()
              .id(SharedString::from(key.clone()))
              .relative()
-@@ -579,7 +586,7 @@
+@@ -579,7 +591,7 @@
  
      /// A newly opened folder page starts at its top.
      pub(crate) fn reset_folder_scroll(&self) {
@@ -3875,7 +3929,7 @@
          self.home.folder_list_scroll.set_offset(point(px(0.), px(0.)));
      }
  
-@@ -602,19 +609,25 @@
+@@ -602,19 +614,25 @@
          // Too narrow for the search box: a search icon beside +, in the same style.
          let search = self.header_search(window, cx);
          let narrow = search.is_none();
@@ -3905,7 +3959,7 @@
          // Tabs as segmented items: the current one on a quiet fill, no accent.
          let tab = |id: &'static str, label: &'static str, t: HomeTab| {
              let on = self.home.tab == t;
-@@ -640,8 +653,10 @@
+@@ -640,8 +658,10 @@
          };
          // 批量管理: the sidebar's 批量操作 selection, entered and shown here
          // too, with a toolbar of its own.
@@ -3917,7 +3971,7 @@
                  .text_size(px(13.)).line_height(px(20.))
                  .text_color(if enabled { Theme::text() } else { Theme::text_disabled() })
                  .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())))
-@@ -675,33 +690,48 @@
+@@ -675,33 +695,49 @@
                      .when(n > 0, |d| d.on_click(cx.listener(|w, _, window, cx| w.batch_move(window, cx)))))
                  .child(text_btn("home-batch-delete", "bin", crate::settings::text("删除"), n > 0).ml(px(4.))
                      .when(n > 0, |d| d.on_click(cx.listener(|w, _, _, cx| w.ask_batch_delete(cx)))))
@@ -3948,18 +4002,19 @@
          let entries = self.home_entries();
 +        // 手机：所有文档和文件夹两页，与某个文件夹里是同一套浏览页。
 +        if floating {
-+            if self.batch.is_some() {
-+                let ids = entries.iter().take(crate::sidebar::BATCH_LIMIT).map(|e| e.id.clone()).collect();
-+                let body = if entries.is_empty() { div().flex_1().into_any_element() } else if self.home.grid { self.render_home_grid(&entries, false, None, window, cx) } else { self.render_home_list(&entries, false, None, cx) };
-+                return crate::ios::batch_page(self, ids, body, cx);
-+            }
 +            let folders = crate::ios::home_page() == crate::ios::HomePage::Folders;
 +            let starred = crate::ios::home_page() == crate::ios::HomePage::Starred;
 +            let lead = if starred { crate::ios::browse_lead_caption(crate::settings::tr("收藏", "Starred"), crate::settings::tr("收藏你想稍后轻松查找的文档。只有你能看到你的收藏。", "Star documents you want to find easily later. Only you can see your stars."), cx) }
 +                else { crate::ios::browse_lead(if folders { crate::settings::tr("文件夹", "Folders") } else { crate::settings::tr("所有文档", "All documents") }, cx) };
 +            let body = if entries.is_empty() { crate::ios::browse_empty(lead, if folders { crate::settings::tr("还没有文件夹", "No folders yet") } else if starred { crate::settings::tr("还没有收藏的文档", "No starred documents yet") } else { crate::settings::text("当前列表暂无内容") }) }
 +                else if self.home.grid { self.render_home_grid(&entries, false, Some(lead), window, cx) } else { self.render_home_list(&entries, false, Some(lead), cx) };
-+            return crate::ios::browse_page(body, crate::ios::browse_chrome(self, cx, |_, _, cx| { crate::ios::set_home_page(crate::ios::HomePage::Hub); cx.notify(); }));
++            let back = |_: &mut Workspace, _: &mut Window, cx: &mut Context<Workspace>| { crate::ios::set_home_page(crate::ios::HomePage::Hub); cx.notify(); };
++            // 「选择」时页面不变，只换顶上和底下的按钮（照 Craft）。
++            if self.batch.is_some() {
++                let ids = entries.iter().take(crate::sidebar::BATCH_LIMIT).map(|e| e.id.clone()).collect();
++                return crate::ios::batch_page(self, ids, body, back, cx);
++            }
++            return crate::ios::browse_page(body, crate::ios::browse_chrome(self, cx, back));
 +        }
          let body = if entries.is_empty() && (self.home.grid || self.home.tab == HomeTab::Recent) {
              empty_state("illus/empty-list.svg", crate::settings::text("当前列表暂无内容")).into_any_element()
@@ -3972,7 +4027,7 @@
          };
          div()
              .flex_1()
-@@ -709,19 +739,24 @@
+@@ -709,19 +745,24 @@
              .h_full()
              .flex()
              .flex_col()
@@ -4001,7 +4056,7 @@
          // The list: 13pt tertiary headers over a hairline; the
          // sorted column in the text colour, semibold, with its arrow.
          let mut header = div()
-@@ -768,7 +803,10 @@
+@@ -768,7 +809,10 @@
              );
          }
          header = header.child(div().w(px(60.)).flex_none());
@@ -4013,7 +4068,7 @@
          if entries.is_empty() {
              rows = rows.child(div().pt(px(72.)).child(empty_state("illus/empty-list.svg", crate::settings::text("当前列表暂无内容"))));
          }
-@@ -786,10 +824,11 @@
+@@ -786,10 +830,11 @@
                  .hover(row_hover)
                  .when(menu_on, |d| d.bg(Theme::fill_hover()).border_color(transparent_black()).rounded(px(ROW_RADIUS)))
                  .on_click(cx.listener(move |w, _, window, cx| w.home_click(&id, window, cx)))
@@ -4026,7 +4081,7 @@
                          cx.notify();
                      }),
                  ))
-@@ -811,28 +850,41 @@
+@@ -811,58 +856,87 @@
              row = row.child(div().w(px(60.)).flex_none().flex().justify_end().pr(px(12.)).when(self.batch.is_none(), |d| d.child(self.home_more(e, format!("home-more-{}", e.id), cx))));
              rows = rows.child(row);
          }
@@ -4053,6 +4108,8 @@
          let wide_cols = (((avail + gap) / (200. + gap)).floor() as usize).max(1);
          let n = if wide_cols >= 4 { (((avail + gap) / (240. + gap)).floor() as usize).max(4) } else { (((avail + gap) / (160. + gap)).floor() as usize).clamp(1, 3) };
          let card_h = ((avail - gap * (n - 1) as f32) / n as f32) * (264. / 236.);
++        // 手机：这几张卡片能横滑选中（`ios::pick`）。
++        if crate::ios::floating() { crate::ios::pick::set_cards(entries.iter().map(|e| e.id.clone())); }
 +        // 手机：只有文档的一层是瀑布流（`ios::masonry`）；有文件夹的一层仍是等高的网格。
 +        if phone && !mixed {
 +            let scroll = grid_scroll.0.borrow().base_handle.clone();
@@ -4061,6 +4118,8 @@
 +            let body = crate::ios::masonry::grid(self, &entries, n, side, gap, avail, top, bottom, lead, &scroll, window, cx);
 +            return div().relative().flex_1().min_h_0().flex().flex_col()
 +                .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, _, cx| w.track_home_press(ev, cx)))
++                .on_scroll(cx.listener(|w, ev: &ScrollEvent, _, cx| crate::ios::pick::scroll(w, ev, cx)))
++                .children(crate::ios::pick::tick())
 +                .child(body).child(self.home.grid_scrollbar.render(&scroll)).into_any_element();
 +        }
          let rows = entries.len().div_ceil(n);
@@ -4069,11 +4128,32 @@
                  let start = row * n;
                  let end = (start + n).min(entries.len());
 -                div().w_full().h(px(card_h + gap)).px(px(24.)).pb(px(gap))
++                let card = |workspace: &mut Workspace, e: &Entry, window: &mut Window, cx: &mut Context<Workspace>| {
++                    if e.meta.folder.is_some() { workspace.render_folder_card(e, card_h, window, cx) }
++                    else if mixed { div().w_full().min_w_0().h(px(card_h)).flex().flex_col().justify_end()
++                        .child(workspace.render_home_card(e, card_h * (1. - crate::home_folder::TAB), cx)).into_any_element() }
++                    else { workspace.render_home_card(e, card_h, cx) }
++                };
++                // 手机：每格按位置摆，横滑的那张最后画，挪过去时压在旁边那张上面（`ios::pick`）。
++                if crate::ios::floating() {
++                    let cw = (avail - gap * (n - 1) as f32) / n as f32;
++                    let mut cells: Vec<(usize, &Entry)> = entries[start..end].iter().enumerate().collect();
++                    crate::ios::pick::on_top(&mut cells, |c| c.1.id.clone());
++                    return div().w_full().h(px(card_h + gap)).px(px(side)).pb(px(gap)).child(div().relative().size_full()
++                        .children(cells.into_iter().map(|(i, e)| div().absolute().top_0().left(px(i as f32 * (cw + gap))).w(px(cw)).h(px(card_h)).child(card(workspace, e, window, cx)))));
++                }
 +                div().w_full().h(px(card_h + gap)).px(px(side)).pb(px(gap))
                      .grid().grid_cols(n as u16).gap(px(gap))
-                     .children(entries[start..end].iter().map(|e| {
-                         if e.meta.folder.is_some() { workspace.render_folder_card(e, card_h, window, cx) }
-@@ -846,23 +898,25 @@
+-                    .children(entries[start..end].iter().map(|e| {
+-                        if e.meta.folder.is_some() { workspace.render_folder_card(e, card_h, window, cx) }
+-                        else if mixed { div().w_full().min_w_0().h(px(card_h)).flex().flex_col().justify_end()
+-                            .child(workspace.render_home_card(e, card_h * (1. - crate::home_folder::TAB), cx)).into_any_element() }
+-                        else { workspace.render_home_card(e, card_h, cx) }
+-                    }))
++                    .children(entries[start..end].iter().map(|e| card(workspace, e, window, cx)))
+             }).collect()
+         }))
+         // The last row's own 16 plus 16 more: 32 below the cards, like the
          // list view's 24 and clear of the window's rounded corner.
          // The top padding sits inside the list's clip, so a folder's papers can
          // rise above the first row without being cut off.
@@ -4085,6 +4165,7 @@
 +        div().relative().flex_1().min_h_0().when(lead.is_none(), |d| d.mt(px(-4.))).flex().flex_col()
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, _, cx| w.track_home_press(ev, cx)))
 -            .child(grid).child(self.home.grid_scrollbar.render(&scroll)).into_any_element()
++            .when(crate::ios::floating(), |d| d.on_scroll(cx.listener(|w, ev: &ScrollEvent, _, cx| crate::ios::pick::scroll(w, ev, cx))).children(crate::ios::pick::tick()))
 +            .child(grid).children(lead).child(self.home.grid_scrollbar.render(&scroll)).into_any_element()
      }
  
@@ -4104,7 +4185,7 @@
                  div()
                      .size_full()
                      .flex()
-@@ -875,31 +929,87 @@
+@@ -875,31 +949,87 @@
                  let mut p = div().size_full().p(px(pad)).overflow_hidden().flex().flex_col();
                  p = p.child(div().flex_none().flex().items_start().gap(px(6.)).mb(px(8.))
                      .when_some(e.icon.as_ref(), |d, emoji| d.child(div().flex_none().text_size(px(14.)).line_height(px(20.)).child(emoji.clone())))
@@ -4198,7 +4279,7 @@
                      .child(crate::ui::continuous_surface(20., Theme::fill_hover()).size_full())
                      .into_any_element();
              }
-@@ -907,6 +1017,7 @@
+@@ -907,6 +1037,7 @@
                      .id(SharedString::from(format!("home-card-{}", e.id)))
                      .when(check.is_none(), |d| d.on_mouse_down(MouseButton::Left, cx.listener(move |w, ev: &MouseDownEvent, _, cx| w.arm_home_drag(&arm, ev.position, cx))))
                      .child(self.record_home_card(&e.id))
@@ -4206,7 +4287,7 @@
                      .w_full().min_w_0().h(px(card_h)).relative().group("home-card")
                      .flex_none()
                      .bg(Theme::bg_overlay()).p(px(frame))
-@@ -914,18 +1025,21 @@
+@@ -914,18 +1045,26 @@
                      .cursor_pointer()
                      .hover(|s| s.bg(Theme::fill_hover_strong()))
                      .when(menu_on, |d| d.bg(Theme::fill_hover_strong()))
@@ -4224,15 +4305,21 @@
                      .when_some(cover, |d, path| d.child(img(path).doc_picture().absolute().inset_0().size_full().object_fit(ObjectFit::Fill)))
 -                    .child(crate::ui::continuous_page(20. - frame).size_full().overflow_hidden().child(page.relative()))
 -                    .child(crate::ui::continuous_corner_mask(20., Theme::bg_body()))
+-                    .when_some(check, |d, c| d.child(div().absolute().top(px(12.)).left(px(12.)).child(c)))
 +                    .children(ring)
 +                    .child(crate::ui::continuous_surface(20. - frame, paper.unwrap_or_else(Theme::bg_body)).size_full().overflow_hidden().child(page.relative()))
 +                    .child(crate::ui::continuous_corner_mask(20., crate::ios::home_bg()))
-                     .when_some(check, |d, c| d.child(div().absolute().top(px(12.)).left(px(12.)).child(c)))
++                    // 手机（照 Craft）：选中的卡片外面一圈强调色，不放勾选框；没选的照常。
++                    .when(!crate::ios::floating(), |d| d.when_some(check, |d, c| d.child(div().absolute().top(px(12.)).left(px(12.)).child(c))))
++                    .when(crate::ios::floating() && self.batch.as_ref().is_some_and(|s| s.contains(&e.id)), |d| d.child(crate::ios::pick_ring(20.)))
++                    // 横着滑这张卡片（`ios::pick`）：跟着手指挪开一点。
++                    .left(px(crate::ios::pick::offset(&e.id)))
++                    .when(crate::ios::pick::lift(&e.id) > 0., |d| { let t = crate::ios::pick::lift(&e.id); d.rounded(px(20.)).shadow(crate::ios::pick::lift_shadow(t)) })
 +
                      .when(self.batch.is_none(), |d| d.child(
                          div().absolute().top(px(8.)).right(px(8.))
                              .when(!menu_on, |d| d.opacity(0.).group_hover("home-card", |s| s.opacity(1.)))
-@@ -936,13 +1050,32 @@
+@@ -936,13 +1075,32 @@
  
      /// 显示设置 and the sort dropdown: the menu panel; the sort item is a
      /// native menu row.
@@ -4267,7 +4354,7 @@
          };
          if self.home.sort_menu
              && let Some(b) = self.home.anchor("home-sort") {
-@@ -958,7 +1091,7 @@
+@@ -958,7 +1116,7 @@
                              w.home.sort = order;
                              w.save_home();
                              w.home.sort_menu = false;
@@ -4276,7 +4363,7 @@
                              w.home.list_scroll.set_offset(point(px(0.), px(0.)));
                              cx.notify();
                          })));
-@@ -968,7 +1101,7 @@
+@@ -968,7 +1126,7 @@
                      .child(menu_label(crate::settings::tr("文件夹优先", "Folders first"), g.clone(), gpui::white()).flex_1())
                      .when(self.home.folders_first && self.home.sort != HomeSort::Manual, |d| d.child(menu_glyph("check", 14., g)))
                      .on_click(cx.listener(|w, _, _, cx| { if w.home.sort == HomeSort::Manual { return; } w.home.folders_first = !w.home.folders_first; w.save_home(); w.home.sort_menu = false; cx.notify(); })));
@@ -4307,7 +4394,19 @@
      let mut pb = PathBuilder::fill();
      edge(&mut pb);
      pb.line_to(pt(w, h - r));
-@@ -317,8 +317,8 @@
+@@ -242,7 +242,10 @@
+ 
+ impl Workspace {
+     fn folder_papers(&self, id: &str, front: Option<&String>) -> (Vec<Entry>, usize) {
+-        let mut kids: Vec<Entry> = self.entries.iter().filter(|e| e.meta.parent.as_deref() == Some(id)).cloned().collect();
++        // 「最近删除」里的文件夹：露出来的是跟着它删掉的文档。
++        let trash = (self.view == crate::app::View::Trash).then(|| crate::ios::hub::trash_entries(self));
++        let pool = trash.as_deref().unwrap_or(&self.entries);
++        let mut kids: Vec<Entry> = pool.iter().filter(|e| e.meta.parent.as_deref() == Some(id)).cloned().collect();
+         let n = kids.len();
+         kids.sort_by(|a, b| {
+             let lead = |e: &Entry| front.is_some_and(|f| *f == e.id);
+@@ -317,8 +320,8 @@
              div().absolute().left(px(p.cx - p.w / 2. + 12.)).top(px(p.cy - p.h / 2. + 10.)).w(px(p.w - 24.))
                  .flex().items_center().gap(px(4.)).overflow_hidden()
                  .text_size(px(11.)).line_height(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text())
@@ -4318,7 +4417,7 @@
                  .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(display_title(&k.title))))
          });
          let front_glass = { let pose = pose.clone(); canvas(|_, _, _| {}, move |b, _, window, _| glass(b.origin, &pose, window)).absolute().inset_0() };
-@@ -328,12 +328,14 @@
+@@ -328,12 +331,14 @@
          let (open_id, menu_id, new_id) = (id.clone(), id.clone(), id.clone());
          let hover_id = id.clone();
          let label = div().absolute().left(px(16.)).right(px(14.)).bottom(px(14. - lift)).flex().items_end().gap(px(8.))
@@ -4334,10 +4433,28 @@
                  .child(div().id(SharedString::from(format!("home-fnew-{id}"))).flex_none().size(px(28.)).rounded_full().flex().items_center().justify_center()
                      .bg(theme::raised(Theme::bg_body())).shadow(theme::shadow_button()).opacity(reveal).cursor_pointer()
                      .hover(|s| s.bg(Theme::fill_hover_strong()))
-@@ -356,8 +358,9 @@
+@@ -343,7 +348,14 @@
+                     .on_click(cx.listener(move |w, _, window, cx| { cx.stop_propagation(); w.new_child(&new_id, window, cx); })))
+                 .child(self.home_more(e, format!("home-fmore-{id}"), cx).size(px(28.)).rounded_full().bg(theme::raised(Theme::bg_body())).shadow(theme::shadow_button()).opacity(reveal)));
+         div().id(SharedString::from(format!("home-folder-{id}"))).relative().w_full().min_w_0().h(px(h)).cursor_pointer()
+-            .when(self.batch.is_some(), |d| d.opacity(0.45))
++            // 批量选择时：桌面上文件夹不能选（变淡）；手机上能（照 Craft），点了勾选，选中的外面一圈强调色。
++            .when(self.batch.is_some() && !crate::ios::floating(), |d| d.opacity(0.45))
++            .when(self.batch.is_some() && crate::ios::floating(), |d| {
++                let pick = id.clone();
++                d.when(self.batch.as_ref().is_some_and(|s| s.contains(&id)), |d| d.child(crate::ios::pick_ring(20.)))
++                    .on_click(cx.listener(move |w, _, _, cx| { w.toggle_check(&pick); cx.notify(); }))
++            })
++            .left(px(crate::ios::pick::offset(&id)))
+             .on_hover(cx.listener(move |w, on: &bool, _, cx| {
+                 if *on { w.home.folders.hovered = Some(hover_id.clone()); }
+                 else if w.home.folders.hovered.as_ref() == Some(&hover_id) { w.home.folders.hovered = None; }
+@@ -355,9 +367,10 @@
+                 cx.notify();
              }}))
              .when(self.batch.is_none(), |d| d
-                 .on_click(cx.listener(move |w, _, window, cx| { w.try_open(&open_id, window, cx); }))
+-                .on_click(cx.listener(move |w, _, window, cx| { w.try_open(&open_id, window, cx); }))
++                .on_click(cx.listener(move |w, _, window, cx| { if w.view != crate::app::View::Trash { w.try_open(&open_id, window, cx); } }))
 +                .children(crate::ios::row_context(self, &id, 10.))
                  .on_mouse_down(MouseButton::Right, cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
 -                    w.row_menu = Some(RowMenu { id: menu_id.clone(), pos: ev.position, corner: Corner::TopLeft, sub: false, batch: false });
@@ -4345,7 +4462,26 @@
                      cx.notify();
                  })))
              .child(back).children(title).child(front_glass).child(label)
-@@ -732,7 +735,7 @@
+@@ -365,6 +378,9 @@
+     }
+ 
+     /// The card's bounds are kept for picking it up (and for the flight back).
++    /// 卡片上一次画在哪（`ios::pick` 认手指下面是哪张）。
++    pub(crate) fn home_card_bounds(&self) -> HashMap<String, Bounds<Pixels>> { self.home.folders.bounds.borrow().clone() }
++
+     pub(crate) fn record_home_card(&self, id: &str) -> impl IntoElement {
+         let record = self.home.folders.bounds.clone();
+         let id = id.to_string();
+@@ -375,6 +391,8 @@
+     /// small page skeleton and can be dropped into a folder (cards are not
+     /// reordered by dragging).
+     pub(crate) fn arm_home_drag(&mut self, id: &str, at: Point<Pixels>, _cx: &mut Context<Self>) {
++        // 回收站里不能拖进文件夹。
++        if self.view == crate::app::View::Trash { return }
+         let Some(home) = self.home.folders.bounds.borrow().get(id).copied() else { return };
+         let grab = (((at.x - home.left()) / home.size.width).clamp(0., 1.), ((at.y - home.top()) / home.size.height).clamp(0., 1.));
+         let r = [f32::from(home.left()), f32::from(home.top()), f32::from(home.size.width), f32::from(home.size.height)];
+@@ -732,7 +750,7 @@
              .child(div().absolute().inset_0().rounded(px(26.))
                  .bg(linear_gradient(180., linear_color_stop(accent.opacity(0.025 + 0.05 * arm), 0.), linear_color_stop(accent.opacity(0.06 + 0.07 * arm), 1.)))
                  .when(reject, |d| d.bg(ca(craft::N1000, 0.03))))
@@ -4661,18 +4797,50 @@
                      .child(modal),
 --- a/src/settings.rs
 +++ b/src/settings.rs
-@@ -185,7 +185,9 @@
+@@ -46,6 +46,12 @@
+     pub seen_version: String,
+     /// 动画: "high" animates folding, the selection and hover; empty keeps them instant.
+     pub motion: String,
++    /// 手机：外观 › 启用触感。
++    pub haptics: bool,
++    /// 手机：安全 › 用面容 ID 锁定（ios/lock.rs）。
++    pub lock: bool,
++    /// 手机：外观 › 界面强调色，`theme::ACCENTS` 的键；空是默认的蓝。
++    pub accent: String,
+ }
+ 
+ /// Pick the first supported system language; saved preferences still win.
+@@ -60,7 +66,7 @@
+ }
+ 
+ impl Default for Preferences {
+-    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new() } }
++    fn default() -> Self { Preferences { theme: String::new(), feishu: true, english: system_english(), remote_images: true, quick_hotkey: true, auto_update: true, appearance: String::new(), seen_version: String::new(), motion: String::new(), haptics: true, lock: false, accent: String::new() } }
+ }
+ 
+ impl Preferences {
+@@ -80,6 +86,7 @@
+     FEISHU.store(p.feishu, Ordering::Relaxed);
+     ENGLISH.store(p.english, Ordering::Relaxed);
+     MOTION_HIGH.store(p.motion == "high", Ordering::Relaxed);
++    theme::set_accent(&p.accent);
+     // Before the themes are read (startup) the base comes from `feishu`.
+     themes::select(&p.theme_id());
+     *PREFS.write().unwrap() = Some(p);
+@@ -185,7 +192,11 @@
  // ---- the view
  
  #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 -pub enum Page { #[default] General, Appearance, Shortcuts, Library, About }
 +pub enum Page { #[default] General, Appearance, Shortcuts, Library, About,
 +    // 手机（照 Craft）：「通用」拆成「语言」和「高级设置」，另有「我的空间」「统计」「诊断」。
-+    Language, Advanced, Spaces, Stats, Diagnostics, Licences }
++    Language, Advanced, Spaces, Stats, Diagnostics, Licences,
++    // 手机：常规设置里的「安全」。
++    Security }
  
  impl Page {
      fn title(self) -> &'static str {
-@@ -193,8 +195,14 @@
+@@ -193,8 +204,15 @@
              Page::General => tr("通用", "General"),
              Page::Appearance => tr("外观", "Appearance"),
              Page::Shortcuts => tr("快捷键", "Shortcuts"),
@@ -4686,10 +4854,11 @@
 +            Page::Stats => tr("统计", "Statistics"),
 +            Page::Diagnostics => tr("诊断", "Diagnostics"),
 +            Page::Licences => tr("开源许可", "Licences"),
++            Page::Security => tr("安全", "Security"),
          }
      }
      fn icon(self) -> &'static str {
-@@ -202,8 +210,14 @@
+@@ -202,8 +220,15 @@
              Page::General => "view-settings",
              Page::Appearance => "palette",
              Page::Shortcuts => "keyboard",
@@ -4702,15 +4871,17 @@
 +            Page::Stats => "chart",
 +            Page::Diagnostics => "pulse",
 +            Page::Licences => "info",
++            Page::Security => "lock",
          }
      }
  }
-@@ -220,22 +234,42 @@
+@@ -220,22 +245,43 @@
  /// split by hairlines.
  pub(crate) fn group(title: Option<&'static str>, rows: Vec<AnyElement>) -> Div {
      let n = rows.len();
 +    // 手机（照 Craft）：不放卡片，行直接铺在页面底色上，行间一道细线；组名是粗体的大字，和首页「收藏」「文件夹」一样。
-+    if crate::ios::floating() { return flat_group(title, rows, 16.); }
++    // 手机的子页（照 Craft）：组名下面一张灰色圆角卡片（ios/general.rs）。第一级还是平铺的（`flat_group`）。
++    if crate::ios::floating() { return crate::ios::general::titled(title, rows); }
      div().w_full().flex().flex_col().gap(px(8.))
          .children(title.map(caption))
 -        .child(div().w_full().flex().flex_col().rounded(px(12.)).border_1().border_color(Theme::line_border()).bg(crate::theme::raised(Theme::bg_body())).overflow_hidden()
@@ -4752,7 +4923,24 @@
          .child(div().flex_none().flex().items_center().gap(px(8.)).child(control))
  }
  
-@@ -449,7 +483,7 @@
+@@ -243,6 +289,7 @@
+ 
+ /// The switch: the accent when on, black 16% when off, a white knob.
+ pub(crate) fn switch(id: impl Into<ElementId>, on: bool) -> Stateful<Div> {
++    if crate::ios::floating() { return crate::ios::general::toggle(id, on); }
+     div().id(id).flex_none().w(px(32.)).h(px(19.)).p(px(2.)).rounded_full().cursor_pointer().flex().items_center()
+         .when(on, |d| d.bg(Theme::primary()).justify_end())
+         .when(!on, |d| d.bg(theme::ca(craft::N1000, 0.16)).justify_start())
+@@ -413,7 +460,7 @@
+         .child(ui::icon("chevron-down", 12., Theme::icon()))
+ }
+ 
+-fn apply_theme(w: &mut Workspace, id: String, cx: &mut Context<Workspace>) {
++pub(crate) fn apply_theme(w: &mut Workspace, id: String, cx: &mut Context<Workspace>) {
+     let feishu = themes::themes().iter().find(|t| t.id == id).is_some_and(|t| t.style.feishu);
+     w.theme_menu = None;
+     w.set_pref(move |p| { p.theme = id; p.feishu = feishu; }, cx)
+@@ -449,7 +496,7 @@
                  cx.notify();
              }))
              .child(div().id("theme-menu-list").w(px(200.)).max_h(px(302.)).overflow_y_scroll().py(px(ui::MENU_PAD_Y)).flex().flex_col().children(rows));
@@ -4761,7 +4949,43 @@
      }
  
      /// Keys while the theme dropdown is open; true when used.
-@@ -527,6 +561,7 @@
+@@ -485,6 +532,8 @@
+         if p.theme_id() != old.theme_id() || p.english != old.english || sync_dark(cx) {
+             refresh_all(self, cx);
+         }
++        // 手机：在设置里改了任何一项（开关、外观、强调色、语言、主题…）都轻轻一震；关掉「启用触感」的那一下不震。
++        if crate::ios::floating() && self.view == View::Settings { crate::ios::glass::haptic(); }
+         cx.notify();
+     }
+ 
+@@ -495,7 +544,7 @@
+ 
+     /// Open the theme's stylesheet in the user's editor; a built-in theme is
+     /// first copied in full into the themes folder (the copy replaces it).
+-    fn edit_theme(&mut self, id: &str, cx: &mut Context<Self>) {
++    pub(crate) fn edit_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+         match themes::editable_file(id) {
+             Ok(p) => {
+                 self.reload_themes(cx);
+@@ -505,7 +554,7 @@
+         }
+     }
+ 
+-    fn duplicate_theme(&mut self, id: &str, cx: &mut Context<Self>) {
++    pub(crate) fn duplicate_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+         match themes::duplicate(id) {
+             Ok((new_id, p)) => {
+                 themes::load(&new_id, themes::all_loaded(), || cx.text_system().all_font_names());
+@@ -517,7 +566,7 @@
+         }
+     }
+ 
+-    fn remove_theme(&mut self, id: &str, cx: &mut Context<Self>) {
++    pub(crate) fn remove_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+         if let Err(e) = themes::remove(id) { return self.show_toast_kind(ui::ToastKind::Error, &e.to_string(), cx) }
+         self.reload_themes(cx);
+         // A deleted theme of the user's own: back to Craft.
+@@ -527,6 +576,7 @@
      pub(crate) fn open_settings(&mut self, page: Page, cx: &mut Context<Self>) {
          self.cancel_shortcut_recording(cx);
          self.settings_page = page;
@@ -4769,7 +4993,7 @@
          self.theme_menu = None;
          self.settings_scroll.set_offset(point(px(0.), px(0.)));
          self.shortcut_error = None;
-@@ -541,7 +576,7 @@
+@@ -541,7 +591,7 @@
              let on = if page.is_some() { page == current } else { in_trash };
              let (title, icon) = page.map_or((tr("回收站", "Trash"), "bin"), |p| (p.title(), p.icon()));
              div().id(SharedString::from(format!("settings-nav-{page:?}"))).h(px(sb::ROW_H)).flex().items_center().pl(px(6.)).pr(px(4.)).rounded(px(sb::ROW_R))
@@ -4778,7 +5002,7 @@
                  .when(on, |d| d.bg(Theme::sidebar_selected()).text_color(Theme::text()))
                  .when(!on, |d| d.text_color(Theme::sidebar_text()).hover(|s| s.bg(Theme::sidebar_hover())))
                  .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(9.)).child(ui::icon(icon, sb::ROW_ICON, Theme::icon())))
-@@ -569,7 +604,7 @@
+@@ -569,7 +619,7 @@
      /// 收起侧栏 uses (28pt, 4pt past the traffic lights, glyph 17), so the
      /// buttons don't move when switching between the document list and 设置.
      pub(crate) fn header_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4787,7 +5011,7 @@
          let bar_button = |id: &'static str, glyph: &'static str| {
              div().id(id).no_drag().flex_none().size(px(28.)).flex().items_center().justify_center().rounded(px(8.)).cursor_pointer()
                  .hover(move |s| s.bg(if open { Theme::sidebar_hover() } else { Theme::fill_hover_strong() }))
-@@ -578,7 +613,7 @@
+@@ -578,7 +628,7 @@
          div().flex().items_center().ml(px(4.)).gap(px(4.))
              .child(bar_button("settings-collapse", if open { "panel-left-close" } else { "panel-left-open" })
                  .tip(if open { tr("收起侧栏", "Hide sidebar") } else { tr("展开侧栏", "Show sidebar") }, Some(crate::shortcuts::hint("workspace::ToggleSidebar", "⌘ + ]")))
@@ -4796,7 +5020,7 @@
              .child(bar_button("settings-home", "home").tip(tr("返回主页", "Home"), Some(crate::shortcuts::hint("workspace::GoHome", "⌘ + ⌥ + Home")))
                  .on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx))))
              .into_any_element()
-@@ -592,23 +627,66 @@
+@@ -592,23 +642,83 @@
  
      pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
          let page = self.settings_page;
@@ -4810,11 +5034,11 @@
 +                div().id(SharedString::from(format!("settings-row-{p:?}"))).w_full().h(px(52.)).px(px(16.)).flex().items_center().gap(px(16.)).rounded(px(10.))
 +                    .text_size(px(17.)).text_color(row_ink()).active(|s| s.bg(Theme::fill_pressed()))
 +                    .child(icon).child(div().flex_1().child(p.title())).child(ui::icon("chevron-right", 14., row_chevron()))
-+                    .on_click(cx.listener(move |w, _, _, cx| { crate::ios::set_settings_detail(true); w.open_settings(p, cx); })).into_any_element()
++                    .on_click(cx.listener(move |w, _, _, cx| { crate::ios::glass::haptic(); crate::ios::set_settings_detail(true); w.open_settings(p, cx); })).into_any_element()
 +            };
 +            let section = |title: Option<&'static str>, pages: &[Page], cx: &mut Context<Self>| flat_group(title, pages.iter().map(|p| nav(*p, cx)).collect(), 52.);
 +            let space = section(Some(tr("空间设置", "Space")), &[Page::Library, Page::Spaces, Page::Stats], cx);
-+            let general = section(Some(tr("常规设置", "General")), &[Page::Appearance, Page::Language, Page::Advanced], cx);
++            let general = section(Some(tr("常规设置", "General")), &[Page::Appearance, Page::Language, Page::Security, Page::Advanced], cx);
 +            let more = section(None, &[Page::Diagnostics, Page::About], cx);
 +            // 从首页左上角的空间头像点进来：左上角玻璃的返回回首页。
 +            let back = div().absolute().top(crate::ios::insets().top).left(px(16.)).h(px(crate::app::HEADER_H)).flex().items_center()
@@ -4840,7 +5064,9 @@
              Page::Library => self.space_page(cx),
 +            Page::About if phone => crate::ios::about::page(self, cx),
              Page::About => self.about_page(cx),
++            Page::Language if phone => crate::ios::general::language(self, cx),
 +            Page::Language => self.language_page(cx),
++            Page::Security => crate::ios::general::security(self, cx),
 +            Page::Advanced => self.advanced_page(cx),
 +            Page::Spaces => crate::ios::spaces::spaces_page(self, cx),
 +            Page::Stats => crate::ios::spaces::stats_page(self, cx),
@@ -4848,6 +5074,21 @@
 +            Page::Licences => crate::ios::about::licences(self, cx),
          };
 -        div().flex_1().min_w_0().h_full().flex().flex_col().bg(Theme::bg_body()).text_color(Theme::text()).font_family(theme::UI_FONT)
++        if phone {
++            // 照 Craft（IMG_9177）：内容从顶栏下面滚过；滚动后顶栏是和首页同一种磨砂（`veil::page_header`），没滚时只有返回钮和页名。
++            let header = div().absolute().top(crate::ios::insets().top).left_0().right_0().h(px(crate::app::HEADER_H)).px(px(16.)).flex().items_center()
++                .child(crate::ios::glass_button("settings-back", "editor-icons/chevron-left", 22.).on_click(cx.listener(|w, _, _, cx| {
++                    if w.settings_page == Page::Licences { w.open_settings(Page::About, cx); } else { crate::ios::set_settings_detail(false); cx.notify(); } })))
++                // 页名在返回钮同一行的正中，右边留出和返回钮一样宽的空，才居得了中。
++                .child(div().flex_1().min_w_0().text_center().text_size(px(17.)).line_height(px(24.)).font_weight(FontWeight::SEMIBOLD).child(page.title())).child(div().w(px(44.)).flex_none());
++            return div().relative().flex_1().min_w_0().h_full().bg(crate::ios::home_bg()).text_color(Theme::text()).font_family(theme::UI_FONT)
++                .child(div().id("settings-content").size_full().overflow_y_scroll().track_scroll(&self.settings_scroll)
++                    .child(div().h(px(crate::ios::chrome_top())).flex_none())
++                    .child(div().w_full().px(px(8.)).pb(px(64.)).flex().flex_col().gap(px(28.)).child(body)))
++                .child(crate::ios::veil::page_header(&self.settings_scroll, page.title().into()))
++                .child(header)
++                .into_any_element();
++        }
 +        div().flex_1().min_w_0().h_full().flex().flex_col().bg(if phone { crate::ios::home_bg() } else { Theme::bg_body() }).text_color(Theme::text()).font_family(theme::UI_FONT)
              // The bar only drags the window; the page title heads the centred column.
              .child(div().h(px(crate::app::HEADER_H)).flex_none().flex().items_center().title_bar()
@@ -4868,7 +5109,7 @@
                          .child(body))))
              .into_any_element()
      }
-@@ -621,12 +699,29 @@
+@@ -621,12 +731,29 @@
                      segmented("lang", &["简体中文", "English"], p.english as usize, |w, i, cx| w.set_pref(|p| p.english = i == 1, cx), cx)).into_any_element(),
                  row(tr("自动下载网络图片", "Download web images"), desc(tr("关闭后不联网，网络图片显示为占位，点击单独加载。", "When off the app stays offline; web images show a placeholder you can click to load.")),
                      switch("pref-remote", p.remote_images).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.remote_images = !p.remote_images, cx)))).into_any_element(),
@@ -4900,15 +5141,57 @@
      fn appearance_page(&self, cx: &mut Context<Self>) -> AnyElement {
          let current = prefs().theme_id();
          let list = themes::themes();
-@@ -670,6 +765,7 @@
+@@ -657,8 +784,28 @@
+         // One group, top to bottom: the choice, how it looks, its stylesheet.
+         // The preview is a page of the theme on a quiet band, like a sheet on a desk.
+         let shown = { let list = themes::themes(); list.iter().find(|t| t.id == current).or_else(|| list.first()).map(|t| sample_page(t, PAGE_S).rounded(px(7.))) };
+-        let sample = div().w_full().px(px(16.)).py(px(16.)).flex().justify_center().bg(Theme::fill_hover())
++        let sample = div().w_full().px(px(16.)).py(px(16.)).flex().justify_center().when(!crate::ios::floating(), |d| d.bg(Theme::fill_hover()))
+             .child(div().w_full().h(px(360.)).rounded(px(8.)).overflow_hidden().border_1().border_color(Theme::line_border()).shadow(theme::shadow_button()).children(shown));
++        let mut theme_rows: Vec<AnyElement> = vec![
++            // 手机上组名已经是「文档主题」，行里只写「主题」。
++            row(if crate::ios::floating() { tr("主题", "Theme") } else { tr("文档主题", "Document theme") }, None, picker).into_any_element(),
++            sample.into_any_element(),
++            row(tr("主题 CSS", "Theme CSS"), Some(where_),
++                div().flex().items_center().gap(px(8.))
++                    .when(customized || own, |d| d.child(link_button("theme-remove", if customized { tr("恢复默认", "Restore") } else { tr("删除", "Delete") })
++                        .on_click(cx.listener(move |w, _, _, cx| w.remove_theme(&rm_id, cx)))))
++                    .child(button("theme-duplicate", tr("复制为新主题", "Duplicate")).on_click(cx.listener(move |w, _, _, cx| w.duplicate_theme(&dup_id, cx))))
++                    .child(button("theme-edit", tr("编辑 CSS", "Edit CSS")).on_click(cx.listener(move |w, _, _, cx| w.edit_theme(&edit_id, cx))))).into_any_element(),
++        ];
++        let notes: Vec<String> = errors.into_iter().chain(warnings.into_iter().take(8).map(|w| format!("{}：{w}", tr("未生效", "Ignored")))).collect();
++        // 手机：照 Craft 分组装进卡片（ios/general.rs）；没生效的样式写在卡片最后。
++        if crate::ios::floating() {
++            // 手机（照 Craft）：没有小字说明；主题是一行就地选，预览下面是几行动作（ios/general.rs）。
++            let preview = { let list = themes::themes(); list.iter().find(|t| t.id == current).or_else(|| list.first()).map(|t| sample_page(t, PAGE_S).rounded(px(7.))) };
++            let preview = div().w_full().px(px(16.)).py(px(16.)).child(div().w_full().h(px(360.)).rounded(px(8.)).overflow_hidden().border_1().border_color(Theme::line_border()).shadow(theme::shadow_button()).children(preview));
++            let _ = (&mut theme_rows, notes);
++            return crate::ios::general::appearance(self, preview.into_any_element(), cx);
++        }
+         div().w_full().flex().flex_col().gap(px(28.))
+             .child(div().w_full().flex().flex_col().gap(px(8.))
+                 .child(group(None, vec![
+@@ -670,16 +817,9 @@
                      row(tr("动画", "Animation"), Some(tr("克制：切换即时，只有拖拽带动画。丰富：展开收起、选中和悬停也带动画。", "Low: switching is instant, only dragging animates. High: folding, selection and hover animate too.").into()),
                          segmented("motion", &[tr("克制", "Low"), tr("丰富", "High")], usize::from(prefs().motion == "high"),
                              |w, i, cx| w.set_pref(|p| p.motion = ["", "high"][i].into(), cx), cx)).into_any_element(),
+-                    row(tr("文档主题", "Document theme"), None, picker).into_any_element(),
+-                    sample.into_any_element(),
+-                    row(tr("主题 CSS", "Theme CSS"), Some(where_),
+-                        div().flex().items_center().gap(px(8.))
+-                            .when(customized || own, |d| d.child(link_button("theme-remove", if customized { tr("恢复默认", "Restore") } else { tr("删除", "Delete") })
+-                                .on_click(cx.listener(move |w, _, _, cx| w.remove_theme(&rm_id, cx)))))
+-                            .child(button("theme-duplicate", tr("复制为新主题", "Duplicate")).on_click(cx.listener(move |w, _, _, cx| w.duplicate_theme(&dup_id, cx))))
+-                            .child(button("theme-edit", tr("编辑 CSS", "Edit CSS")).on_click(cx.listener(move |w, _, _, cx| w.edit_theme(&edit_id, cx))))).into_any_element(),
+-                ]))
+-                .children(errors.into_iter().chain(warnings.into_iter().take(8).map(|w| format!("{}：{w}", tr("未生效", "Ignored")))).map(|e| div().px(px(4.)).text_size(px(12.)).line_height(px(18.)).text_color(Theme::danger()).child(e)))
 +                    row(tr("应用图标", "App icon"), None, crate::ios::appicon::picker(cx)).into_any_element(),
-                     row(tr("文档主题", "Document theme"), None, picker).into_any_element(),
-                     sample.into_any_element(),
-                     row(tr("主题 CSS", "Theme CSS"), Some(where_),
-@@ -690,7 +786,8 @@
++                ].into_iter().chain(theme_rows).collect()))
++                .children(notes.into_iter().map(|e| div().px(px(4.)).text_size(px(12.)).line_height(px(18.)).text_color(Theme::danger()).child(e)))
+                 )
+             .into_any_element()
+     }
+@@ -690,7 +830,8 @@
              .child(div().text_size(px(20.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child("Quiet.md"))
              .child(div().text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(format!("{} {}", tr("版本", "Version"), env!("CARGO_PKG_VERSION"))))
              .child(div().text_size(px(13.)).line_height(px(20.)).text_color(Theme::text_caption()).child(tr("本地优先的笔记应用：无需账号，文档就是你电脑上的文件。", "Local-first notes: no account, your documents are files on your Mac."))))
@@ -4918,7 +5201,7 @@
              .into_any_element()
      }
  }
-@@ -711,7 +808,7 @@
+@@ -711,7 +852,7 @@
      };
      let fill = if let State::Downloading(m) = &state { Some(crate::update::progress(m)) } else { None };
      let busy = matches!(state, State::Downloading(_) | State::Installing(_));
@@ -4929,7 +5212,15 @@
          .when(busy, |d| d.bg(Theme::sidebar_hover()).text_color(Theme::text_caption()))
 --- a/src/shared_store.rs
 +++ b/src/shared_store.rs
-@@ -28,6 +28,7 @@
+@@ -24,10 +24,15 @@
+     pub fn size_of(&self, id: &str, doc: &Document) -> u64 { self.0.borrow_mut().size_of(id, doc) }
+     pub fn delete(&mut self, id: &str, root: Option<&str>) -> Result<()> { self.0.borrow_mut().delete(id, root) }
+     pub fn list_trash(&mut self) -> Vec<TrashEntry> { self.0.borrow_mut().list_trash() }
++    /// 手机「最近删除」：回收站里的东西当成文档库里的条目（`Store::trash_entries`）。
++    pub fn trash_entries(&self) -> Vec<crate::store::Entry> { self.0.borrow().trash_entries() }
++    /// 手机「最近删除」的卡片预览（`Store::load_trashed`）。
++    pub fn load_trashed(&self, id: &str) -> anyhow::Result<crate::model::Document> { self.0.borrow().load_trashed(id) }
+     pub fn restore(&mut self, id: &str) -> Result<bool> { self.0.borrow_mut().restore(id) }
      pub fn purge(&mut self, id: &str) -> Result<()> { self.0.borrow_mut().purge(id) }
      pub fn import(&mut self, path: &std::path::Path) -> Result<String> { self.0.borrow_mut().import(path) }
      pub fn set_width(&mut self, id: &str, width: PageWidth) -> Result<()> { self.0.borrow_mut().set_width(id, width) }
@@ -4937,7 +5228,7 @@
      pub fn update_meta(&mut self, id: &str, f: impl FnOnce(&mut Meta)) -> Result<()> { self.0.borrow_mut().update_meta(id, f) }
      pub fn set_catalogue(&mut self, id: &str, pinned: bool) -> Result<()> { self.0.borrow_mut().set_catalogue(id, pinned) }
      pub fn settings(&self) -> Settings { self.0.borrow_mut().settings() }
-@@ -41,6 +42,8 @@
+@@ -41,6 +46,8 @@
      pub fn tree_writer(&self) -> Store { self.0.borrow().tree_writer() }
      pub fn set_parent(&mut self, id: &str, parent: Option<&str>) -> Result<Meta> { self.0.borrow_mut().set_parent(id, parent) }
      pub fn set_starred(&mut self, id: &str, on: bool) -> Result<u64> { self.0.borrow_mut().set_starred(id, on) }
@@ -5370,6 +5661,15 @@
          let location = short(&root);
 --- a/src/theme.rs
 +++ b/src/theme.rs
+@@ -3,7 +3,7 @@
+ //! and a full-bleed white note plane instead of floating panels.
+ 
+ use gpui::{BoxShadow, Hsla, Rgba, WindowBackgroundAppearance, point, px, rgb};
+-use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+ 
+ // ---- dark mode
+ //
 @@ -24,8 +24,8 @@
          static GLASS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
          *GLASS.get_or_init(|| windows_build().is_some_and(|b| b >= 22621))
@@ -5381,7 +5681,34 @@
  }
  
  #[cfg(target_os = "windows")]
-@@ -45,7 +45,13 @@
+@@ -39,13 +39,40 @@
+ }
+ 
+ static DARK: AtomicBool = AtomicBool::new(false);
++
++/// 手机：外观 › 界面强调色（照 Craft，IMG_9176）。键、颜色、中英文名。第一种是原来的蓝（`craft::B500`），
++/// 其余九种是 Craft iOS 那一页的实测值。
++pub const ACCENTS: [(&str, u32, &str, &str); 10] = [
++    ("", craft::B500, "蓝", "Blue"), ("lake", 0x4090b4, "湖蓝", "Lake"), ("teal", 0x429489, "青", "Teal"), ("green", 0x43976a, "绿", "Green"),
++    ("yellow", 0xe7b43c, "黄", "Yellow"), ("orange", 0xed722d, "橙", "Orange"), ("pink", 0xe34798, "粉", "Pink"), ("plum", 0x7e178f, "梅紫", "Plum"),
++    ("violet", 0x6615df, "紫", "Violet"), ("graphite", 0x52525b, "石墨", "Graphite"),
++];
++/// 换过的强调色（高位做「有」的标记）；0 是没换。
++static ACCENT: AtomicU32 = AtomicU32::new(0);
++pub fn set_accent(key: &str) {
++    let hex = ACCENTS.iter().skip(1).find(|a| a.0 == key).map_or(0, |a| a.1 | 0x0100_0000);
++    ACCENT.store(hex, Ordering::Relaxed);
++}
++fn accent() -> Option<u32> { let v = ACCENT.load(Ordering::Relaxed); (v != 0).then_some(v & 0x00ff_ffff) }
++/// 强调色本身；没换时是 `base` 那一档蓝。
++fn acc(base: u32) -> Hsla { c(accent().unwrap_or(base)) }
++/// 强调色叠在页面上的一层（选区、悬停这类）。
++fn acc_a(a: f32) -> Hsla { ca(accent().unwrap_or(craft::B500), a) }
++/// 浅一档的蓝（`base` 是 B50–B300）；换了强调色时用它的半透明代替。
++fn acc_tint(base: u32, a: f32) -> Hsla { match accent() { Some(h) => ca(h, a), None => c(base) } }
+ thread_local! {
+     /// Exports and printing draw light whatever the window shows.
+     static FORCE_LIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
      static ADAPTED: std::cell::RefCell<std::collections::HashMap<[u32; 4], Hsla>> = std::cell::RefCell::new(std::collections::HashMap::new());
  }
  
@@ -5396,7 +5723,7 @@
  /// Switch the look; true when it changed.
  pub fn set_dark(on: bool) -> bool { DARK.swap(on, Ordering::Relaxed) != on }
  /// Run `f` with the light colours (HTML export, printing, copy as rich text).
-@@ -265,7 +271,7 @@
+@@ -265,7 +292,7 @@
  /// Shadows stay black; on the dark page they need more weight to show.
  fn shadow(a: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
      let a = if dark() { (a * 3.).min(0.6) } else { a };
@@ -5405,7 +5732,7 @@
  }
  
  /// Menus and dropdowns: macOS 26 menu panel, soft and wide.
-@@ -298,17 +304,17 @@
+@@ -298,17 +325,17 @@
      vec![shadow(0.05, 1., 1.5, 0.)]
  }
  
@@ -5427,6 +5754,87 @@
  pub const MONO_FONT: &str = "Noto Sans Mono";
  
  pub struct Theme;
+@@ -328,9 +355,9 @@
+     pub fn link() -> Hsla { mix(0x0087ff, craft::N900, 0.5) }
+     /// A hovered link or document chip: a step closer to the text colour.
+     pub fn link_hover() -> Hsla { mix(0x0087ff, craft::N900, 0.65) }
+-    pub fn primary() -> Hsla { c(craft::B500) }
+-    pub fn primary_500() -> Hsla { c(craft::B500) }
+-    pub fn primary_fill_1() -> Hsla { c(craft::B50) }
++    pub fn primary() -> Hsla { acc(craft::B500) }
++    pub fn primary_500() -> Hsla { acc(craft::B500) }
++    pub fn primary_fill_1() -> Hsla { acc_tint(craft::B50, 0.08) }
+     /// The note: white page.
+     pub fn bg_body() -> Hsla { c(craft::N00) }
+     /// Light fills inside the note (code blocks, quiet cards).
+@@ -340,18 +367,18 @@
+     pub fn fill_hover() -> Hsla { ca(craft::N1000, 0.045) }
+     pub fn fill_hover_strong() -> Hsla { ca(craft::N1000, 0.06) }
+     pub fn fill_pressed() -> Hsla { ca(craft::N1000, 0.09) }
+-    pub fn fill_turninto_active() -> Hsla { c(craft::B100) }
++    pub fn fill_turninto_active() -> Hsla { acc_tint(craft::B100, 0.14) }
+     /// Text selection: the accent, light.
+-    pub fn selection() -> Hsla { ca(craft::B500, 0.24) }
++    pub fn selection() -> Hsla { acc_a(0.24) }
+     /// A block whose handle menu is open.
+-    pub fn block_hover() -> Hsla { ca(craft::B500, 0.08) }
++    pub fn block_hover() -> Hsla { acc_a(0.08) }
+     /// Selected blocks.
+-    pub fn block_selected() -> Hsla { ca(craft::B500, 0.14) }
++    pub fn block_selected() -> Hsla { acc_a(0.14) }
+     pub fn handle_active() -> Hsla { ca(craft::N1000, 0.06) }
+     pub fn size_cell() -> Hsla { c(craft::N100) }
+     pub fn size_cell_border() -> Hsla { c(craft::N300) }
+-    pub fn size_cell_active() -> Hsla { c(craft::B300) }
+-    pub fn size_cell_disabled() -> Hsla { c(craft::B100) }
++    pub fn size_cell_active() -> Hsla { acc_tint(craft::B300, 0.5) }
++    pub fn size_cell_disabled() -> Hsla { acc_tint(craft::B100, 0.14) }
+     /// Hairline drawn inside colour swatches (and the "none" swatch).
+     pub fn swatch_border() -> Hsla { ca(craft::N1000, 0.08) }
+     /// Hovered / focused to-do row.
+@@ -361,18 +388,18 @@
+     pub fn scrollbar_thumb() -> Hsla { ca(craft::N1000, 0.22) }
+     pub fn shadow() -> Hsla { ca(craft::N1000, 0.08) }
+     /// Ring of a code block / callout whose handle menu is open.
+-    pub fn code_hover_ring() -> Hsla { ca(craft::B500, 0.35) }
++    pub fn code_hover_ring() -> Hsla { acc_a(0.35) }
+     /// The focus decoration: a rounded bar in the text colour.
+     pub fn quote_bar() -> Hsla { ca(craft::N900, 0.82) }
+     /// The caret is the accent, 2pt wide.
+-    pub fn caret() -> Hsla { c(craft::B500) }
+-    pub fn pinned() -> Hsla { c(craft::B500) }
++    pub fn caret() -> Hsla { acc(craft::B500) }
++    pub fn pinned() -> Hsla { acc(craft::B500) }
+     /// Table header row / column fill.
+     pub fn table_header() -> Hsla { c(0xf8f8f8) }
+     /// Table grid lines.
+     pub fn table_line() -> Hsla { ca(craft::N1000, 0.09) }
+     pub fn table_bar_hover() -> Hsla { c(craft::N350) }
+-    pub fn table_bar_selected() -> Hsla { c(craft::B200) }
++    pub fn table_bar_selected() -> Hsla { acc_tint(craft::B200, 0.3) }
+     pub fn danger_bar() -> Hsla { c(craft::R350) }
+     pub fn danger_cell() -> Hsla { c(craft::R50) }
+     pub fn danger() -> Hsla { c(craft::R500) }
+@@ -391,8 +418,8 @@
+     pub fn sidebar_drop() -> Hsla { ca(craft::N1000, 0.05) }
+     pub fn sidebar_drop_slot() -> Hsla { ca(craft::N1000, 0.08) }
+     /// Renaming in the sidebar: the field's thin edge and the soft focus glow around it.
+-    pub fn sidebar_field_edge() -> Hsla { ca(craft::B500, 0.6) }
+-    pub fn sidebar_field_ring() -> Hsla { ca(craft::B500, 0.16) }
++    pub fn sidebar_field_edge() -> Hsla { acc_a(0.6) }
++    pub fn sidebar_field_ring() -> Hsla { acc_a(0.16) }
+     pub fn sidebar_landed() -> Hsla { ca(craft::N1000, 0.07) }
+     /// Section headers on the sidebar.
+     pub fn sidebar_section() -> Hsla { c(0x333739) }
+@@ -416,7 +443,7 @@
+     #[allow(dead_code)]
+     pub fn caption() -> Hsla { c(0x7e8287) }
+     /// The old accent menu highlight; kept as a theme token, menus now hover with `fill_hover`.
+-    pub fn menu_highlight() -> Hsla { c(craft::B500) }
++    pub fn menu_highlight() -> Hsla { acc(craft::B500) }
+     /// Menus / popovers body (quick-entry & native menus).
+     pub fn popover_bg() -> Hsla { c(0xfafafa) }
+     /// Dotted separator: dots at half the text colour.
 --- a/src/themes.rs
 +++ b/src/themes.rs
 @@ -195,10 +195,12 @@
@@ -5529,7 +5937,89 @@
      async move {
          match prompt {
              Some(p) => p.await.ok().and_then(Result::ok).flatten(),
-@@ -238,6 +237,7 @@
+@@ -201,6 +200,81 @@
+         crate::tree::Tree::new(&self.entries).children(Some(id)).iter().map(|e| e.title.clone()).collect()
+     }
+ 
++    /// 手机：长按文件夹 › 导出为 › Markdown（照 Craft「将 N 个项目导出为」）。文件夹里的东西照原来的层级写成一个文件夹：
++    /// 子文件夹、带子页面的文档各成一层，图片放在各自的 `<名字>.assets`。写好后交给系统的「存储到…」。
++    pub(crate) fn export_folder_md(&mut self, id: &str, cx: &mut Context<Self>) {
++        let Some(name) = self.entries.iter().find(|e| e.id == id).map(|e| display_title(&e.title).replace(['/', ':', '\\'], "_")) else { return };
++        let tops: Vec<String> = crate::tree::Tree::new(&self.entries).children(Some(id)).iter().map(|e| e.id.clone()).collect();
++        self.export_md_tree(&name, &tops, cx);
++    }
++
++    /// 手机：「选择」后底部的「导出」：选中的文档和文件夹（连同里面的）写成一个文件夹交给「存储到…」，层级和 `export_folder_md` 一样。
++    pub(crate) fn export_selected_md(&mut self, ids: &[String], cx: &mut Context<Self>) {
++        if ids.is_empty() { return; }
++        let name = if ids.len() == 1 { self.entries.iter().find(|e| e.id == ids[0]).map(|e| display_title(&e.title).replace(['/', ':', '\\'], "_")) } else { None }
++            .unwrap_or_else(|| crate::localized_format!("留白导出 {} 项", "Margin Export ({} items)", ids.len()));
++        self.export_md_tree(&name, ids, cx);
++    }
++
++    /// 把 `tops`（和它们里面的）写成名为 `name` 的文件夹：子文件夹、带子页面的文档各成一层，图片放在各自的 `<名字>.assets`。
++    fn export_md_tree(&mut self, name: &str, tops: &[String], cx: &mut Context<Self>) {
++        let reply = crate::ios::files::new_path(Some(name));
++        // 先把要写的都排好：(相对目录, 文档 id)，子文件夹和子页面往下一层。
++        fn walk(tree: &crate::tree::Tree, kids: &[&crate::store::Entry], dir: &Path, out: &mut Vec<(PathBuf, String, bool)>) {
++            let mut used = std::collections::HashSet::new();
++            for e in kids {
++                let base = display_title(&e.title).replace(['/', ':', '\\'], "_");
++                let mut stem = base.clone();
++                let mut n = 2;
++                while !used.insert(stem.to_lowercase()) { stem = format!("{base} {n}"); n += 1; }
++                let folder = e.meta.folder.is_some();
++                out.push((dir.join(&stem), e.id.clone(), folder));
++                let sub = tree.children(Some(&e.id));
++                if !sub.is_empty() { walk(tree, sub, &dir.join(&stem), out); }
++            }
++        }
++        let mut plan = vec![];
++        let tree = crate::tree::Tree::new(&self.entries);
++        let firsts: Vec<&crate::store::Entry> = tops.iter().filter_map(|id| self.entries.iter().find(|e| &e.id == id)).collect();
++        walk(&tree, &firsts, Path::new(""), &mut plan);
++        let docs: Vec<(PathBuf, Document, Vec<String>)> = plan.iter().filter(|(_, _, folder)| !folder)
++            .filter_map(|(rel, id, _)| { let subs = self.sub_page_titles(id); self.doc_of(id, cx).map(|d| (rel.clone(), d, subs)) }).collect();
++        let dirs: Vec<PathBuf> = plan.iter().filter(|(_, _, folder)| *folder).map(|(rel, _, _)| rel.clone()).collect();
++        cx.spawn(async move |this, cx| {
++            let Ok(Ok(Some(root))) = reply.await else { return };
++            let mut missing = 0;
++            let written = (|| -> anyhow::Result<()> {
++                std::fs::create_dir_all(&root)?;
++                for d in &dirs { std::fs::create_dir_all(root.join(d))?; }
++                for (rel, doc, subs) in &docs {
++                    let path = root.join(rel).with_extension("md");
++                    let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| root.clone());
++                    std::fs::create_dir_all(&dir)?;
++                    let stem = rel.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
++                    let assets = format!("{stem}.assets");
++                    let out = crate::markdown::export(doc, &crate::markdown::Options { sub_pages: subs, assets: Some(assets.as_str()), ..Default::default() });
++                    missing += out.missing;
++                    std::fs::write(&path, &out.text)?;
++                    for (src, rel) in &out.files {
++                        let to = dir.join(rel);
++                        if let Some(p) = to.parent() { std::fs::create_dir_all(p)?; }
++                        if crate::store::export_path(&src.to_string_lossy()).ok_or_else(|| anyhow::anyhow!("Asset outside library"))
++                            .and_then(|p| crate::store::read_bounded(&p, crate::store::EXPORT_FILE_LIMIT))
++                            .and_then(|bytes| Ok(std::fs::write(&to, bytes)?)).is_err() { missing += 1; }
++                    }
++                }
++                Ok(())
++            })();
++            let _ = this.update(cx, |w, cx| match written {
++                Ok(()) => {
++                    crate::ios::exported(&root);
++                    if missing > 0 { w.show_toast_kind(ToastKind::Error, &crate::localized_format!("已导出，但有 {missing} 个图片或附件未能复制", "Exported, but {missing} images or attachments could not be copied"), cx); }
++                }
++                Err(_) => w.show_toast_kind(ToastKind::Error, crate::settings::text("导出失败，请重试"), cx),
++            });
++        }).detach();
++    }
++
+     /// 下载为 → Markdown: the 导出 Markdown 设置 first.
+     pub fn open_export_md(&mut self, id: &str, cx: &mut Context<Self>) {
+         self.close_menus();
+@@ -238,6 +312,7 @@
                  }
                  Ok(())
              });
@@ -5537,7 +6027,7 @@
              if written.is_err() {
                  let _ = this.update(cx, |w, cx| w.show_toast_kind(ToastKind::Error, crate::settings::text("导出失败，请重试"), cx));
              } else if missing > 0 {
-@@ -364,16 +364,15 @@
+@@ -364,16 +439,15 @@
          self.import_menu = None;
          cx.notify();
          let picked = crate::devtools::take_pick();
@@ -5556,7 +6046,7 @@
          cx.spawn_in(window, async move |this, cx| {
              let paths = match prompt {
                  Some(p) => p.await.ok().and_then(Result::ok).flatten(),
-@@ -396,7 +395,7 @@
+@@ -396,7 +470,7 @@
              let parent = parent.clone();
              row(id, glyph, label).on_click(cx.listener(move |w, _, window, cx| w.open_import_kind(kind, parent.clone(), window, cx)))
          };
@@ -5565,7 +6055,7 @@
              crate::ui::popover().id("import-items").occlude().w(px(210.)).py(px(crate::ui::MENU_PAD_Y))
                  .on_mouse_down_out(cx.listener(|w, _, _, cx| { w.import_menu = None; cx.notify(); }))
                  .child(item("import-md", "doc-md", crate::settings::tr("导入 Markdown 文件…", "Import Markdown Files…"), ImportKind::Markdown))
-@@ -445,7 +444,10 @@
+@@ -445,7 +519,10 @@
          if !self.save_before(cx, move |w, window, cx| w.import_folder(&again, retry.clone(), open, window, cx)) {
              return;
          }
@@ -5577,7 +6067,7 @@
          let Some(tree) = tree.filter(|t| t.files > 0) else {
              self.show_toast_kind(ToastKind::Error, crate::settings::tr("这个文件夹里没有 Markdown 或 XML 文件", "This folder has no Markdown or XML files"), cx);
              return;
-@@ -466,6 +468,10 @@
+@@ -466,6 +543,10 @@
          }
          if failed > 0 {
              self.show_toast_kind(ToastKind::Error, &crate::localized_format!("有 {failed} 个文件未能导入", "{failed} files could not be imported"), cx);
@@ -5599,16 +6089,19 @@
      let end = deleted + TRASH_DAYS * 86_400;
      let left = end.saturating_sub(crate::time::now());
      if left < 86_400 { crate::settings::text("即将彻底删除").into() } else { crate::localized_format!("{} 天", "{} days", left.div_ceil(86_400)) }
-@@ -90,6 +90,8 @@
+@@ -89,7 +89,10 @@
+             .map_or_else(|| crate::settings::label("我的文档"), |e| display_title(&e.title))
      }
  
-     pub(crate) fn render_trash(&mut self, cx: &mut Context<Self>) -> AnyElement {
-+        // 手机悬浮版式：首页「最近删除」点进去的一页，和「所有文档」同一套（`ios::hub::trash_page`）。
-+        if crate::ios::floating() { return crate::ios::hub::trash_page(self, cx); }
+-    pub(crate) fn render_trash(&mut self, cx: &mut Context<Self>) -> AnyElement {
++    pub(crate) fn render_trash(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
++        // 手机悬浮版式：首页「最近删除」点进去的一页，和文件夹页同一套网格（`ios::hub::trash_page`）。
++        if crate::ios::floating() { return crate::ios::hub::trash_page(self, window, cx); }
++        let _ = window;
          // 清空回收站: a labelled button, only when there is something to empty.
          let empty = (!self.trash.is_empty()).then(|| div().id("trash-empty").no_drag().flex_none().mr(px(8.)).h(px(28.)).px(px(10.)).flex().items_center().gap(px(6.))
              .rounded(px(9.)).cursor_pointer().hover(|s| s.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_pressed()))
-@@ -107,6 +109,9 @@
+@@ -107,6 +110,9 @@
          }
          // The list: 13pt tertiary headers over a hairline,
          // 15pt titles, 13pt secondary cells.
@@ -5618,7 +6111,7 @@
          let col = |w: Option<f32>, label: &'static str| {
              div()
                  .when_some(w, |d, w| d.w(px(w)).flex_none())
-@@ -126,8 +131,8 @@
+@@ -126,8 +132,8 @@
              .border_b_1()
              .border_color(list_line())
              .child(col(None, "标题"))
@@ -5629,7 +6122,7 @@
              .child(div().w(px(48.)).flex_none());
          let mut list = div().id("trash-list").flex_1().min_h_0().overflow_y_scroll().px(px(24.)).pb(px(24.));
          for (i, t) in self.trash.iter().enumerate() {
-@@ -148,7 +153,7 @@
+@@ -148,7 +154,7 @@
                  .on_click(cx.listener(move |w, ev: &ClickEvent, _, cx| {
                      cx.stop_propagation();
                      let p = ev.position();
@@ -5638,7 +6131,7 @@
                      cx.notify();
                  }));
              list = list.child(
-@@ -160,10 +165,11 @@
+@@ -160,10 +166,11 @@
                      .when(i > 0, |d| d.border_t_1().border_color(list_line()))
                      .hover(row_hover)
                      .when(menu_open, |d| d.bg(Theme::fill_hover()).border_color(transparent_black()).rounded(px(ROW_RADIUS)))
@@ -5651,7 +6144,7 @@
                              cx.notify();
                          }),
                      )
-@@ -180,7 +186,7 @@
+@@ -180,7 +187,7 @@
                              })
                              .child(div().min_w_0().text_size(px(15.)).line_height(px(22.)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(title))),
                      )
@@ -5660,7 +6153,7 @@
                          div()
                              .w(px(168.))
                              .flex_none()
-@@ -190,8 +196,8 @@
+@@ -190,8 +197,8 @@
                              .gap(px(4.))
                              .child(icon("library", 16., Theme::icon()))
                              .child(div().min_w_0().text_size(px(13.)).text_color(Theme::text_caption()).overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(self.trash_location(t)))),
@@ -5671,7 +6164,7 @@
                      .child(div().w(px(48.)).flex_none().flex().justify_end().pr(px(12.)).child(more)),
              );
          }
-@@ -215,7 +221,7 @@
+@@ -215,7 +222,7 @@
              .occlude()
              // At least TRASH_MENU_W, wider when a label needs it (English
              // "Delete permanently" ran into the edge).
@@ -5680,7 +6173,7 @@
              .py(px(crate::ui::MENU_PAD_Y))
              .on_mouse_down_out(cx.listener(|w, _, _, cx| {
                  w.trash_menu = None;
-@@ -232,7 +238,7 @@
+@@ -232,7 +239,7 @@
                  cx.notify();
              })));
          Some(
@@ -5689,7 +6182,39 @@
                  .with_priority(2)
                  .into_any_element(),
          )
-@@ -288,6 +294,33 @@
+@@ -259,6 +266,31 @@
+         self.remember_files(file_before, crate::settings::tr("恢复", "Restore"));
+     }
+ 
++    /// 手机「最近删除」选了几项后点「恢复」：一项项放回去，不再确认（恢复是能撤回的）。
++    pub(crate) fn restore_batch(&mut self, cx: &mut Context<Self>) {
++        let Some(ids) = self.batch.take().filter(|s| !s.is_empty()) else { return };
++        let file_before = self.store.track_file_changes();
++        let failed = ids.iter().filter(|id| self.store.restore(id).is_err()).count();
++        if failed > 0 { self.show_toast_kind(crate::ui::ToastKind::Error, &crate::localized_format!("有 {} 项没能恢复", "{} items could not be restored", failed), cx); }
++        else { self.show_toast(&crate::localized_format!("已恢复 {} 项", "Restored {} items", ids.len()), cx); }
++        self.entries = self.store.list();
++        self.sort();
++        self.sync_sub_pages(cx);
++        self.trash = self.store.list_trash();
++        self.show_store_warnings(cx);
++        self.remember_files(file_before, crate::settings::tr("恢复", "Restore"));
++        cx.notify();
++    }
++
++    fn purge_many(&mut self, ids: &[String], cx: &mut Context<Self>) {
++        match ids.iter().try_for_each(|id| self.store.purge(id)) {
++            Ok(()) => self.show_toast(&crate::localized_format!("已彻底删除 {} 项", "Deleted {} items permanently", ids.len()), cx),
++            Err(e) => self.status = crate::app::SaveStatus::Failed(crate::localized_format!("删除失败：{}", "Could not delete document: {}", crate::settings::diagnostic(&e.to_string()))),
++        }
++        self.trash = self.store.list_trash();
++        self.show_store_warnings(cx);
++    }
++
+     fn purge_doc(&mut self, id: &str, cx: &mut Context<Self>) {
+         match self.store.purge(id) {
+             Ok(()) => self.show_toast(crate::settings::text("已彻底删除"), cx),
+@@ -288,6 +320,34 @@
          }
      }
  
@@ -5705,6 +6230,7 @@
 +            }
 +            Confirm::Restore(id) => self.restore_doc(&id, cx),
 +            Confirm::Purge(id) => self.purge_doc(&id, cx),
++            Confirm::PurgeMany(ids) => { self.batch = None; self.purge_many(&ids, cx); }
 +            Confirm::EmptyTrash => self.empty_trash(cx),
 +            Confirm::Refs { show, no_ask } => {
 +                if no_ask {
@@ -5723,7 +6249,15 @@
      /// The confirmation dialog: a modal (white, radius 16), a 15pt
      /// semibold title, one line of 13pt body, 取消 and the action button on
      /// the right.
-@@ -351,6 +384,7 @@
+@@ -315,6 +375,7 @@
+                 crate::settings::text("清空"),
+                 true,
+             ),
++            Confirm::PurgeMany(ids) => (crate::localized_format!("彻底删除所选的 {} 项？", "Permanently delete the {} selected items?", ids.len()), crate::settings::text("彻底删除后，该页面及其子页面将无法恢复").to_string(), crate::settings::text("删除"), true),
+             Confirm::Purge(_) => (crate::settings::text("确认彻底删除？").to_string(), crate::settings::text("彻底删除后，该页面及其子页面将无法恢复").to_string(), crate::settings::text("删除"), true),
+             Confirm::Refs { show: false, .. } => (
+                 crate::settings::text("是否隐藏引用列表？").to_string(),
+@@ -351,6 +412,7 @@
              Confirm::Refs { show: false, no_ask } => Some(*no_ask),
              _ => None,
          };
@@ -5731,7 +6265,7 @@
          let ok = primary_button("confirm-ok", action);
          let ok = if danger { ok.bg(Theme::danger()).hover(|s| s.bg(theme::c(craft::R600))).active(|s| s.bg(theme::c(craft::R700))) } else { ok };
          let dialog = dialog("confirm-dialog")
-@@ -398,42 +432,33 @@
+@@ -398,42 +460,33 @@
                              w.resolve_save_failed(false, window, cx);
                          })))
                      })

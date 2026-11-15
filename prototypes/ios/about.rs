@@ -29,7 +29,7 @@ pub fn page(_w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         .text_size(px(17.)).text_color(crate::settings::row_ink()).child(div().flex_1().child(tr("开源许可", "Open Source Licences")))
         .child(div().text_size(px(17.)).text_color(Theme::text_caption()).child("MIT"))
         .child(crate::ui::icon("chevron-right", 14., crate::settings::row_chevron()))
-        .on_click(cx.listener(|w, _, _, cx| w.open_settings(Page::Licences, cx)));
+        .on_click(cx.listener(|w, _, _, cx| { super::glass::haptic(); w.open_settings(Page::Licences, cx); }));
     div().w_full().flex().flex_col()
         .child(head)
         .child(crate::settings::flat_group(None, vec![privacy.into_any_element(), licences.into_any_element()], 16.))

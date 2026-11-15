@@ -406,7 +406,7 @@ impl Store {
             let preview: Preview = reread::<serde_json::Value>(&self.root.join("trash").join(format!("{id}.json")))
                 .and_then(|v| v.get("preview").cloned()).and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
             out.push(TrashEntry { id: id.clone(), title: t.meta.folder.clone().or_else(|| t.meta.name.clone()).unwrap_or(preview.title),
-                icon: t.meta.folder_icon.clone().or(preview.icon), deleted: t.deleted, parent: t.meta.parent.clone() });
+                icon: t.meta.folder_icon.clone().or(preview.icon), deleted: t.deleted, parent: t.meta.parent.clone(), folder: t.meta.folder.is_some() });
         }
         out.sort_by(|a, b| b.deleted.cmp(&a.deleted).then_with(|| a.id.cmp(&b.id)));
         out
