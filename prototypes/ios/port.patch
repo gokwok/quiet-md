@@ -3841,16 +3841,18 @@
              for (r, c, value) in table.cells() {
                  let (rs, cs) = (value.rowspan as usize, value.colspan as usize);
                  let header = r < table.header_rows || (table.header_col && c == 0);
-@@ -397,7 +397,7 @@
+@@ -397,9 +397,8 @@
  
  /// A document's icon: its emoji, or the monochrome page glyph.
  fn entry_icon(e: &Entry) -> AnyElement {
 -    if e.meta.folder.is_some() { return icon("folder", 22., Theme::icon()).mr(px(13.)).into_any_element(); }
 +    if e.meta.folder.is_some() { return crate::ios::folder_icons::glyph(e, 22.).mr(px(13.)).into_any_element(); }
      match &e.icon {
-         _ if e.meta.markdown => crate::search::doc_icon_named("doc-md").mr(px(12.)).into_any_element(),
+-        _ if e.meta.markdown => crate::search::doc_icon_named("doc-md").mr(px(12.)).into_any_element(),
          Some(em) => div().size(px(24.)).mr(px(12.)).flex_none().flex().items_center().justify_center().text_size(px(18.)).child(em.clone()).into_any_element(),
-@@ -408,6 +408,10 @@
+         None => doc_icon().mr(px(12.)).into_any_element(),
+     }
+@@ -408,6 +407,10 @@
  impl Workspace {
      /// In 批量管理 a click checks or unchecks; otherwise it opens.
      fn home_click(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -3861,7 +3863,7 @@
          if self.batch.is_none() { return self.open(id, window, cx) }
          if !self.toggle_check(id) {
              self.show_toast_kind(crate::ui::ToastKind::Error, &crate::localized_format!("一次最多选择 {} 项", "Select up to {} items at a time", crate::sidebar::BATCH_LIMIT), cx);
-@@ -416,7 +420,7 @@
+@@ -416,7 +419,7 @@
      }
  
      /// The row's / card's checkbox while 批量管理 is on.
@@ -3870,7 +3872,7 @@
          use crate::sidebar::{BATCH_LIMIT, Check, checkbox};
          let sel = self.batch.as_ref()?;
          let on = sel.contains(&e.id);
-@@ -426,6 +430,13 @@
+@@ -426,6 +429,13 @@
      pub(crate) fn home_entries(&self) -> Vec<Entry> {
          match self.home.tab {
              // 我的文档 is the library's top level.
@@ -3884,7 +3886,7 @@
              HomeTab::Recent => self.level_entries(None),
              HomeTab::Starred => self.sorted_entries(self.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.starred > 0).cloned().collect()),
          }
-@@ -483,7 +494,7 @@
+@@ -483,7 +493,7 @@
          fn subpages(blocks: &mut [crate::model::Block], entries: &[&Entry], budget: &mut usize) {
              for b in blocks {
                  if matches!(b.kind, BlockKind::SubPageList) {
@@ -3893,7 +3895,7 @@
                      *budget -= b.children.len();
                  } else {
                      subpages(&mut b.children, entries, budget);
-@@ -494,7 +505,8 @@
+@@ -494,7 +504,8 @@
          let mut budget = 64;
          let mut eqnos = HashMap::new();
          let mut cover = None;
@@ -3903,7 +3905,7 @@
              cover = doc.cover.clone();
              let numbers = crate::editor::equation_numbers(&doc);
              thumb_blocks(&doc.blocks, &mut budget, 0, &numbers, &mut eqnos)
-@@ -514,14 +526,14 @@
+@@ -514,14 +525,14 @@
      fn open_row_menu(&mut self, id: &str, key: &str, cx: &mut Context<Self>) {
          let b = self.more_bounds.borrow().get(key).copied();
          let Some(b) = b else { return };
@@ -3920,7 +3922,7 @@
          div()
              .id(SharedString::from(key.clone()))
              .relative()
-@@ -579,7 +591,7 @@
+@@ -579,7 +590,7 @@
  
      /// A newly opened folder page starts at its top.
      pub(crate) fn reset_folder_scroll(&self) {
@@ -3929,7 +3931,7 @@
          self.home.folder_list_scroll.set_offset(point(px(0.), px(0.)));
      }
  
-@@ -602,19 +614,25 @@
+@@ -602,19 +613,25 @@
          // Too narrow for the search box: a search icon beside +, in the same style.
          let search = self.header_search(window, cx);
          let narrow = search.is_none();
@@ -3959,7 +3961,7 @@
          // Tabs as segmented items: the current one on a quiet fill, no accent.
          let tab = |id: &'static str, label: &'static str, t: HomeTab| {
              let on = self.home.tab == t;
-@@ -640,8 +658,10 @@
+@@ -640,8 +657,10 @@
          };
          // 批量管理: the sidebar's 批量操作 selection, entered and shown here
          // too, with a toolbar of its own.
@@ -3971,7 +3973,7 @@
                  .text_size(px(13.)).line_height(px(20.))
                  .text_color(if enabled { Theme::text() } else { Theme::text_disabled() })
                  .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())))
-@@ -675,33 +695,49 @@
+@@ -675,33 +694,49 @@
                      .when(n > 0, |d| d.on_click(cx.listener(|w, _, window, cx| w.batch_move(window, cx)))))
                  .child(text_btn("home-batch-delete", "bin", crate::settings::text("删除"), n > 0).ml(px(4.))
                      .when(n > 0, |d| d.on_click(cx.listener(|w, _, _, cx| w.ask_batch_delete(cx)))))
@@ -4027,7 +4029,7 @@
          };
          div()
              .flex_1()
-@@ -709,19 +745,24 @@
+@@ -709,19 +744,24 @@
              .h_full()
              .flex()
              .flex_col()
@@ -4056,7 +4058,7 @@
          // The list: 13pt tertiary headers over a hairline; the
          // sorted column in the text colour, semibold, with its arrow.
          let mut header = div()
-@@ -768,7 +809,10 @@
+@@ -768,7 +808,10 @@
              );
          }
          header = header.child(div().w(px(60.)).flex_none());
@@ -4068,7 +4070,7 @@
          if entries.is_empty() {
              rows = rows.child(div().pt(px(72.)).child(empty_state("illus/empty-list.svg", crate::settings::text("当前列表暂无内容"))));
          }
-@@ -786,10 +830,11 @@
+@@ -786,10 +829,11 @@
                  .hover(row_hover)
                  .when(menu_on, |d| d.bg(Theme::fill_hover()).border_color(transparent_black()).rounded(px(ROW_RADIUS)))
                  .on_click(cx.listener(move |w, _, window, cx| w.home_click(&id, window, cx)))
@@ -4081,7 +4083,7 @@
                          cx.notify();
                      }),
                  ))
-@@ -811,58 +856,87 @@
+@@ -811,58 +855,87 @@
              row = row.child(div().w(px(60.)).flex_none().flex().justify_end().pr(px(12.)).when(self.batch.is_none(), |d| d.child(self.home_more(e, format!("home-more-{}", e.id), cx))));
              rows = rows.child(row);
          }
@@ -4185,7 +4187,7 @@
                  div()
                      .size_full()
                      .flex()
-@@ -875,31 +949,87 @@
+@@ -875,31 +948,87 @@
                  let mut p = div().size_full().p(px(pad)).overflow_hidden().flex().flex_col();
                  p = p.child(div().flex_none().flex().items_start().gap(px(6.)).mb(px(8.))
                      .when_some(e.icon.as_ref(), |d, emoji| d.child(div().flex_none().text_size(px(14.)).line_height(px(20.)).child(emoji.clone())))
@@ -4279,7 +4281,7 @@
                      .child(crate::ui::continuous_surface(20., Theme::fill_hover()).size_full())
                      .into_any_element();
              }
-@@ -907,6 +1037,7 @@
+@@ -907,6 +1036,7 @@
                      .id(SharedString::from(format!("home-card-{}", e.id)))
                      .when(check.is_none(), |d| d.on_mouse_down(MouseButton::Left, cx.listener(move |w, ev: &MouseDownEvent, _, cx| w.arm_home_drag(&arm, ev.position, cx))))
                      .child(self.record_home_card(&e.id))
@@ -4287,7 +4289,7 @@
                      .w_full().min_w_0().h(px(card_h)).relative().group("home-card")
                      .flex_none()
                      .bg(Theme::bg_overlay()).p(px(frame))
-@@ -914,18 +1045,26 @@
+@@ -914,18 +1044,26 @@
                      .cursor_pointer()
                      .hover(|s| s.bg(Theme::fill_hover_strong()))
                      .when(menu_on, |d| d.bg(Theme::fill_hover_strong()))
@@ -4319,7 +4321,7 @@
                      .when(self.batch.is_none(), |d| d.child(
                          div().absolute().top(px(8.)).right(px(8.))
                              .when(!menu_on, |d| d.opacity(0.).group_hover("home-card", |s| s.opacity(1.)))
-@@ -936,13 +1075,32 @@
+@@ -936,13 +1074,32 @@
  
      /// 显示设置 and the sort dropdown: the menu panel; the sort item is a
      /// native menu row.
@@ -4354,7 +4356,7 @@
          };
          if self.home.sort_menu
              && let Some(b) = self.home.anchor("home-sort") {
-@@ -958,7 +1116,7 @@
+@@ -958,7 +1115,7 @@
                              w.home.sort = order;
                              w.save_home();
                              w.home.sort_menu = false;
@@ -4363,7 +4365,7 @@
                              w.home.list_scroll.set_offset(point(px(0.), px(0.)));
                              cx.notify();
                          })));
-@@ -968,7 +1126,7 @@
+@@ -968,7 +1125,7 @@
                      .child(menu_label(crate::settings::tr("文件夹优先", "Folders first"), g.clone(), gpui::white()).flex_1())
                      .when(self.home.folders_first && self.home.sort != HomeSort::Manual, |d| d.child(menu_glyph("check", 14., g)))
                      .on_click(cx.listener(|w, _, _, cx| { if w.home.sort == HomeSort::Manual { return; } w.home.folders_first = !w.home.folders_first; w.save_home(); w.home.sort_menu = false; cx.notify(); })));
@@ -4679,15 +4681,17 @@
      }
 --- a/src/search.rs
 +++ b/src/search.rs
-@@ -109,6 +109,7 @@
+@@ -109,8 +109,8 @@
  
  /// A result's icon: the page's emoji, or the page glyph.
  pub(crate) fn entry_icon(e: &Entry) -> Div {
 +    if e.meta.folder.is_some() { return div().flex_none().size(px(24.)).mr(px(10.)).flex().items_center().justify_center().child(crate::ios::folder_icons::glyph(e, 20.)); }
      match &e.icon {
-         _ if e.meta.markdown => doc_icon_named("doc-md"),
+-        _ if e.meta.markdown => doc_icon_named("doc-md"),
          Some(em) => div().flex_none().size(px(24.)).mr(px(10.)).flex().items_center().justify_center().text_size(px(20.)).child(em.clone()),
-@@ -166,7 +167,7 @@
+         None => doc_icon(),
+     }
+@@ -166,7 +166,7 @@
      extra.push(extra_segment(Some("pen-line"), if crate::settings::english() { format!("Modified {}", format_visit(e.meta.modified)) } else { format!("我在 {}修改过", format_visit(e.meta.modified)) }));
      let last = extra.len() - 1;
      let extra = extra.into_iter().enumerate().flat_map(|(i, seg)| {
@@ -4696,7 +4700,7 @@
          [(i > 0).then(|| div().flex_none().child(" · ")), Some(seg)].into_iter().flatten()
      });
      div()
-@@ -218,11 +219,12 @@
+@@ -218,11 +218,12 @@
          let search = self.search.clone();
          search.update(cx, |s, cx| {
              // The dialog's query reads at body size, above the 13pt rows.
@@ -4711,7 +4715,7 @@
          self.search_scroll.set_offset(point(px(0.), px(0.)));
          cx.notify();
      }
-@@ -233,7 +235,7 @@
+@@ -233,7 +234,7 @@
          }
          self.search_open = false;
          if let Some(ed) = &self.editor {
@@ -4720,7 +4724,7 @@
          }
          cx.notify();
      }
-@@ -248,7 +250,7 @@
+@@ -248,7 +249,7 @@
          self.close_search(window, cx);
          self.open(&id, window, cx);
          if let Some(ed) = &self.editor {
@@ -4729,7 +4733,7 @@
          }
      }
  
-@@ -316,17 +318,24 @@
+@@ -316,17 +317,24 @@
              }))
              .on_click(cx.listener(move |w, _, window, cx| w.pick_search(row, window, cx)))
              .child(entry_icon(e))
@@ -4756,7 +4760,7 @@
  
          let input = div()
              .flex_none()
-@@ -350,7 +359,7 @@
+@@ -350,7 +358,7 @@
                  d.child(input_button("search-clear", "search-clear", 18., Theme::text_disabled()).ml(px(8.)).on_click(cx.listener(
                      |w, _, window, cx| {
                          w.search.update(cx, |s, cx| s.set_text("", cx));
@@ -4765,7 +4769,7 @@
                          w.search_sel = Some(0);
                          w.search_scroll.set_offset(point(px(0.), px(0.)));
                          cx.notify();
-@@ -422,8 +431,8 @@
+@@ -422,8 +430,8 @@
          let modal = div()
              .id("search-dialog")
              .occlude()
@@ -4776,7 +4780,7 @@
              .flex()
              .flex_col()
              .rounded(px(16.))
-@@ -434,7 +443,7 @@
+@@ -434,7 +442,7 @@
              .child(div().flex_none().h(px(1.)).bg(Theme::line_divider()))
              // The thumb sits in the list's right padding, over no row.
              .child(div().flex_1().min_h_0().relative().flex().flex_col().child(list).child(self.home.search_scrollbar.render(&self.search_scroll)))
@@ -4785,7 +4789,7 @@
  
          Some(
              deferred(
-@@ -445,7 +454,8 @@
+@@ -445,7 +453,8 @@
                      .flex()
                      .flex_col()
                      .items_center()
@@ -5466,26 +5470,26 @@
                  .line_height(px(DOC_ROW_H))
                  .overflow_hidden()
                  .whitespace_nowrap()
-@@ -659,15 +662,16 @@
+@@ -659,15 +662,15 @@
                      .map(|d| match &e.icon {
                      _ if folder => {
                          let s = if key == "doc" { self.folder_drag.pop(&e.id) } else { 1. };
 +                        let glyph = crate::ios::folder_icons::name(e.meta.folder_icon.as_deref());
                          d.child(div().absolute().inset_0().flex().items_center().justify_center().opacity(1. - chevron)
 -                            .child(icon(if drop_target { "folder-input" } else if open { "folder-open" } else { "folder" }, ROW_ICON, Theme::icon())
-+                            .child(icon(if drop_target { "folder-input" } else if open && glyph == "folder" { "folder-open" } else { glyph }, ROW_ICON, crate::ios::folder_tint(e))
++                            .child(crate::ios::folder_icons::icon(if drop_target { "folder-input" } else if open && glyph == "folder" { "folder-open" } else { glyph }, ROW_ICON, crate::ios::folder_tint(e))
                                  .with_transformation(Transformation::scale(size(s, s)))))
                          .when(chevron > 0.005, |d| d.child(div().absolute().inset_0().flex().items_center().justify_center().opacity(chevron)
                              .child(icon("disclosure", ROW_ICON, Theme::icon())
                                  .with_transformation(Transformation::rotate(radians(if open { std::f32::consts::FRAC_PI_2 } else { 0. }))))))
                      }
-                     _ if e.meta.markdown => d.child(icon("doc-md", ROW_ICON, Theme::icon())),
+-                    _ if e.meta.markdown => d.child(icon("doc-md", ROW_ICON, Theme::icon())),
 -                    Some(em) => d.text_size(px(13.)).line_height(px(20.)).child(em.clone()),
 +                    Some(em) => d.text_size(px(16.)).line_height(px(20.)).child(em.clone()),
                      None => d.child(icon("doc", ROW_ICON, Theme::icon())),
                  })
              })
-@@ -699,7 +703,7 @@
+@@ -699,7 +702,7 @@
              let menu = popover()
                  .id("batch-menu")
                  .occlude()
@@ -5494,7 +5498,7 @@
                  .px(px(5.))
                  .py(px(crate::ui::MENU_PAD_Y))
                  .on_mouse_down_out(cx.listener(|w, _, _, cx| {
-@@ -711,7 +715,7 @@
+@@ -711,7 +714,7 @@
                  .child(item("bm-move", "folder-input", crate::settings::text("移动到")).on_click(cx.listener(|w, _, window, cx| w.batch_move(window, cx))))
                  .child(item("bm-delete", "bin", crate::settings::text("删除")).on_click(cx.listener(|w, _, _, cx| w.ask_batch_delete(cx))));
              return vec![
@@ -5503,7 +5507,7 @@
                      .with_priority(2)
                      .into_any_element(),
              ];
-@@ -734,7 +738,7 @@
+@@ -734,7 +737,7 @@
          let menu = popover()
              .id("row-menu")
              .occlude()
@@ -5512,7 +5516,7 @@
              .px(px(5.))
              .py(px(crate::ui::MENU_PAD_Y))
              .on_mouse_down_out(cx.listener(move |w, ev: &MouseDownEvent, _, cx| {
-@@ -743,7 +747,8 @@
+@@ -743,7 +746,8 @@
                      cx.notify();
                  }
              }))
@@ -5522,7 +5526,7 @@
                  item("rm-window", "copy", crate::settings::text("在新窗口中打开"))
                      .on_hover(set_sub(false))
                      .on_click(cx.listener(move |w, _, _, cx| {
-@@ -752,7 +757,7 @@
+@@ -752,7 +756,7 @@
                          cx.defer(move |cx| crate::quick_note::open_document(Some(id), cx));
                          cx.notify();
                      })),
@@ -5531,7 +5535,7 @@
              .child(
                  item("rm-copy", "copy", crate::settings::text("创建副本"))
                      .on_hover(set_sub(false))
-@@ -791,26 +796,26 @@
+@@ -791,26 +795,26 @@
                      .on_hover(set_sub(false))
                      .on_click(cx.listener(move |w, _, _, cx| w.ask_delete(&del, cx))),
              );
@@ -5563,7 +5567,7 @@
                  .with_priority(2)
                  .into_any_element(),
          ];
-@@ -820,17 +825,18 @@
+@@ -820,17 +824,18 @@
              // Level the submenu's first item with 下载 (the 5th item, after one divider).
              let top = menu_top + 4. * ROW_ITEM + ROW_DIVIDER;
              let left = match corner {
@@ -5587,7 +5591,15 @@
                              .child(canvas(move |b, _, _| record.set(Some(b)), |_, _, _, _| {}).absolute().inset_0())
 --- a/src/sidebar_drag.rs
 +++ b/src/sidebar_drag.rs
-@@ -239,7 +239,7 @@
+@@ -196,7 +196,6 @@
+     div().h(px(crate::sidebar::ROW_H)).w_full().pl(px(6.)).flex().items_center()
+         .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().map(|d| match &e.icon {
+             _ if e.meta.folder.is_some() => d.child(icon(if open { "folder-open" } else { "folder" }, crate::sidebar::ROW_ICON, Theme::icon())),
+-            _ if e.meta.markdown => d.child(icon("doc-md", crate::sidebar::ROW_ICON, Theme::icon())),
+             Some(em) => d.text_size(px(13.)).line_height(px(20.)).child(em.clone()),
+             None => d.child(icon("doc", crate::sidebar::ROW_ICON, Theme::icon())),
+         }))
+@@ -239,7 +238,7 @@
              self.folder_drag.icon_press = false;
              self.folder_drag.icon_alt = false;
              self.row_menu = None; self.create_menu = None;
@@ -6381,7 +6393,8 @@
 -            _ if e.meta.folder.is_some() => icon("folder", 16., Theme::icon()).into_any_element(),
 +            _ if e.meta.folder.is_some() => crate::ios::folder_icons::glyph(e, 16.).into_any_element(),
              Some(em) => div().size(px(16.)).flex_none().flex().items_center().justify_center().text_size(px(14.)).child(em.clone()).into_any_element(),
-             None => icon(if e.meta.markdown { "doc-md" } else { "doc" }, 16., Theme::icon()).into_any_element(),
+-            None => icon(if e.meta.markdown { "doc-md" } else { "doc" }, 16., Theme::icon()).into_any_element(),
++            None => icon("doc", 16., Theme::icon()).into_any_element(),
          };
 -        let mut list = div().id("move-tree").flex_1().min_w_0().px(px(8.)).py(px(12.)).overflow_y_scroll().track_scroll(&dlg.scroll);
 +        let mut list = div().id("move-tree").flex_1().min_w_0().min_h_0().px(px(8.)).py(px(12.)).overflow_y_scroll().track_scroll(&dlg.scroll);

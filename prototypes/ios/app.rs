@@ -899,7 +899,7 @@ pub fn icon_picker(cx: &mut Context<Workspace>) -> Option<AnyElement> {
     let cell = f32::from(menu_w(0.) - px(24.)) / 6.;
     let grid = div().px(px(12.)).py(px(8.)).flex().flex_wrap().children(folder_icons::CHOICES.iter().enumerate().map(|(i, choice)|
         div().id(("folder-icon", i)).w(px(cell.floor())).h(px(48.)).flex().items_center().justify_center().rounded(px(10.))
-            .active(|s| s.bg(Theme::fill_pressed())).child(crate::ui::icon(choice.glyph, 24., Theme::icon()))
+            .active(|s| s.bg(Theme::fill_pressed())).child(folder_icons::icon(choice.glyph, 24., Theme::icon()))
             .on_click(cx.listener(set(Some(choice.value.to_string()), id.clone())))));
     let panel = sheet_plane(crate::editor_ui::popover()).id("folder-icons").occlude().w(menu_w(0.)).py(px(crate::ui::MENU_PAD_Y))
         .on_mouse_down_out(cx.listener(|_, _, _, cx| { pick_icon(None); cx.notify(); }))

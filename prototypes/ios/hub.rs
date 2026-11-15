@@ -94,7 +94,6 @@ fn avatar_bounds() -> Bounds<Pixels> {
 fn entry_icon(w: &Workspace, e: &Entry) -> AnyElement {
     match &e.icon {
         _ if e.meta.folder.is_some() => super::folder_icons::glyph(e, 20.).into_any_element(),
-        _ if e.meta.markdown => crate::ui::icon("doc-md", 20., Theme::icon()).into_any_element(),
         Some(em) => div().text_size(px(18.)).child(em.clone()).into_any_element(),
         None => w.mini_thumb(e, 20.),
     }
