@@ -76,19 +76,102 @@ pub fn settings_head(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
-fn row(id: impl Into<ElementId>, glyph: &str, label: &'static str) -> Stateful<Div> {
-    div().id(id).w_full().h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(16.)).active(|s| s.bg(Theme::fill_pressed()))
-        .child(crate::ui::icon(glyph, 20., Theme::icon())).child(div().flex_1().child(label))
+thread_local! { static SETTINGS_SCROLL: ScrollHandle = ScrollHandle::new(); }
+/// 设置第一级的滚动位置：顶上的磨砂玻璃和居中的「设置」跟着它出现（`veil::home_header`）。
+pub fn settings_scroll() -> ScrollHandle { SETTINGS_SCROLL.with(Clone::clone) }
+
+/// 设置里一行只读的信息：左边名称，右边灰色的值。
+fn info_row(label: &'static str, value: impl Into<SharedString>) -> AnyElement {
+    crate::settings::row(label, None, div().text_size(px(17.)).text_color(Theme::text_caption()).child(value.into())).into_any_element()
 }
 
-/// 设置第一级「空间设置」一节：这个空间的设置、新建空间。
-pub fn settings_rows(cx: &mut Context<Workspace>) -> Vec<AnyElement> {
-    vec![
-        row("settings-space", "settings-gear", tr("空间设置", "Space Settings")).child(crate::ui::icon("chevron-right", 14., Theme::text_caption()))
-            .on_click(cx.listener(|w, _, _, cx| { super::set_settings_detail(true); w.open_settings(crate::settings::Page::Library, cx); })).into_any_element(),
-        row("settings-space-new", "plus", tr("新建空间…", "New Space…"))
-            .on_click(cx.listener(|w, _, window, cx| w.open_space_form(window, cx))).into_any_element(),
-    ]
+/// 设置 › 我的空间（照 Craft）：这台设备上的每个空间，头像、名字、存放位置；点一下换过去。最后一行新建空间。
+pub fn spaces_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let here = crate::store::Store::root_dir();
+    let mut rows: Vec<AnyElement> = w.spaces.iter().enumerate().map(|(i, s)| {
+        let id = s.id.clone();
+        let on = s.root == here;
+        let place = match s.location { Location::ICloud => "iCloud", Location::Local => "Local" };
+        div().id(("settings-space", i)).w_full().h(px(56.)).px(px(16.)).flex().items_center().gap(px(14.)).rounded(px(10.)).active(|d| d.bg(Theme::fill_pressed()))
+            .child(space_icon(s, 30.))
+            .child(div().flex_1().min_w_0().flex().flex_col()
+                .child(div().truncate().text_size(px(17.)).text_color(if s.available { Theme::text() } else { Theme::text_disabled() }).child(name(s)))
+                .child(div().text_size(px(13.)).text_color(Theme::text_caption()).child(if s.available { place } else { tr("找不到文件夹", "Missing") })))
+            .when(on, |d| d.child(crate::ui::icon("check", 18., Theme::primary())))
+            .when(s.available && !on, |d| d.on_click(move |_, _, cx| { let id = id.clone(); cx.defer(move |cx| { space::switch(id, cx); }); }))
+            .into_any_element()
+    }).collect();
+    rows.push(div().id("settings-space-new").w_full().h(px(52.)).px(px(16.)).flex().items_center().gap(px(14.)).rounded(px(10.)).active(|d| d.bg(Theme::fill_pressed()))
+        .text_size(px(17.)).text_color(Theme::primary())
+        .child(div().w(px(30.)).flex().justify_center().child(crate::ui::icon("plus", 20., Theme::primary()))).child(tr("新建空间…", "New Space…"))
+        .on_click(cx.listener(|w, _, window, cx| w.open_space_form(window, cx))).into_any_element());
+    crate::settings::flat_group(None, rows, 60.).into_any_element()
+}
+
+// 统计里「占用空间」要把整个文件夹走一遍：按文件夹缓存，打开这一页时才重算。
+thread_local! { static SIZE: std::cell::RefCell<Option<(std::path::PathBuf, std::time::Instant, u64)>> = const { std::cell::RefCell::new(None) }; }
+fn folder_size(root: &std::path::Path) -> u64 {
+    let fresh = SIZE.with(|s| s.borrow().as_ref().filter(|(r, t, _)| r == root && t.elapsed().as_secs() < 30).map(|(_, _, n)| *n));
+    if let Some(n) = fresh { return n; }
+    fn walk(p: &std::path::Path) -> u64 {
+        std::fs::read_dir(p).map(|rd| rd.flatten().map(|e| match e.file_type() { Ok(t) if t.is_dir() => walk(&e.path()), Ok(_) => e.metadata().map_or(0, |m| m.len()), Err(_) => 0 }).sum()).unwrap_or(0)
+    }
+    let n = walk(root);
+    SIZE.with(|s| *s.borrow_mut() = Some((root.to_path_buf(), std::time::Instant::now(), n)));
+    n
+}
+fn bytes(n: u64) -> String {
+    let n = n as f64;
+    if n >= 1e9 { format!("{:.1} GB", n / 1e9) } else if n >= 1e6 { format!("{:.1} MB", n / 1e6) } else if n >= 1e3 { format!("{:.0} KB", n / 1e3) } else { format!("{n:.0} B") }
+}
+
+/// 设置 › 统计：这个空间里有多少东西、占多大。
+pub fn stats_page(w: &Workspace, _cx: &mut Context<Workspace>) -> AnyElement {
+    let docs = w.entries.iter().filter(|e| e.meta.folder.is_none()).count();
+    let folders = w.entries.iter().filter(|e| e.meta.folder.is_some()).count();
+    let starred = w.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.starred > 0).count();
+    let root = crate::store::Store::root_dir();
+    let place = space::current(w).map_or("Local", |s| match s.location { Location::ICloud => "iCloud", Location::Local => "Local" });
+    crate::settings::group(None, vec![
+        info_row(tr("文档", "Documents"), docs.to_string()),
+        info_row(tr("文件夹", "Folders"), folders.to_string()),
+        info_row(tr("收藏", "Starred"), starred.to_string()),
+        info_row(tr("最近删除", "Recently deleted"), w.trash.len().to_string()),
+        info_row(tr("占用空间", "Storage used"), bytes(folder_size(&root))),
+        info_row(tr("存放位置", "Location"), place),
+    ]).into_any_element()
+}
+
+/// 设置 › 诊断：版本、iCloud 能不能用、日志；日志能导出给人看。
+pub fn diagnostics_page(_w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
+    let log = crate::logging::path();
+    let size = std::fs::metadata(&log).map_or(0, |m| m.len());
+    let icloud = if fdl_core::spaces::icloud_root().is_some() { tr("可用", "Available") } else { tr("不可用", "Unavailable") };
+    let export = div().id("settings-export-log").w_full().h(px(52.)).px(px(16.)).flex().items_center().rounded(px(10.)).active(|d| d.bg(Theme::fill_pressed()))
+        .text_size(px(17.)).text_color(Theme::primary()).child(tr("导出日志…", "Export Log…"))
+        .on_click(cx.listener(|w, _, _, cx| export_log(w, cx)));
+    div().w_full().flex().flex_col().gap(px(24.))
+        .child(crate::settings::group(None, vec![
+            info_row(tr("版本", "Version"), env!("CARGO_PKG_VERSION")),
+            info_row("iCloud", icloud),
+            info_row(tr("日志", "Log"), bytes(size)),
+        ]))
+        .child(crate::settings::group(None, vec![export.into_any_element()]))
+        .into_any_element()
+}
+
+/// 把日志拷一份交给系统的「存储到…」面板（`files::new_path` / `export`）。
+fn export_log(w: &mut Workspace, cx: &mut Context<Workspace>) {
+    let reply = super::files::new_path(Some("quiet-md.log"));
+    cx.spawn(async move |this, cx| {
+        let Ok(Ok(Some(to))) = reply.await else { return };
+        let copied = std::fs::copy(crate::logging::path(), &to);
+        let _ = this.update(cx, |w, cx| match copied {
+            Ok(_) => super::files::export(&to),
+            Err(e) => w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx),
+        });
+    }).detach();
+    let _ = w;
 }
 
 /// 换空间的卡片：从底部浮起，顶上一条「打开空间…」搜索，下面每个空间一行。点外面收起。

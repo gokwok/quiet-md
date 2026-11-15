@@ -462,7 +462,7 @@
                          seg("doc-search", "search")
                              .tip_label(crate::shortcuts::keys(crate::settings::text("搜索(⌘ + J)")).into(), TipSide::Below)
                              .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(FocusSearch), cx))),
-@@ -1345,24 +1479,58 @@
+@@ -1345,24 +1479,60 @@
                      .child(
                          // Straight to a new document: no 新建 menu, as 导入 is rare.
                          seg("doc-new", "plus").tip(crate::settings::tr("新建文档", "New document"), None).on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx))),
@@ -506,6 +506,8 @@
 +        // 首页和文档共用顶部玻璃；首页的滚动阈值在绘制时读取，和惯性滚动同步。
 +        // 首页在换页滑动（含跟手返回）时不要玻璃：它和带子上的空间头像是钉在屏幕上的原生视图，不会跟着页面滑，滑完再淡入。
 +        let veiled = glass && crate::ios::glass::supported() && ((self.view == View::Home && crate::ios::home_page() == crate::ios::HomePage::Hub && self.batch.is_none() && !crate::ios::shot::sliding())
++            // 设置第一级也一样：往上滚过头像后顶上是磨砂玻璃和居中的「设置」。
++            || (self.view == View::Settings && !crate::ios::settings_detail() && !crate::ios::shot::sliding())
 +            || (self.view == View::Doc && self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled()
 +                || (crate::ios::style::of(self).is_some_and(|s| s.background.is_some()) && e.read(cx).paper_top() < crate::ios::chrome_top()))));
 +        crate::ios::veil::begin(veiled, window);
@@ -526,7 +528,7 @@
          let row_menu = self.render_row_menu(window, cx);
          let resize = self.sidebar_open.then(|| self.render_resize_handle(window, cx));
          let resize_overlay = self.render_resize_overlay(cx);
-@@ -1387,7 +1555,8 @@
+@@ -1387,7 +1557,8 @@
                  .h_full()
                  .flex()
                  .flex_col()
@@ -536,7 +538,7 @@
                  .child(
                      div()
                          .flex_1()
-@@ -1399,10 +1568,19 @@
+@@ -1399,10 +1570,19 @@
                                  .flex_1()
                                  .min_w_0()
                                  .h_full()
@@ -556,7 +558,7 @@
                  .into_any_element(),
              View::Home => self.render_home(window, cx),
              View::Folder => self.render_folder(window, cx),
-@@ -1418,13 +1596,20 @@
+@@ -1418,13 +1598,20 @@
          // surface beside it; the change of value is the only line between
          // them (no gutter, radius, border or shadow).
          // A document sits on its theme's page colour.
@@ -580,7 +582,7 @@
          div()
              .id("workspace")
              .key_context("Workspace")
-@@ -1448,6 +1633,9 @@
+@@ -1448,6 +1635,9 @@
              // whichever window macOS considers active.
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
              .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
@@ -590,7 +592,7 @@
              .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
                  crate::quick_note::persist(cx);
                  if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
-@@ -1464,7 +1652,7 @@
+@@ -1464,7 +1654,7 @@
              .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
              .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
              .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
@@ -599,7 +601,7 @@
                  cx.notify();
              }))
              .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
-@@ -1501,7 +1689,7 @@
+@@ -1501,7 +1691,7 @@
              }))
              // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
              .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
@@ -608,7 +610,7 @@
                  if ev.keystroke.key == "escape" && w.has_home_drag() {
                      w.cancel_home_drag(cx); cx.stop_propagation(); return;
                  }
-@@ -1533,10 +1721,16 @@
+@@ -1533,10 +1723,16 @@
                  if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
                  cx.stop_propagation();
              }))
@@ -626,7 +628,7 @@
              .children(row_menu)
              .children(doc_menu)
              .children(mode_menu)
-@@ -1548,6 +1742,7 @@
+@@ -1548,6 +1744,7 @@
              .children(move_dlg)
              .children(space_menu)
              .children(space_dialog)
@@ -4659,8 +4661,54 @@
                      .child(modal),
 --- a/src/settings.rs
 +++ b/src/settings.rs
-@@ -222,7 +222,8 @@
+@@ -185,7 +185,9 @@
+ // ---- the view
+ 
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+-pub enum Page { #[default] General, Appearance, Shortcuts, Library, About }
++pub enum Page { #[default] General, Appearance, Shortcuts, Library, About,
++    // 手机（照 Craft）：「通用」拆成「语言」和「高级设置」，另有「我的空间」「统计」「诊断」。
++    Language, Advanced, Spaces, Stats, Diagnostics }
+ 
+ impl Page {
+     fn title(self) -> &'static str {
+@@ -193,8 +195,13 @@
+             Page::General => tr("通用", "General"),
+             Page::Appearance => tr("外观", "Appearance"),
+             Page::Shortcuts => tr("快捷键", "Shortcuts"),
+-            Page::Library => tr("空间", "Space"),
+-            Page::About => tr("关于", "About"),
++            Page::Library => if crate::ios::floating() { tr("空间设置", "Space Settings") } else { tr("空间", "Space") },
++            Page::About => if crate::ios::floating() { tr("关于 Quiet.md", "About Quiet.md") } else { tr("关于", "About") },
++            Page::Language => tr("语言", "Language"),
++            Page::Advanced => tr("高级设置", "Advanced"),
++            Page::Spaces => tr("我的空间", "My Spaces"),
++            Page::Stats => tr("统计", "Statistics"),
++            Page::Diagnostics => tr("诊断", "Diagnostics"),
+         }
+     }
+     fn icon(self) -> &'static str {
+@@ -202,8 +209,13 @@
+             Page::General => "view-settings",
+             Page::Appearance => "palette",
+             Page::Shortcuts => "keyboard",
+-            Page::Library => "storage",
++            Page::Library => if crate::ios::floating() { "settings-gear" } else { "storage" },
+             Page::About => "info",
++            Page::Language => "editor-icons/globe",
++            Page::Advanced => "view-settings",
++            Page::Spaces => "library",
++            Page::Stats => "chart",
++            Page::Diagnostics => "pulse",
+         }
+     }
+ }
+@@ -220,22 +232,36 @@
+ /// split by hairlines.
+ pub(crate) fn group(title: Option<&'static str>, rows: Vec<AnyElement>) -> Div {
      let n = rows.len();
++    // 手机（照 Craft）：不放卡片，行直接铺在页面底色上，行间一道细线；组名是粗体的大字，和首页「收藏」「文件夹」一样。
++    if crate::ios::floating() { return flat_group(title, rows, 16.); }
      div().w_full().flex().flex_col().gap(px(8.))
          .children(title.map(caption))
 -        .child(div().w_full().flex().flex_col().rounded(px(12.)).border_1().border_color(Theme::line_border()).bg(crate::theme::raised(Theme::bg_body())).overflow_hidden()
@@ -4669,7 +4717,34 @@
              .children(rows.into_iter().enumerate().map(move |(i, r)| div().w_full().flex().flex_col().when(i + 1 < n, |d| d.border_b_1().border_color(ui::list_line())).child(r))))
  }
  
-@@ -449,7 +450,7 @@
++/// 手机的一组：`indent` 是行间细线离左边多远（和行里的字对齐）。
++pub(crate) fn flat_group(title: Option<&'static str>, rows: Vec<AnyElement>, indent: f32) -> Div {
++    let n = rows.len();
++    div().w_full().flex().flex_col()
++        .children(title.map(|t| div().px(px(16.)).pt(px(6.)).pb(px(4.)).text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::BOLD).text_color(Theme::text()).child(t)))
++        .children(rows.into_iter().enumerate().map(move |(i, r)| div().w_full().flex().flex_col().child(r)
++            .when(i + 1 < n, |d| d.child(div().ml(px(indent)).mr(px(8.)).h(px(1.)).bg(ui::list_line())))))
++}
++
+ pub(crate) fn caption(t: &'static str) -> Div {
+     div().px(px(4.)).text_size(px(13.)).line_height(px(18.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::sidebar_section()).child(t)
+ }
+ 
+ /// One setting: title and an optional description on the left, the control on the right.
+ pub(crate) fn row(title: impl Into<SharedString>, desc: Option<SharedString>, control: impl IntoElement) -> Div {
+-    div().w_full().min_h(px(48.)).px(px(16.)).py(px(10.)).flex().items_center().justify_between().gap(px(24.))
++    // 手机的字照 Craft 大一些：标题 17、说明 13。
++    let phone = crate::ios::floating();
++    div().w_full().min_h(px(if phone { 52. } else { 48. })).px(px(16.)).py(px(10.)).flex().items_center().justify_between().gap(px(24.))
+         .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+-            .child(div().text_size(px(13.)).line_height(px(20.)).text_color(Theme::text()).child(title.into()))
+-            .children(desc.map(|d| div().text_size(px(12.)).line_height(px(17.)).text_color(Theme::text_caption()).child(d))))
++            .child(div().text_size(px(if phone { 17. } else { 13. })).line_height(px(if phone { 22. } else { 20. })).text_color(Theme::text()).child(title.into()))
++            .children(desc.map(|d| div().text_size(px(if phone { 13. } else { 12. })).line_height(px(if phone { 18. } else { 17. })).text_color(Theme::text_caption()).child(d))))
+         .child(div().flex_none().flex().items_center().gap(px(8.)).child(control))
+ }
+ 
+@@ -449,7 +475,7 @@
                  cx.notify();
              }))
              .child(div().id("theme-menu-list").w(px(200.)).max_h(px(302.)).overflow_y_scroll().py(px(ui::MENU_PAD_Y)).flex().flex_col().children(rows));
@@ -4678,7 +4753,7 @@
      }
  
      /// Keys while the theme dropdown is open; true when used.
-@@ -527,6 +528,7 @@
+@@ -527,6 +553,7 @@
      pub(crate) fn open_settings(&mut self, page: Page, cx: &mut Context<Self>) {
          self.cancel_shortcut_recording(cx);
          self.settings_page = page;
@@ -4686,7 +4761,7 @@
          self.theme_menu = None;
          self.settings_scroll.set_offset(point(px(0.), px(0.)));
          self.shortcut_error = None;
-@@ -541,7 +543,7 @@
+@@ -541,7 +568,7 @@
              let on = if page.is_some() { page == current } else { in_trash };
              let (title, icon) = page.map_or((tr("回收站", "Trash"), "bin"), |p| (p.title(), p.icon()));
              div().id(SharedString::from(format!("settings-nav-{page:?}"))).h(px(sb::ROW_H)).flex().items_center().pl(px(6.)).pr(px(4.)).rounded(px(sb::ROW_R))
@@ -4695,7 +4770,7 @@
                  .when(on, |d| d.bg(Theme::sidebar_selected()).text_color(Theme::text()))
                  .when(!on, |d| d.text_color(Theme::sidebar_text()).hover(|s| s.bg(Theme::sidebar_hover())))
                  .child(div().size(px(20.)).flex_none().flex().items_center().justify_center().mr(px(9.)).child(ui::icon(icon, sb::ROW_ICON, Theme::icon())))
-@@ -569,7 +571,7 @@
+@@ -569,7 +596,7 @@
      /// 收起侧栏 uses (28pt, 4pt past the traffic lights, glyph 17), so the
      /// buttons don't move when switching between the document list and 设置.
      pub(crate) fn header_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4704,7 +4779,7 @@
          let bar_button = |id: &'static str, glyph: &'static str| {
              div().id(id).no_drag().flex_none().size(px(28.)).flex().items_center().justify_center().rounded(px(8.)).cursor_pointer()
                  .hover(move |s| s.bg(if open { Theme::sidebar_hover() } else { Theme::fill_hover_strong() }))
-@@ -578,7 +580,7 @@
+@@ -578,7 +605,7 @@
          div().flex().items_center().ml(px(4.)).gap(px(4.))
              .child(bar_button("settings-collapse", if open { "panel-left-close" } else { "panel-left-open" })
                  .tip(if open { tr("收起侧栏", "Hide sidebar") } else { tr("展开侧栏", "Show sidebar") }, Some(crate::shortcuts::hint("workspace::ToggleSidebar", "⌘ + ]")))
@@ -4713,36 +4788,52 @@
              .child(bar_button("settings-home", "home").tip(tr("返回主页", "Home"), Some(crate::shortcuts::hint("workspace::GoHome", "⌘ + ⌥ + Home")))
                  .on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx))))
              .into_any_element()
-@@ -592,6 +594,26 @@
+@@ -592,23 +619,62 @@
  
      pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
          let page = self.settings_page;
 +        // 手机：两级。第一级是分类的列表，和主页一样的大标题；第二级左上角是玻璃的返回。
 +        let phone = crate::ios::floating();
 +        if phone && !crate::ios::settings_detail() {
-+            let nav = |p: Page, cx: &mut Context<Self>| div().id(SharedString::from(format!("settings-row-{p:?}"))).w_full().h(px(52.)).px(px(16.)).flex().items_center().gap(px(12.))
-+                .text_size(px(16.)).active(|s| s.bg(Theme::fill_pressed()))
-+                .child(ui::icon(p.icon(), 20., Theme::icon())).child(div().flex_1().child(p.title())).child(ui::icon("chevron-right", 14., Theme::text_caption()))
-+                .on_click(cx.listener(move |w, _, _, cx| { crate::ios::set_settings_detail(true); w.open_settings(p, cx); })).into_any_element();
-+            // 照 Craft：顶上是空间的大头像和「空间名 ⌄」，下面「空间设置」和「常规设置」两节。
-+            let rows = [Page::General, Page::Appearance, Page::About].into_iter().map(|p| nav(p, cx)).collect::<Vec<_>>();
++            // 照 Craft：一行是细线的灰色图标、17pt 的字、很淡的箭头，铺在页面底色上。
++            let nav = |p: Page, cx: &mut Context<Self>| {
++                let glyph = p.icon();
++                let icon = if glyph.contains('/') { svg().path(SharedString::from(format!("{glyph}.svg"))).size(px(20.)).flex_none().text_color(Theme::text_caption()).into_any_element() } else { ui::icon(glyph, 20., Theme::text_caption()).into_any_element() };
++                div().id(SharedString::from(format!("settings-row-{p:?}"))).w_full().h(px(52.)).px(px(16.)).flex().items_center().gap(px(16.)).rounded(px(10.))
++                    .text_size(px(17.)).active(|s| s.bg(Theme::fill_pressed()))
++                    .child(icon).child(div().flex_1().child(p.title())).child(ui::icon("chevron-right", 14., Theme::text_placeholder()))
++                    .on_click(cx.listener(move |w, _, _, cx| { crate::ios::set_settings_detail(true); w.open_settings(p, cx); })).into_any_element()
++            };
++            let section = |title: Option<&'static str>, pages: &[Page], cx: &mut Context<Self>| flat_group(title, pages.iter().map(|p| nav(*p, cx)).collect(), 52.);
++            let space = section(Some(tr("空间设置", "Space")), &[Page::Library, Page::Spaces, Page::Stats], cx);
++            let general = section(Some(tr("常规设置", "General")), &[Page::Appearance, Page::Language, Page::Advanced], cx);
++            let more = section(None, &[Page::Diagnostics, Page::About], cx);
 +            // 从首页左上角的空间头像点进来：左上角玻璃的返回回首页。
 +            let back = div().absolute().top(crate::ios::insets().top).left(px(16.)).h(px(crate::app::HEADER_H)).flex().items_center()
 +                .child(crate::ios::glass_button("settings-home", "editor-icons/chevron-left", 22.).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Home, cx))));
-+            return div().relative().flex_1().min_w_0().h_full().child(div().id("settings-list").size_full().overflow_y_scroll().flex().flex_col().bg(crate::ios::home_bg()).text_color(Theme::text()).font_family(theme::UI_FONT)
++            let scroll = crate::ios::spaces::settings_scroll();
++            return div().relative().flex_1().min_w_0().h_full().child(div().id("settings-list").size_full().overflow_y_scroll().track_scroll(&scroll).flex().flex_col().bg(crate::ios::home_bg()).text_color(Theme::text()).font_family(theme::UI_FONT)
 +                .child(div().h(px(crate::ios::chrome_top())).flex_none())
 +                .child(crate::ios::spaces::settings_head(self, cx))
-+                .child(div().px(px(16.)).child(group(Some(tr("空间设置", "Space")), crate::ios::spaces::settings_rows(cx))))
-+                .child(div().mt(px(24.)).px(px(16.)).pb(px(120.)).child(group(Some(tr("常规设置", "General")), rows))))
++                .child(div().px(px(8.)).child(space))
++                .child(div().mt(px(20.)).px(px(8.)).child(general))
++                .child(div().mt(px(20.)).px(px(8.)).pb(px(120.)).child(more)))
++                // 照 Craft：往上滚过头像后，顶上的磨砂玻璃上出现居中的「设置」。
++                .child(crate::ios::veil::home_header(&scroll, tr("设置", "Settings").into(), None))
 +                .child(back)
 +                .into_any_element();
 +        }
          let body = match page {
              Page::General => self.general_page(cx),
              Page::Appearance => self.appearance_page(cx),
-@@ -599,16 +621,19 @@
+             Page::Shortcuts => self.shortcut_settings(cx),
              Page::Library => self.space_page(cx),
              Page::About => self.about_page(cx),
++            Page::Language => self.language_page(cx),
++            Page::Advanced => self.advanced_page(cx),
++            Page::Spaces => crate::ios::spaces::spaces_page(self, cx),
++            Page::Stats => crate::ios::spaces::stats_page(self, cx),
++            Page::Diagnostics => crate::ios::spaces::diagnostics_page(self, cx),
          };
 -        div().flex_1().min_w_0().h_full().flex().flex_col().bg(Theme::bg_body()).text_color(Theme::text()).font_family(theme::UI_FONT)
 +        div().flex_1().min_w_0().h_full().flex().flex_col().bg(if phone { crate::ios::home_bg() } else { Theme::bg_body() }).text_color(Theme::text()).font_family(theme::UI_FONT)
@@ -4755,7 +4846,7 @@
 +                .when(!self.sidebar_open && !phone, |d| d.pl(px(theme::TRAFFIC_LIGHTS_W)).child(self.header_navigation(cx))))
              .child(div().id("settings-content").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.settings_scroll)
 -                .child(div().w_full().flex().flex_col().items_center().px(px(32.)).pb(px(64.))
-+                .child(div().w_full().flex().flex_col().items_center().px(px(if phone { 16. } else { 32. })).pb(px(64.))
++                .child(div().w_full().flex().flex_col().items_center().px(px(if phone { 8. } else { 32. })).pb(px(64.))
                      .child(div().w_full().max_w(px(if page == Page::Shortcuts { 760. } else { COLUMN_W })).flex().flex_col().gap(px(28.))
 -                        .child(div().flex().items_center().gap(px(16.))
 +                        .when(!phone, |d| d.child(div().flex().items_center().gap(px(16.))
@@ -4765,7 +4856,7 @@
                          .child(body))))
              .into_any_element()
      }
-@@ -621,8 +646,7 @@
+@@ -621,12 +687,29 @@
                      segmented("lang", &["简体中文", "English"], p.english as usize, |w, i, cx| w.set_pref(|p| p.english = i == 1, cx), cx)).into_any_element(),
                  row(tr("自动下载网络图片", "Download web images"), desc(tr("关闭后不联网，网络图片显示为占位，点击单独加载。", "When off the app stays offline; web images show a placeholder you can click to load.")),
                      switch("pref-remote", p.remote_images).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.remote_images = !p.remote_images, cx)))).into_any_element(),
@@ -4775,7 +4866,29 @@
              ]))
              .into_any_element()
      }
-@@ -670,6 +694,7 @@
+ 
++    /// 手机：「通用」拆开后的「语言」。
++    fn language_page(&self, cx: &mut Context<Self>) -> AnyElement {
++        let p = prefs();
++        group(None, vec![
++            row(tr("界面语言", "Interface language"), None,
++                segmented("lang", &["简体中文", "English"], p.english as usize, |w, i, cx| w.set_pref(|p| p.english = i == 1, cx), cx)).into_any_element(),
++        ]).into_any_element()
++    }
++
++    /// 手机：「通用」拆开后的「高级设置」。
++    fn advanced_page(&self, cx: &mut Context<Self>) -> AnyElement {
++        let p = prefs();
++        group(None, vec![
++            row(tr("自动下载网络图片", "Download web images"), desc(tr("关闭后不联网，网络图片显示为占位，点击单独加载。", "When off the app stays offline; web images show a placeholder you can click to load.")),
++                switch("pref-remote", p.remote_images).on_click(cx.listener(|w, _, _, cx| w.set_pref(|p| p.remote_images = !p.remote_images, cx)))).into_any_element(),
++        ]).into_any_element()
++    }
++
+     fn appearance_page(&self, cx: &mut Context<Self>) -> AnyElement {
+         let current = prefs().theme_id();
+         let list = themes::themes();
+@@ -670,6 +753,7 @@
                      row(tr("动画", "Animation"), Some(tr("克制：切换即时，只有拖拽带动画。丰富：展开收起、选中和悬停也带动画。", "Low: switching is instant, only dragging animates. High: folding, selection and hover animate too.").into()),
                          segmented("motion", &[tr("克制", "Low"), tr("丰富", "High")], usize::from(prefs().motion == "high"),
                              |w, i, cx| w.set_pref(|p| p.motion = ["", "high"][i].into(), cx), cx)).into_any_element(),
@@ -4783,7 +4896,7 @@
                      row(tr("文档主题", "Document theme"), None, picker).into_any_element(),
                      sample.into_any_element(),
                      row(tr("主题 CSS", "Theme CSS"), Some(where_),
-@@ -690,7 +715,8 @@
+@@ -690,7 +774,8 @@
              .child(div().text_size(px(20.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child("Quiet.md"))
              .child(div().text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(format!("{} {}", tr("版本", "Version"), env!("CARGO_PKG_VERSION"))))
              .child(div().text_size(px(13.)).line_height(px(20.)).text_color(Theme::text_caption()).child(tr("本地优先的笔记应用：无需账号，文档就是你电脑上的文件。", "Local-first notes: no account, your documents are files on your Mac."))))
@@ -4793,7 +4906,7 @@
              .into_any_element()
      }
  }
-@@ -711,7 +737,7 @@
+@@ -711,7 +796,7 @@
      };
      let fill = if let State::Downloading(m) = &state { Some(crate::update::progress(m)) } else { None };
      let busy = matches!(state, State::Downloading(_) | State::Installing(_));
