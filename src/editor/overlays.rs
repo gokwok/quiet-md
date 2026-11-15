@@ -83,6 +83,8 @@ pub fn kind_icon(k: &BlockKind) -> &'static str {
         BlockKind::Grid | BlockKind::Column { .. } => "columns-2",
         BlockKind::Raw { .. } => "file-text",
         BlockKind::SubPageList => "list-tree",
+        BlockKind::Page { card: false, .. } => "file-page",
+        BlockKind::Page { card: true, .. } => "view-card",
         BlockKind::Countdown(_) => "timer",
         BlockKind::File(_) => "paperclip",
     }

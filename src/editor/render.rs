@@ -109,6 +109,8 @@ fn hash_block(b: &Block, orders: &rustc_hash::FxHashMap<BlockId, String>, h: &mu
             (src, width.map(f32::to_bits), height.map(f32::to_bits), caption.as_ref().map(String::len), crop.map(|c| c.map(f32::to_bits))).hash(h)
         }
         BlockKind::Column { ratio } => ratio.to_bits().hash(h),
+        // A page's preview line shows its content's first words.
+        BlockKind::Page { card } => (card, b.children.iter().map(|c| c.text.text.len()).sum::<usize>()).hash(h),
         BlockKind::File(f) => (&f.src, &f.name, f.view).hash(h),
         BlockKind::Table(t) => {
             t.col_widths.iter().for_each(|w| w.to_bits().hash(h));
@@ -234,7 +236,7 @@ pub(crate) fn equation_numbers(doc: &crate::model::Document) -> HashMap<BlockId,
 }
 
 impl R<'_> {
-    fn text_el(&self, id: BlockId, text: &RichText, mut spec: TextSpec, align: Align, placeholder: Option<SharedString>) -> RichTextElement {
+    pub(super) fn text_el(&self, id: BlockId, text: &RichText, mut spec: TextSpec, align: Align, placeholder: Option<SharedString>) -> RichTextElement {
         let core = &self.ed.core;
         let bm = core.in_block_mode() || self.ghost;
         let sel = core.sel;
@@ -271,7 +273,7 @@ impl R<'_> {
         matches!(self.ed.core.doc.blocks.as_slice(), [only] if only.id == b.id && b.text.is_empty() && b.children.is_empty())
     }
 
-    fn spec_for(&self, b: &Block, env: Env) -> TextSpec {
+    pub(super) fn spec_for(&self, b: &Block, env: Env) -> TextSpec {
         if crate::settings::feishu() { return self.spec_for_feishu(b, env); }
 
         let st = theme::style();
@@ -429,6 +431,7 @@ impl R<'_> {
                 .into_any_element(),
             BlockKind::Image { .. } => self.image(b, env, cx),
             BlockKind::SubPageList => self.sub_page_list(b, cx),
+            BlockKind::Page { card } => self.page_block(b, *card, env, cx),
             BlockKind::Countdown(c) => self.countdown(b, c, cx),
             BlockKind::File(f) => self.file(b, f, env, cx),
             BlockKind::Table(t) if self.ghost => self.ghost_table(b, t, cx),
@@ -1151,6 +1154,9 @@ impl Editor {
                 if let Some(c) = theme::style().color("title.color") { spec.color = c; }
                 let tf = theme::style().font("title.font");
                 if tf != theme::body_font() { spec.font = Some(tf); }
+                // An open 页面's title is a heading, not a document title (Craft: about 20pt bold).
+                let page = !self.outer.is_empty();
+                if page { (spec.size, spec.line_height, spec.weight) = (20., 28., FontWeight::BOLD); }
                 cover = self.cover_el(window, cx);
                 div()
                     .relative()
@@ -1226,7 +1232,8 @@ impl Editor {
             Item::Below => div()
                 .id("below")
                 .w_full()
-                .children(self.refs_list(window, cx))
+                // An open 页面 has no reference list: the references are the document's.
+                .children(if self.outer.is_empty() { self.refs_list(window, cx) } else { None })
                 .child(div().h(px(200.)).w_full())
                 .on_mouse_down(MouseButton::Left, cx.listener(Self::on_click_below))
                 .into_any_element(),
@@ -1747,6 +1754,7 @@ pub(super) fn block_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env
                 .into_any_element(),
             BlockKind::Image { .. } => self.image(b, env, cx),
             BlockKind::SubPageList => self.sub_page_list(b, cx),
+            BlockKind::Page { card } => self.page_block(b, *card, env, cx),
             BlockKind::Countdown(c) => self.countdown(b, c, cx),
             BlockKind::File(f) => self.file(b, f, env, cx),
             BlockKind::Table(t) if self.ghost => self.ghost_table(b, t, cx),

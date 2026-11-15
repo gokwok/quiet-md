@@ -11,6 +11,11 @@
 <h9>九</h9>
 <p>普通 <b>加粗</b> <em>斜体</em> <u>下划线</u> <del>删除线</del> <span text-color="red" background-color="light-yellow">彩色</span> <a href="https://a.com/?x=1&amp;y=2">链接</a> <code>code</code><br/>第二行 😀👍🏽 <latex>E=mc^2</latex> <cite type="user" user-id="ou_1"/> 尾随空格 </p>
 <p align="right" background-color="light-blue">右对齐有背景</p>
+<p align="center" background-color="light-gray" font="serif">居中有背景的衬线字</p>
+<h2 font="rounded">圆体标题</h2>
+<ul>
+  <li font="mono">等宽列表项</li>
+</ul>
 <p> </p>
 <p>父段落
   <p>缩进的子段落</p>
@@ -89,4 +94,11 @@
 <whiteboard type="blank"/>
 <sheet token="shtabc"/>
 <bookmark href="https://example.com" title="书签"/>
+<page>页面标题
+  <p>页面里的段落</p>
+  <page view="card">卡片子页
+    <h2>子页里的标题</h2>
+  </page>
+</page>
+<page align="center">没有内容的页面</page>
 <p>结尾</p>

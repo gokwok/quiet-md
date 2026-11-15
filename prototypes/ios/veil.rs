@@ -113,6 +113,9 @@ pub fn page_header(scroll: &ScrollHandle, title: SharedString) -> impl IntoEleme
     }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
 }
 
+/// 深色文档顶栏那层黑的浓度。
+const MILK_DARK: f32 = 0.62;
+
 fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
     let smoked = dark && home;
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
@@ -220,12 +223,17 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
             veil.home = home;
             let _: () = msg_send![veil.view, setOverrideUserInterfaceStyle: if dark { 2isize } else { 1isize }];
             let _: () = msg_send![veil.smoke, setHidden: !smoked];
-            let milky = home && !dark;
+            // 首页深色之外都用「微糊 + 一层底色」：下面的字淡淡透出来、看不真切（IMG_9146、IMG_9224）。
+            // 文档页原来是系统磨砂 + Clear 玻璃，字整个糊没了，玻璃露出来的底边还是一条亮线。
+            // 文档的主题顶上是深色时（按钮上的字是白的）底色换成黑。
+            let milky = !smoked;
+            let wash: *const CGColor = msg_send![super::glass::ui_color(if dark { crate::theme::rgbaf(0, 0, 0, MILK_DARK) } else { crate::theme::rgbaf(255, 255, 255, 0.8) }), CGColor];
+            let _: () = msg_send![veil.milk, setBackgroundColor: wash];
             let _: () = msg_send![veil.glass, setHidden: milky];
             let _: () = msg_send![veil.frost, setHidden: milky];
             let _: () = msg_send![veil.haze, setHidden: !milky];
             let _: () = msg_send![veil.milk, setHidden: !milky];
-            let _: () = msg_send![veil.rim, setOpacity: if smoked { 0.28f32 } else if milky { 0.5f32 } else { 1f32 }];
+            let _: () = msg_send![veil.rim, setOpacity: if smoked || dark { 0.28f32 } else { 0.5f32 }];
         }
         if !veil.shown { veil.shown = true; fade(veil.view, 1.); }
     });

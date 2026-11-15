@@ -82,8 +82,9 @@ fn random_selection(c: &mut Core, rng: &mut Rng) {
 }
 
 fn random_kind(rng: &mut Rng) -> BlockKind {
-    match rng.below(7) {
+    match rng.below(8) {
         0 => BlockKind::Text,
+        6 => BlockKind::Page { card: rng.chance(50) },
         1 => BlockKind::Heading { level: 1 + rng.below(9) as u8, seq_auto: false },
         2 => BlockKind::Bullet,
         3 => BlockKind::Ordered { seq: None },
@@ -123,7 +124,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
     }
     let us = c.units();
     let any = |rng: &mut Rng| rng.pick(&us).id;
-    match rng.below(23) {
+    match rng.below(24) {
         0..=2 => {
             let s = *rng.pick(TEXTS);
             c.insert_text(s);
@@ -218,6 +219,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
         }
         20 => table_step(c, rng),
         21 => object_step(c, rng),
+        22 => page_step(c, rng),
         _ => {
             c.trailing_line();
             "trailing_line".into()
@@ -228,7 +230,22 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
 /// Block mode takes only block commands (the view ignores text ones).
 fn block_mode_step(c: &mut Core, rng: &mut Rng) -> String {
     let ids = c.block_sel_ids();
-    match rng.below(10) {
+    match rng.below(12) {
+        10 => {
+            let font = (*rng.pick(&[None, Some("serif"), Some("mono"), Some("rounded")])).map(str::to_string);
+            let name = format!("block mode: set_font({ids:?}, {font:?})");
+            c.set_font(&ids, font);
+            name
+        }
+        11 => {
+            // 复制格式 from any block, 粘贴格式 onto the selection.
+            let from = *rng.pick(&c.block_order(true));
+            let name = format!("block mode: apply_format(format_of({from:?})) on {ids:?}");
+            if let Some(f) = c.format_of(from) {
+                c.apply_format(&ids, &f);
+            }
+            name
+        }
         8 | 9 => {
             // Touch: add or take out one block, leaving the ones in between as they are.
             let id = *rng.pick(&c.block_order(true));
@@ -313,6 +330,36 @@ fn table_step(c: &mut Core, rng: &mut Rng) -> String {
         }
     };
     format!("table_{what}({s:?})")
+}
+
+/// 页面 / 卡片: insert one at the caret, show one the other way, or open one
+/// (its own Core), edit it a little and put it back.
+fn page_step(c: &mut Core, rng: &mut Rng) -> String {
+    let mut pages = vec![];
+    c.doc.for_each_block(|b| if b.kind.is_page() { pages.push(b.id) });
+    if pages.is_empty() || rng.chance(30) {
+        let card = rng.chance(50);
+        let id = c.insert_page(card);
+        return format!("insert_page({card}) -> {id:?}");
+    }
+    let id = *rng.pick(&pages);
+    if rng.chance(30) {
+        let card = rng.chance(50);
+        c.set_page_card(&[id], card);
+        return format!("set_page_card({id:?}, {card})");
+    }
+    let Some(doc) = c.page_doc(id) else { return format!("page_doc({id:?}) -> None") };
+    let mut sub = Core::new(doc);
+    let mut names = vec![];
+    for _ in 0..1 + rng.below(6) {
+        names.push(step(&mut sub, rng));
+    }
+    if let Err(e) = check(&sub) {
+        panic!("inside page {id:?} after {names:?}: {e}");
+    }
+    c.checkpoint(EditKind::Other);
+    c.graft_page(id, &sub.doc);
+    format!("edit page {id:?}: {names:?}")
 }
 
 /// Inline objects: insert one at the caret, or edit the one under it.
@@ -425,8 +472,11 @@ fn check_blocks(blocks: &[Block], parent: Option<&BlockKind>, ids: &mut HashSet<
         if matches!(b.kind, BlockKind::Code { .. }) && b.text.runs.iter().any(|r| r.marks != Marks::default()) {
             return Err(format!("{at}: marks or inline objects in code"));
         }
-        if !b.children.is_empty() && !b.kind.nests() && !b.kind.is_container() {
+        if !b.children.is_empty() && !b.kind.nests() && !b.kind.is_container() && !b.kind.is_page() {
             return Err(format!("{at}: children under a block that can't hold (or save) them"));
+        }
+        if b.kind.is_page() && !b.folded {
+            return Err(format!("{at}: a page whose content shows in place"));
         }
         if let BlockKind::Table(t) = &b.kind {
             check_table(t, &at)?;

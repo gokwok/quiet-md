@@ -95,6 +95,7 @@ DocxXML 是飞书 / Lark 的文档 XML 格式。`crates/core/tests/fixtures/all-
 DocxXML 里没有、本应用自己加的写法。别的工具不认识这些写法，按上一节的规则它们只会被当作未知元素或属性：
 
 - `<countdown duration start-time notify color timing/>`：倒计时。云端的倒计时是小组件，不在 DocxXML 里。
+- `<page>标题<p>…</p></page>`、`<page view="card">…</page>`：页面 / 卡片（`BlockKind::Page`）。和 `<p>` 一样先是标题文字，后面是这一页的 block；子页面就存在这篇文档里，不是文档库里的另一篇。读入时页面总是折叠（内容只在打开这一页时显示），文件里不写 `folded`。导出 Markdown 时标题加粗，内容缩进在下面。
 - `<time … is-whole-day="true">`：全天提醒。模型里有 `isWholeDay`，但 XML 里没有这个属性。没有此属性、且时间是本地 23:59 的提醒，也按全天处理。
 - 图片和附件的本地文件写成 `path="…"`（云端用 `token` / `href`）。`<figure><source path=… name=…/></figure>` 表示视频或文件。
 

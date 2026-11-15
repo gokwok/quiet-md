@@ -64,6 +64,10 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 
 它们不改树结构，所以不会破坏上面的不变量。新增的结构性操作一律写进 Core，并在 fuzzer 的 `step` 里加一种随机操作。
 
+### 页面 / 卡片
+
+页面是一个带标题的 block，内容是它的子级，在文档里总是折叠（`Core` 对 `folded` 的处理让内容不进光标停靠点、目录和查找）。打开页面时 `Editor` 用 `Core::page_doc` 把这一页做成一个独立的 `Core` 来编辑，外层的 `Core` 压进 `Editor::outer`；每次改动经 `Editor::graft_pages`（`Core::graft_page`）写回那个 block，每打开一次在外层记一步撤销。存盘、多窗口同步和导出都读 `Editor::root()`，即文档本身。
+
 ## 撤销
 
 - 每一步是整篇 `Document` 的快照（`Snapshot`），存在 `VecDeque` 里。上限是 500 步，并且约 256MB；文档再长也至少保留 20 步。
@@ -143,7 +147,7 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 | `image.rs` / `file.rs` / `cover.rs` | 图片、视频或文件、图标与封面 |
 | `math.rs` | 公式（katex-rs 生成 HTML，再自行排版） |
 | `link.rs` / `links.rs` | 链接面板与卡片；@文档 与引用列表 |
-| `button.rs` / `countdown.rs` / `reminder.rs` / `subpages.rs` | 按钮、倒计时、日期提醒、子页面列表 |
+| `button.rs` / `countdown.rs` / `reminder.rs` / `subpages.rs` | 按钮、倒计时、日期提醒、子页面列表，页面 / 卡片 block 和打开的页面标题上方回外层的链接 |
 | `emoji.rs` / `emoji_picker.rs` | 表情数据与面板 |
 | `catalogue.rs` / `find.rs` / `reading.rs` / `scrollbar.rs` / `caption.rs` | 目录、查找替换、阅读模式与信息行、滚动条、代码块名和图片描述 |
 

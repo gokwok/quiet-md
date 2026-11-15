@@ -241,6 +241,13 @@ impl Writer<'_> {
                 }
                 out.push_str("</div>");
             }
+            // 页面 / 卡片: the title as a page row, then what the page holds.
+            BlockKind::Page { .. } => {
+                let _ = write!(out, "<div class=\"subpages\"><div>📄 {}</div></div>", esc(&crate::settings::display_title(&b.text.text)));
+                for (i, c) in b.children.iter().enumerate() {
+                    self.block(c, &b.children, i, depth + 1, out);
+                }
+            }
             BlockKind::SubPageList => {
                 out.push_str("<div class=\"subpages\">");
                 for t in self.opts.sub_pages {

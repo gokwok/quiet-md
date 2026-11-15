@@ -75,7 +75,7 @@ impl Workspace {
     pub(crate) fn doc_of(&mut self, id: &str, cx: &mut Context<Self>) -> Option<crate::model::Document> {
         if self.current.as_deref() == Some(id) {
             self.flush(cx);
-            return self.editor.as_ref().map(|ed| ed.read(cx).core.doc.clone());
+            return self.editor.as_ref().map(|ed| ed.read(cx).root().doc.clone());
         }
         self.store.load(id).ok()
     }

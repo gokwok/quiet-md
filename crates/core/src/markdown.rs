@@ -144,6 +144,8 @@ impl Writer<'_> {
             BlockKind::SubPageList => {
                 self.opts.sub_pages.iter().map(|t| format!("- {}", escape(&crate::model::display_title(t)))).collect::<Vec<_>>().join("\n")
             }
+            // 页面 / 卡片: Markdown has no pages; the title in bold, the page's blocks indented under it.
+            BlockKind::Page { .. } => nested(self, if b.text.is_empty() { String::new() } else { format!("**{text}**") }),
             BlockKind::Raw { xml, .. } => match crate::docxml::raw_summary(xml) {
                 (text, Some(link)) if crate::paste::link_ok(&link) => format!("[{}]({})", escape(if text.is_empty() { &link } else { &text }), link.replace(' ', "%20")),
                 (text, _) => escape(&text).replace('\n', "<br>"),
@@ -624,6 +626,13 @@ mod tests {
         assert!(plain.files.is_empty());
         assert!(!plain.text.contains("out.assets"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 页面 / 卡片: the title in bold, the page's blocks indented under it.
+    #[test]
+    fn page_blocks_export_their_content() {
+        let doc = crate::docxml::parse("<title>T</title><page>Plan<p>inside</p></page><page view=\"card\"></page>").unwrap();
+        assert_eq!(to_markdown(&doc), "# T\n\n**Plan**\n    inside\n");
     }
 
     #[test]

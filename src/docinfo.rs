@@ -91,7 +91,7 @@ impl Workspace {
         self.flush(cx);
         let (Some(id), Some(ed)) = (self.current.clone(), self.editor.clone()) else { return };
         let Some(meta) = self.entries.iter().find(|e| e.id == id).map(|e| e.meta.clone()) else { return };
-        let doc = &ed.read(cx).core.doc;
+        let doc = &ed.read(cx).root().doc;
         let text = doc_text(doc);
         self.doc_info = Some(DocInfo {
             created: meta.created,

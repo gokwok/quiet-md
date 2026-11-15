@@ -890,6 +890,8 @@ pub(crate) fn localize(text: &str, english: bool) -> &str {
         "小应用" => "Widgets",
         "按钮" => "Button",
         "子页面列表" => "Child pages",
+        "页面" => "Page",
+        "卡片" => "Card",
         "日期提醒" => "Date reminder",
         "倒计时" => "Countdown",
         "公式" => "Equation",

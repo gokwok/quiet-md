@@ -118,7 +118,8 @@ pub fn entries(doc: &Document) -> Vec<CatEntry> {
                 raw.push((b.id, b.text.text.clone(), level, *item));
             }
             match b.kind {
-                BlockKind::Table(_) | BlockKind::Callout { .. } => {}
+                // A page's headings are its own catalogue's.
+                BlockKind::Table(_) | BlockKind::Callout { .. } | BlockKind::Page { .. } => {}
                 _ => walk(&b.children, item, row && flattens(b), raw),
             }
         }

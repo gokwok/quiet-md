@@ -26,6 +26,29 @@ thread_local! { static SORT: Cell<Sort> = const { Cell::new(Sort::Relevance) }; 
 thread_local! { static GRID: Cell<bool> = const { Cell::new(false) }; }
 // 只搜眼前这个文件夹（从文件夹里进来时默认开着）。
 thread_local! { static SCOPED: Cell<bool> = const { Cell::new(true) }; }
+/// 搜索方式（照 Craft，IMG_9194，搜索条右边的「关键词 ⌄」）。现在只有关键词搜索；智能搜索（用自然语言找）
+/// 先在菜单里灰着占个位，做好了再打开。
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Mode { #[default] Keyword, Smart }
+thread_local! { static MODE: Cell<Mode> = const { Cell::new(Mode::Keyword) }; }
+pub fn mode() -> Mode { MODE.with(|m| m.get()) }
+/// 搜索条右边那个短名字。
+pub fn mode_label() -> &'static str { match mode() { Mode::Keyword => tr("关键词", "Keyword"), Mode::Smart => tr("智能", "Smart") } }
+/// 「关键词 ⌄」点开的菜单：每种方式一行，下面一行小字说它怎么找。
+pub fn mode_items() -> Vec<super::menu::Item> {
+    use super::menu::Item;
+    vec![
+        Item::new("search-mode-smart", tr("智能搜索", "Smart Search"), "sparkle.magnifyingglass", 0).sub(tr("即将推出", "Coming soon")).disabled().checked(mode() == Mode::Smart),
+        Item::new("search-mode-keyword", tr("关键词搜索", "Keyword Search"), "text.magnifyingglass", 0)
+            .sub(tr("查找匹配的关键词以检索信息", "Find information by matching keywords")).checked(mode() == Mode::Keyword),
+    ]
+}
+/// 菜单里选了一种方式。
+pub fn set_mode(id: &str) -> bool {
+    let m = match id { "search-mode-keyword" => Mode::Keyword, _ => return false };
+    MODE.with(|c| c.set(m));
+    true
+}
 // 页面上那条搜索画在哪（每帧记），和点它那一刻的位置、时刻：输入框从那儿滑上来。
 thread_local! { static BAR: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) }; }
 thread_local! { static FROM: Cell<Option<(Pixels, Instant)>> = const { Cell::new(None) }; }

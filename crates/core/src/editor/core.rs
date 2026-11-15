@@ -60,6 +60,17 @@ pub struct Unit {
 
 // ------------------------------------------------------------------ tree access
 
+/// A block's format (`Core::format_of`), held by the app between 复制格式 and 粘贴格式.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockFormat {
+    /// Body text or a heading level; None for other kinds (lists keep theirs).
+    pub kind: Option<BlockKind>,
+    pub align: Align,
+    pub bg: Option<ColorName>,
+    pub font: Option<String>,
+    pub marks: Marks,
+}
+
 pub fn find_path(blocks: &[Block], id: BlockId) -> Option<Path> {
     for (i, b) in blocks.iter().enumerate() {
         if b.id == id {
@@ -369,13 +380,18 @@ pub enum EditKind {
 fn keep_outside_history(now: &Document, restored: &mut Document) {
     restored.icon = now.icon.clone();
     let mut folded = HashMap::default();
+    // A page is always folded, whatever it was or becomes: its fold is not the user's.
     now.for_each_block(|b| {
-        folded.insert(b.id, b.folded);
+        if !b.kind.is_page() {
+            folded.insert(b.id, b.folded);
+        }
     });
     // Blocks in table cells never fold.
     fn walk(blocks: &mut [Block], folded: &HashMap<BlockId, bool>) {
         for b in blocks {
-            if let Some(f) = folded.get(&b.id) {
+            if b.kind.is_page() {
+                b.folded = true;
+            } else if let Some(f) = folded.get(&b.id) {
                 b.folded = *f;
             }
             walk(&mut b.children, folded);
@@ -777,6 +793,7 @@ impl Core {
     fn normalize(&mut self) {
         fn walk(list: &mut Vec<Block>, in_cell: bool) {
             for b in list.iter_mut() {
+                b.folded |= b.kind.is_page();
                 walk(&mut b.children, false);
                 if let BlockKind::Table(t) = &mut b.kind {
                     for row in &mut t.rows {
@@ -1222,7 +1239,7 @@ impl Core {
             // Below a folded heading's section a paragraph would still be in
             // it, hidden; a heading of the same level ends the section.
             BlockKind::Heading { level, .. } if block.folded => BlockKind::Heading { level: *level, seq_auto: false },
-            BlockKind::Heading { .. } => BlockKind::Text,
+            BlockKind::Heading { .. } | BlockKind::Page { .. } => BlockKind::Text,
             BlockKind::Ordered { .. } => BlockKind::Ordered { seq: None },
             BlockKind::Todo { .. } => BlockKind::Todo { done: false },
             k => k.clone(),
@@ -1230,7 +1247,7 @@ impl Core {
         if p.offset == 0 && !empty {
             // Caret at start: push an empty block of the same kind above.
             let kind = match &block.kind {
-                BlockKind::Heading { .. } => BlockKind::Text,
+                BlockKind::Heading { .. } | BlockKind::Page { .. } => BlockKind::Text,
                 _ => new_kind,
             };
             let mut nb = Block::new(kind, RichText::default());
@@ -1302,6 +1319,12 @@ impl Core {
                 if block.text.is_empty() {
                     self.block_mut(p.block).unwrap().kind = BlockKind::Text;
                 }
+                return;
+            }
+            // A page's title at offset 0 becomes a paragraph, its content after it.
+            BlockKind::Page { .. } => {
+                self.turn_one(p.block, BlockKind::Text);
+                self.fix_selection();
                 return;
             }
             _ => {
@@ -1632,6 +1655,7 @@ impl Core {
         }
         self.checkpoint(EditKind::Other);
         self.break_coalescing();
+        let page = kind.is_page();
         if matches!(kind, BlockKind::Quote | BlockKind::Callout { .. }) {
             self.wrap_blocks(&ids, kind);
         } else {
@@ -1641,6 +1665,12 @@ impl Core {
         }
         self.normalize();
         self.fix_selection();
+        // A new page folds its content away, maybe from under the selection.
+        if page {
+            for id in &ids {
+                self.fix_selection_after_fold(*id);
+            }
+        }
     }
 
     /// Keyboard turn-into toggles: when every target already has the kind,
@@ -1775,10 +1805,14 @@ impl Core {
                 if matches!(b.kind, BlockKind::Heading { .. }) != matches!(k, BlockKind::Heading { .. }) {
                     b.folded = false;
                 }
+                // A page keeps its content folded inside; turned into anything else, the content
+                // comes out after the line (Craft's 页面 → 正文).
+                let (was_page, to_page) = (b.kind.is_page(), k.is_page());
+                b.folded = if to_page { true } else if was_page { false } else { b.folded };
                 // Headings, lists and text can all hold children, so the
                 // subtree stays attached; a code block can't, its children follow it instead.
                 b.kind = k;
-                if !b.kind.nests() {
+                if was_page && !to_page || !b.kind.nests() && !to_page {
                     let kids = std::mem::take(&mut b.children);
                     self.insert_all_after(id, kids);
                 }
@@ -1803,6 +1837,48 @@ impl Core {
             {
                 b.bg = bg.clone();
             }
+        }
+    }
+
+    /// A block's own font (None: the document's), on the blocks that take a background.
+    pub fn set_font(&mut self, ids: &[BlockId], font: Option<String>) {
+        self.checkpoint(EditKind::Other);
+        for id in ids {
+            if let Some(b) = self.block_mut(*id)
+                && b.kind.takes_bg()
+            {
+                b.font = font.clone();
+            }
+        }
+    }
+
+    /// 复制格式: what a block looks like, to paste onto others.
+    pub fn format_of(&self, id: BlockId) -> Option<BlockFormat> {
+        let b = self.block(id).filter(|b| b.kind.takes_bg())?;
+        let mut marks = b.text.marks_at(0);
+        (marks.link, marks.inline, marks.code) = (None, None, false);
+        let kind = matches!(b.kind, BlockKind::Text | BlockKind::Heading { .. }).then(|| b.kind.clone());
+        Some(BlockFormat { kind, align: b.align, bg: b.bg.clone(), font: b.font.clone(), marks })
+    }
+
+    /// 粘贴格式: one undo step. The kind only changes between body text and
+    /// headings (they nest alike); the whole text takes the copied marks.
+    pub fn apply_format(&mut self, ids: &[BlockId], f: &BlockFormat) {
+        self.checkpoint(EditKind::Other);
+        let m = &f.marks;
+        for id in ids {
+            let Some(b) = self.block_mut(*id).filter(|b| b.kind.takes_bg()) else { continue };
+            if let Some(k) = &f.kind
+                && matches!(b.kind, BlockKind::Text | BlockKind::Heading { .. })
+            {
+                b.kind = k.clone();
+            }
+            (b.align, b.bg, b.font) = (f.align, f.bg.clone(), f.font.clone());
+            let len = b.text.len();
+            b.text.update_marks(0..len, |x| {
+                (x.bold, x.italic, x.underline, x.strike) = (m.bold, m.italic, m.underline, m.strike);
+                (x.text_color, x.bg_color) = (m.text_color.clone(), m.bg_color.clone());
+            });
         }
     }
 
@@ -1836,6 +1912,9 @@ impl Core {
 
     /// `folded` is part of the document (a single transaction).
     pub fn toggle_fold(&mut self, id: BlockId) {
+        if self.kind_of(id).is_some_and(BlockKind::is_page) {
+            return;
+        }
         self.generation += 1;
         self.dirty = true;
         if let Some(b) = self.block_mut(id) {
@@ -1896,6 +1975,10 @@ impl Core {
             }
             if list[i].id != id {
                 let b = &mut list[i];
+                // A page's content is never shown in place.
+                if b.kind.is_page() {
+                    return;
+                }
                 *changed |= b.folded;
                 b.folded = false;
                 go(&mut b.children, id, changed);
@@ -1985,6 +2068,56 @@ impl Core {
             self.insert_after(at, b);
         }
         id
+    }
+
+    /// 页面 / 卡片: a new, empty sub-page at the caret (an empty paragraph or
+    /// list line becomes it), the caret in its title.
+    pub fn insert_page(&mut self, card: bool) -> BlockId {
+        let at = self.sel.head.block;
+        let id = if self.block(at).is_some_and(|b| b.kind.has_text() && !matches!(b.kind, BlockKind::Code { .. } | BlockKind::Page { .. }) && b.text.is_empty() && b.children.is_empty()) {
+            self.turn_into(&[at], BlockKind::Page { card });
+            at
+        } else {
+            let mut b = Block::new(BlockKind::Page { card }, RichText::default());
+            b.folded = true;
+            self.insert_block(b)
+        };
+        self.block_sel = None;
+        self.cell_sel = None;
+        self.pick = None;
+        self.sel = Selection::caret(Pos::new(id, 0));
+        id
+    }
+
+    /// Opening a sub-page: its title and blocks as a document of their own
+    /// (one empty paragraph when it has none yet).
+    pub fn page_doc(&self, id: BlockId) -> Option<Document> {
+        let b = self.block(id).filter(|b| b.kind.is_page())?;
+        let blocks = if b.children.is_empty() { vec![Block::text("")] } else { b.children.clone() };
+        Some(Document { title: b.text.clone(), icon: None, cover: None, blocks })
+    }
+
+    /// Edits made in an opened sub-page come back: its title and blocks
+    /// replace the page block's (the caller takes the checkpoint).
+    pub fn graft_page(&mut self, id: BlockId, doc: &Document) {
+        if let Some(b) = self.block_mut(id).filter(|b| b.kind.is_page()) {
+            b.text = doc.title.clone();
+            b.children = doc.blocks.clone();
+            b.folded = true;
+            self.dirty = true;
+        }
+        // The title may have got shorter under a caret left in it.
+        self.fix_selection();
+    }
+
+    /// Show page blocks as a row or as a card (`card`); others are left alone.
+    pub fn set_page_card(&mut self, ids: &[BlockId], card: bool) {
+        self.checkpoint(EditKind::Other);
+        for &id in ids {
+            if let Some(BlockKind::Page { card: c, .. }) = self.block_mut(id).map(|b| &mut b.kind) {
+                *c = card;
+            }
+        }
     }
 
     /// Make sure something editable follows `id` (used after inserting atomic blocks).
@@ -3236,6 +3369,8 @@ impl BlockKind {
         match self {
             BlockKind::Ordered { .. } => BlockKind::Ordered { seq: None },
             BlockKind::Todo { .. } => BlockKind::Todo { done: false },
+            // The text after the caret leaves the title; the page's content stays with it.
+            BlockKind::Page { .. } => BlockKind::Text,
             k => k,
         }
     }
@@ -3368,6 +3503,47 @@ mod tests {
             assert!(c.undo());
             assert_eq!(c.doc.title.text, title);
         }
+    }
+
+    #[test]
+    fn pages_turn_from_and_into_text() {
+        // An empty list line becomes the page; the caret goes to its title.
+        let mut c = doc("<title>T</title><ul><li>a</li><li></li></ul>");
+        let li = c.doc.blocks[1].id;
+        c.sel = Selection::caret(Pos::new(li, 0));
+        assert_eq!(c.insert_page(false), li);
+        assert_eq!(xml(&c), "<title>T</title>\n<ul>\n  <li>a</li>\n</ul>\n<page></page>\n");
+        assert_eq!(c.sel.head, Pos::new(li, 0));
+        // 页面 on a paragraph: its text is the title, its children the page's content.
+        let mut c = doc("<title>T</title><p>Plan<p>child</p></p><p>after</p>");
+        let p = c.doc.blocks[0].id;
+        c.turn_into(&[p], BlockKind::Page { card: false });
+        assert_eq!(xml(&c), "<title>T</title>\n<page>Plan\n  <p>child</p>\n</page>\n<p>after</p>\n");
+        assert!(c.block(p).unwrap().folded && !c.units().iter().any(|u| u.id == c.doc.blocks[0].children[0].id));
+        // Edited as a document of its own, then put back.
+        let mut sub = Core::new(c.page_doc(p).unwrap());
+        sub.sel = Selection::caret(Pos::new(sub.doc.blocks[0].id, 5));
+        sub.insert_text("!");
+        c.checkpoint(EditKind::Other);
+        c.graft_page(p, &sub.doc);
+        assert_eq!(xml(&c), "<title>T</title>\n<page>Plan\n  <p>child!</p>\n</page>\n<p>after</p>\n");
+        // 正文: the content comes out after the line, not indented.
+        c.turn_into(&[p], BlockKind::Text);
+        assert_eq!(xml(&c), "<title>T</title>\n<p>Plan</p>\n<p>child!</p>\n<p>after</p>\n");
+        c.undo();
+        assert!(c.block(p).unwrap().folded);
+        c.undo();
+        c.undo();
+        assert_eq!(xml(&c), "<title>T</title>\n<p>Plan\n  <p>child</p>\n</p>\n<p>after</p>\n");
+        assert!(!c.block(p).unwrap().folded);
+        // Enter at the end of a title starts a paragraph after the page.
+        let mut c = doc("<title>T</title><page>P<p>in</p></page>");
+        let p = c.doc.blocks[0].id;
+        c.sel = Selection::caret(Pos::new(p, 1));
+        c.enter();
+        assert_eq!(xml(&c), "<title>T</title>\n<page>P\n  <p>in</p>\n</page>\n<p></p>\n");
+        c.toggle_fold(p);
+        assert!(c.block(p).unwrap().folded);
     }
 
     #[test]

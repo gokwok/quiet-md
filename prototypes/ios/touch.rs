@@ -221,11 +221,68 @@ impl Editor {
     }
 }
 
+// ---- 格式面板（`crate::ios::format`）和键盘上方那一条（`crate::ios::keybar`）要的几样。
+impl Editor {
+    /// 格式面板改的是哪一块：选中的第一块。
+    pub fn format_block(&self) -> Option<BlockId> { self.core.block_sel_ids().first().copied() }
+    /// 点「格式」：选中光标所在的块（标题行不算；已经选着块就照旧），收起「/」菜单，把它滚进看得见的地方。
+    pub fn format_begin(&mut self) -> Option<BlockId> {
+        if !self.core.in_block_mode() {
+            let block = self.core.sel.head.block;
+            if block == super::core::TITLE { return None; }
+            self.core.select_block(block);
+        }
+        (self.slash, self.menu, self.touch_menu) = (None, None, false);
+        let block = self.format_block()?;
+        self.reveal = Some((super::render::Reveal::Block(block), 0));
+        Some(block)
+    }
+    /// 「/」菜单里对这一块的动作：先删掉打的「/」和后面的字，再改光标所在的块。
+    pub(super) fn slash_act(&mut self, act: &str, window: &mut Window, cx: &mut Context<Self>) {
+        use fdl_core::model::{Align, ColorName};
+        if let Some(s) = self.slash.take() {
+            let end = self.core.sel.head.offset.max(s.start);
+            self.core.sel = super::core::Selection { anchor: super::core::Pos::new(s.block, s.trigger), head: super::core::Pos::new(s.block, end) };
+            self.core.delete_selection();
+        }
+        self.slash_reset();
+        let block = self.core.sel.head.block;
+        match act {
+            "indent" => self.core.indent(),
+            "outdent" => self.core.outdent(),
+            "align-l" | "align-c" | "align-r" => self.core.set_align(&[block], match act { "align-c" => Align::Center, "align-r" => Align::Right, _ => Align::Left }),
+            "tint" => {
+                let has = self.core.block(block).is_some_and(|b| b.bg.is_some());
+                self.core.set_block_bg(&[block], (!has).then(|| ColorName("light-gray".into())));
+            }
+            _ if act.starts_with("font-") => if !self.markdown { self.core.set_font(&[block], act.strip_prefix("font-").filter(|f| *f != "system").map(str::to_string)) },
+            // 清除格式：整块回到正文的样子（粗体这些、颜色、对齐、底色、字体都去掉）。
+            "clear" => self.core.apply_format(&[block], &super::core::BlockFormat { kind: None, align: Align::Left, bg: None, font: None, marks: Default::default() }),
+            "delete" => { self.core.select_block(block); self.core.delete_selected_blocks(); }
+            // 颜色：打开格式面板的颜色页（和「格式」里的彩虹圈同一页）。
+            "color" => { self.changed(window, cx); return crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open_at(crate::ios::format::Page::Color, w, window, cx)); }
+            _ => {}
+        }
+        self.changed(window, cx);
+    }
+
+    /// 「/」按钮：在光标处打一个「/」弹出菜单，和自己打的一样。前面紧挨着字时先空一格（「/」只在词首才算数）。
+    pub fn type_slash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let h = self.core.sel.head;
+        if self.read_only || h.block == super::core::TITLE { return; }
+        let glued = self.core.text_of(h.block).is_some_and(|t| t.text[..h.offset.min(t.text.len())].chars().last().is_some_and(|c| !c.is_whitespace()));
+        // 分两下打：菜单只认刚打的正好是一个「/」。
+        if glued { EntityInputHandler::replace_text_in_range(self, None, " ", window, cx); }
+        EntityInputHandler::replace_text_in_range(self, None, "/", window, cx);
+        window.notify_text_input_changed(&self.focus);
+    }
+}
+
 /// 块选中。桌面靠手柄菜单和 Shift 点击；手机上选中整块后底部升起一条矮的动作栏，改类型再点「格式」展开块菜单，
 /// 每个块右边有一个圆圈，点它把这一块加进选区或拿出来（照 Craft，可以隔着选：`Core::toggle_pick`）。
 impl Editor {
     fn block_bar_on(&self) -> bool {
-        self.compact() && self.core.in_block_mode() && self.slash.is_none() && !self.block_drag.as_ref().is_some_and(|d| d.started)
+        self.compact() && self.core.in_block_mode() && self.slash.is_none() && !self.block_drag.as_ref().is_some_and(|d| d.started) && !crate::ios::format::is_open()
     }
 
     /// 块动作栏：格式 / 添加 / 剪切 / 复制 / 删除。选了多块时只留对多块有意义的后三项。
@@ -259,7 +316,8 @@ impl Editor {
         let bar = menu().map(crate::ios::sheet_plane).id("block-bar").occlude().w(crate::ios::menu_w(0.)).p(px(6.)).flex().items_center().gap(px(2.))
             .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); })
             .when(one.is_some(), |d| d
-                .child(item("bb-format", "type", tr("格式", "Format"), Theme::text()).on_click(open(None)))
+                // 「格式」：和键盘上方的「格式」是同一块面板（`crate::ios::format`）。
+                .child(item("bb-format", "type", tr("格式", "Format"), Theme::text()).on_click(|_, _, _| crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open(w, window, cx))))
                 .child(item("bb-add", "square-plus", tr("添加", "Add"), Theme::text()).on_click(open(Some(BlockSub::Add(usize::MAX))))))
             .child(item("bb-cut", "scissors", tr("剪切", "Cut"), Theme::text()).on_click(act(true, true)))
             .child(item("bb-copy", "copy", tr("复制", "Copy"), Theme::text()).on_click(act(false, true)))
@@ -690,13 +748,33 @@ impl Editor {
 // ---- 「/」菜单（手机）：光标下面的一张小卡片，先分类，点进一类在同一张卡片里换内容；打了字就变成平铺的筛选结果。
 // 从工具条或块菜单打开的添加面板不走这里，还是底部面板。
 
-/// 分类只在手机上有：桌面的分组（基础 / 常用 / …）有两组只有一项，不适合当第一级。
-const SLASH_CATS: [(&str, &str, &str); 3] = [("文本样式", "Text styles", "type"), ("列表", "Lists", "list"), ("插入", "Insert", "plus")];
-const SLASH_CARD_W: f32 = 285.;
-fn slash_cat_of(kind: super::menus::SlashKind) -> usize {
+/// 分类照 Craft 的斜杠菜单（录屏 2026-11-15 19:25）拆细，只放已经做了的：插入用的是编辑器原有的条目（`SlashKind`），
+/// 缩进、对齐、字体、颜色、清除格式、删除区块是对光标所在这一块的动作（`slash_act`）。一类只有一项时直接是那一项。
+#[derive(Clone, Copy)]
+enum Pick { K(super::menus::SlashKind), A(&'static str, &'static str, &'static str, &'static str) }
+const SLASH_CATS: &[(&str, &str, &str, &[Pick])] = {
     use super::menus::SlashKind as K;
-    match kind { K::Text | K::Heading(_) | K::Quote | K::Code | K::Divider => 0, K::Bullet | K::Ordered | K::Todo => 1, _ => 2 }
-}
+    use Pick::{A, K as I};
+    &[
+        ("列表", "Lists", "list", &[I(K::Bullet), I(K::Ordered), I(K::Todo)]),
+        ("缩进", "Indent", "indent-increase", &[A("indent", "增加缩进", "Indent", "indent-increase"), A("outdent", "减少缩进", "Outdent", "indent-decrease")]),
+        ("文本样式", "Text Styles", "type", &[I(K::Text), I(K::Heading(1)), I(K::Heading(2)), I(K::Heading(3)), I(K::Heading(4)), I(K::Quote), I(K::Code)]),
+        ("装饰", "Decorations", "callout", &[I(K::Callout), A("tint", "块背景", "Block Background", "view-card")]),
+        ("颜色", "Color", "palette", &[A("color", "颜色", "Color", "palette")]),
+        ("对齐", "Alignment", "align-left", &[A("align-l", "左对齐", "Left", "align-left"), A("align-c", "居中", "Center", "align-center"), A("align-r", "右对齐", "Right", "align-right")]),
+        ("字体", "Font", "baseline", &[A("font-system", "System", "System", "type"), A("font-serif", "Serif", "Serif", "type"), A("font-mono", "Mono", "Mono", "code"), A("font-rounded", "Round", "Round", "type")]),
+        ("提醒我", "Remind Me", "reminder", &[I(K::Reminder)]),
+        ("插入文件或媒体", "Insert File or Media", "image", &[I(K::Image), I(K::File)]),
+        ("插入表格", "Insert Table", "table", &[I(K::Table)]),
+        ("页面", "Page", "file-page", &[I(K::Page), I(K::Card)]),
+        ("插入特殊语法片段", "Insert Special Syntax", "braces", &[I(K::Formula), I(K::Link), I(K::Button), I(K::Countdown)]),
+        ("插入分隔符", "Insert Divider", "divider", &[I(K::Divider)]),
+        ("分栏", "Columns", "columns-2", &[I(K::Grid)]),
+        ("清除格式", "Clear Formatting", "swatch-none", &[A("clear", "清除格式", "Clear Formatting", "swatch-none")]),
+        ("删除区块", "Delete Block", "trash-2", &[A("delete", "删除区块", "Delete Block", "trash-2")]),
+    ]
+};
+const SLASH_CARD_W: f32 = 285.;
 // 点进了哪一类：记着是哪一次「/」（块和触发的位置），换一次就从头来。
 thread_local! { static SLASH_CAT: std::cell::Cell<Option<(BlockId, usize, usize)>> = const { std::cell::Cell::new(None) }; }
 
@@ -725,16 +803,41 @@ impl Editor {
         for i in self.slash_results() { if !items.iter().any(|j| SLASH_ITEMS[*j].kind == SLASH_ITEMS[i].kind) { items.push(i); } }
         let leveled = self.slash_query().is_empty();
         let cat = self.slash_cat().filter(|_| leveled);
-        let row = |id: ElementId| div().id(id).flex_none().h(px(44.)).mx(px(6.)).px(px(10.)).flex().items_center().rounded(px(8.)).active(|s| s.bg(Theme::fill_hover()));
-        let label = |text: SharedString| div().ml(px(12.)).flex_1().min_w_0().text_size(px(16.)).line_height(px(22.)).text_color(Theme::text()).child(text);
+        let row = |id: ElementId| div().id(id).flex_none().h(px(44.)).mx(px(8.)).px(px(12.)).flex().items_center().rounded(px(14.)).active(|s| s.bg(Theme::fill_hover()));
+        let label = |text: SharedString| div().ml(px(14.)).flex_1().min_w_0().text_size(px(16.)).line_height(px(22.)).text_color(Theme::text()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(text);
         let (block, trigger) = (s.block, s.trigger);
         let mut list = div().id("slash-card-list").py(px(6.)).flex().flex_col().overflow_y_scroll().track_scroll(&self.slash_scroll);
         let mut n = 0usize;
+        // 一行：图标、名字，点进一类的行尾一个小箭头。照 Craft：图标都是灰的，删除是红的。
+        let pick_row = |id: ElementId, glyph: &'static str, text: SharedString, more: bool, danger: bool| {
+            let tint = if danger { crate::feishu_theme::c(0xd83931) } else { Theme::icon() };
+            row(id).child(icon(glyph, 19., tint)).child(label(text).when(danger, |d| d.text_color(tint))).when(more, |d| d.child(icon("chevron-right", 14., Theme::text_caption())))
+        };
+        let has = |k: super::menus::SlashKind| items.iter().any(|i| SLASH_ITEMS[*i].kind == k);
+        let usable = |p: &Pick| match p { Pick::K(k) => has(*k), Pick::A(..) => true };
+        let run = |p: Pick| cx.listener(move |e: &mut Editor, _: &MouseDownEvent, window, cx| {
+            cx.stop_propagation();
+            window.prevent_default();
+            let composing = e.marked.take().is_some();
+            match p { Pick::K(kind) => e.run_slash(kind, window, cx), Pick::A(act, ..) => e.slash_act(act, window, cx) }
+            if composing { window.notify_text_input_changed(&e.focus); }
+        });
+        let pick_el = |ix: usize, p: Pick| match p {
+            Pick::K(k) => { let it = SLASH_ITEMS.iter().find(|it| it.kind == k).unwrap(); pick_row(("slash-pick", ix).into(), it.icon, crate::settings::label(it.label).into(), false, false) }
+            Pick::A(act, zh, en, glyph) => pick_row(("slash-pick", ix).into(), glyph, crate::settings::tr(zh, en).into(), false, act == "delete"),
+        };
         if leveled && cat.is_none() {
-            for (c, (zh, en, glyph)) in SLASH_CATS.iter().enumerate() {
-                if !items.iter().any(|i| slash_cat_of(SLASH_ITEMS[*i].kind) == c) { continue; }
+            for (c, (zh, en, glyph, picks)) in SLASH_CATS.iter().enumerate() {
+                let picks: Vec<Pick> = picks.iter().copied().filter(|p| usable(p)).collect();
+                if picks.is_empty() { continue; }
                 n += 1;
-                list = list.child(row(("slash-cat", c).into()).child(icon(glyph, 20., Theme::icon())).child(label(crate::settings::tr(zh, en).into())).child(icon("chevron-right", 14., Theme::text_caption()))
+                // 只有一项的类直接就是那一项。
+                if let [only] = picks.as_slice() {
+                    let danger = matches!(only, Pick::A("delete", ..));
+                    list = list.child(pick_row(("slash-cat", c).into(), glyph, crate::settings::tr(zh, en).into(), false, danger).on_mouse_down(MouseButton::Left, run(*only)));
+                    continue;
+                }
+                list = list.child(pick_row(("slash-cat", c).into(), glyph, crate::settings::tr(zh, en).into(), true, false)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |e: &mut Editor, _: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
                         window.prevent_default();
@@ -743,34 +846,27 @@ impl Editor {
                         cx.notify();
                     })));
             }
-        } else {
-            if let Some(c) = cat {
-                let (zh, en, _) = SLASH_CATS[c];
-                list = list.child(row("slash-back".into()).h(px(36.)).child(icon("chevron-left", 14., Theme::text_caption()))
-                    .child(div().ml(px(6.)).text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(crate::settings::tr(zh, en)))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|e: &mut Editor, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        window.prevent_default();
-                        if e.slash_up() { cx.notify(); }
-                    })));
+        } else if let Some(c) = cat {
+            let (zh, en, _, picks) = SLASH_CATS[c];
+            list = list.child(row("slash-back".into()).h(px(36.)).child(icon("chevron-left", 14., Theme::text_caption()))
+                .child(div().ml(px(6.)).text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(crate::settings::tr(zh, en)))
+                .on_mouse_down(MouseButton::Left, cx.listener(|e: &mut Editor, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                    if e.slash_up() { cx.notify(); }
+                })));
+            for (ix, p) in picks.iter().copied().filter(|p| usable(p)).enumerate() {
+                n += 1;
+                list = list.child(pick_el(ix, p).on_mouse_down(MouseButton::Left, run(p)));
             }
+        } else {
             for (ix, i) in items.iter().enumerate() {
                 let it = &SLASH_ITEMS[*i];
-                if cat.is_some_and(|c| slash_cat_of(it.kind) != c) { continue; }
                 let kind = it.kind;
                 n += 1;
                 // 打了字时回车选的是第一条，给它一层底。
-                list = list.child(row(("slash-item", ix).into()).when(!leveled && ix == 0, |d| d.bg(Theme::fill_hover()))
-                    .child(icon(it.icon, 20., crate::feishu_theme::c(it.color))).child(label(crate::settings::label(it.label).into()))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |e: &mut Editor, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        window.prevent_default();
-                        // 拼音还在组字时点的：那几个字母连同「/」一起删掉，组字到此为止。
-                        let composing = e.marked.take().is_some();
-                        e.run_slash(kind, window, cx);
-                        // 告诉系统正文被我们改了：输入法丢掉那次组字和它的候选条。
-                        if composing { window.notify_text_input_changed(&e.focus); }
-                    })));
+                list = list.child(pick_row(("slash-item", ix).into(), it.icon, crate::settings::label(it.label).into(), false, false).when(ix == 0, |d| d.bg(Theme::fill_hover()))
+                    .on_mouse_down(MouseButton::Left, run(Pick::K(kind))));
             }
         }
         if n == 0 { return None; }
@@ -781,7 +877,7 @@ impl Editor {
         let down = below >= 180. || below >= above;
         let w = SLASH_CARD_W.min(f32::from(view.size.width) - 32.);
         let x = f32::from(p.x).clamp(f32::from(view.left()) + 16., f32::from(view.right()) - 16. - w);
-        let card = menu().id("slash-card").occlude().w(px(w)).rounded(px(12.)).overflow_hidden().shadow(crate::theme::shadow_dialog())
+        let card = menu().id("slash-card").occlude().w(px(w)).rounded(px(22.)).overflow_hidden().shadow(crate::theme::shadow_dialog())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(list.max_h(px(if down { below } else { above }.clamp(120., 300.))));
         Some(if down { at(self.rel(point(px(x), p.y + lh + px(6.))), Anchor::TopLeft, card) } else { at(self.rel(point(px(x), p.y - px(6.))), Anchor::BottomLeft, card) })

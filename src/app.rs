@@ -398,7 +398,7 @@ impl Workspace {
             cx.on_app_quit(|this, cx| {
                 crate::quick_note::persist(cx);
                 if !this.flush(cx) && let Some(ed) = &this.editor
-                    && let Err(error) = this.store.recover_later(&ed.read(cx).core.doc) {
+                    && let Err(error) = this.store.recover_later(&ed.read(cx).root().doc) {
                     crate::logging::write(&format!("Could not preserve unsaved document: {error:#}"));
                 }
                 async {}
@@ -579,7 +579,7 @@ impl Workspace {
         });
         // Reuse the live state, including unsaved edits and undo history.
         if let Some(peer) = self.document_peers(id, window, cx).first() {
-            let core = peer.read(cx).core.clone();
+            let core = peer.read(cx).root().clone();
             editor.update(cx, |e, cx| e.receive_document(&core, cx));
         }
         self.editor_sub = Some(cx.subscribe_in(&editor, window, |this, _, ev: &EditorEvent, window, cx| match ev {
@@ -609,6 +609,7 @@ impl Workspace {
             EditorEvent::OpenDoc(id) => this.open(id, window, cx),
             EditorEvent::OpenDocAt(id, ordinal) => this.open_at(id, *ordinal, window, cx),
             EditorEvent::HideRefs => this.ask_refs(false, cx),
+            EditorEvent::Page => cx.notify(),
             EditorEvent::Duplicate => {
                 if let Some(id) = this.current.clone() {
                     this.duplicate_doc(&id, window, cx);
@@ -908,7 +909,9 @@ impl Workspace {
         let (Some(id), Some(editor)) = (self.current.clone(), self.editor.clone()) else { return };
         let peers = self.document_peers(&id, window, cx);
         if peers.is_empty() { return; }
-        let core = editor.read(cx).core.clone();
+        // An open 页面 is part of the document: what other windows get is the whole of it.
+        editor.update(cx, |e, _| e.graft_pages());
+        let core = editor.read(cx).root().clone();
         for peer in peers { peer.update(cx, |e, cx| e.receive_document(&core, cx)); }
         for handle in cx.windows().into_iter().filter(|w| w.window_id() != window.window_handle().window_id()).filter_map(|w| w.downcast::<Workspace>()) {
             let _ = handle.update(cx, |ws, _, cx| {
@@ -936,7 +939,7 @@ impl Workspace {
         let delay = SAVE_DELAY.min(left);
         // Keep the list title live while typing; the body/snippet updates on save.
         if let (Some(id), Some(ed)) = (&self.current, &self.editor) {
-            let title = ed.read(cx).core.doc.title.text.clone();
+            let title = ed.read(cx).root().doc.title.text.clone();
             if let Some(e) = self.entries.iter_mut().find(|e| &e.id == id) {
                 e.title = title;
             }
@@ -950,7 +953,7 @@ impl Workspace {
 
     fn check_reminders(&mut self, from: i64, to: i64, cx: &mut Context<Self>) {
         // The open document's reminders are read live (unsaved edits too).
-        let open = self.editor.as_ref().map(|e| e.read(cx).core.doc.reminders());
+        let open = self.editor.as_ref().map(|e| e.read(cx).root().doc.reminders());
         for e in &self.entries {
             let rs = match &open {
                 Some(rs) if self.current.as_deref() == Some(e.id.as_str()) => rs,
@@ -974,7 +977,9 @@ impl Workspace {
             self.unsaved = false;
             return true;
         };
-        let doc = &ed.read(cx).core.doc;
+        // Edits in an open 页面 go into the document before it is written.
+        ed.update(cx, |e, _| e.graft_pages());
+        let doc = &ed.read(cx).root().doc;
         let (title, icon, body, reminders, links) = (doc.title.text.clone(), doc.icon.clone(), doc.plain_text(), doc.reminders(), doc.doc_links());
         match self.store.save(&id, doc) {
             Ok(meta) => {
@@ -1055,7 +1060,8 @@ impl Workspace {
 
     pub(crate) fn save_failed_copy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(ed) = &self.editor else { return };
-        let mut doc = ed.read(cx).core.doc.clone();
+        ed.update(cx, |e, _| e.graft_pages());
+        let mut doc = ed.read(cx).root().doc.clone();
         doc.title = crate::model::RichText::plain(format!("{}{}", doc.title.text, crate::settings::tr("（恢复副本）", " (recovered copy)")));
         match self.store.create_from(&doc) {
             Ok(_) => {
@@ -1174,7 +1180,7 @@ impl Workspace {
         let title = self
             .editor
             .as_ref()
-            .map(|e| display_title(&e.read(cx).core.doc.title.text))
+            .map(|e| display_title(&e.read(cx).root().doc.title.text))
             .unwrap_or_default();
         let save_error = match &self.status {
             SaveStatus::Failed(error) => Some(error.clone()),
@@ -1234,6 +1240,32 @@ impl Workspace {
                     })
                     .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(name.clone())))
                     .on_click(cx.listener(move |w, _, window, cx| w.open(&id, window, cx)))
+                    .into_any_element(),
+            );
+            crumbs.push(sep());
+        }
+        // An open 页面: the document and the pages around it come next, each going back
+        // there; the title is the page's own.
+        let (pages, title) = match self.editor.as_ref().map(|e| e.read(cx)) {
+            Some(e) if !e.outer.is_empty() => (e.outer.iter().map(|o| display_title(&o.core.doc.title.text)).collect(), display_title(&e.core.doc.title.text)),
+            _ => (vec![], title),
+        };
+        for (depth, name) in pages.into_iter().enumerate() {
+            crumbs.push(
+                div()
+                    .id(SharedString::from(format!("crumb-page-{depth}")))
+                    .no_drag()
+                    .min_w(px(28.))
+                    .max_w(px(200.))
+                    .px(px(4.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_color(Theme::text_caption())
+                    .hover(|s| s.text_color(Theme::primary_500()))
+                    .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(ui_text(name)))
+                    .on_click(cx.listener(move |w, _, window, cx| if let Some(ed) = w.editor.clone() { ed.update(cx, |e, cx| e.close_pages_to(depth, window, cx)); }))
                     .into_any_element(),
             );
             crumbs.push(sep());

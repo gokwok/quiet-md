@@ -40,6 +40,8 @@ pub enum EditorEvent {
     Toast,
     /// A 创建副本 button was clicked.
     Duplicate,
+    /// A 页面 / 卡片 opened or closed (the window's header and page transition follow).
+    Page,
 }
 
 /// A child page shown by 子页面列表 blocks.
@@ -48,6 +50,17 @@ pub struct SubPage {
     pub id: String,
     pub title: String,
     pub icon: Option<String>,
+}
+
+/// An opened 页面 / 卡片: the document (or page) around it, waiting under
+/// the page's own `Core` until the page is closed.
+#[derive(Clone)]
+pub struct Outer {
+    pub core: Core,
+    /// The page block in `core` that is open.
+    pub page: BlockId,
+    /// The open page's `generation` last grafted back; None: not since opening.
+    grafted: Option<u64>,
 }
 
 /// Open slash menu: `trigger` is the byte offset of `/` (or `、`), `start`
@@ -185,6 +198,9 @@ pub struct Editor {
     pub cat_pinned: bool,
     /// Child pages of the open document (kept current by the workspace).
     pub sub_pages: Vec<SubPage>,
+    /// Open 页面 / 卡片, outermost first: `core` is the innermost page's, the
+    /// document itself is `outer[0].core` (see [`Editor::root`]).
+    pub outer: Vec<Outer>,
     pub(super) cat_entries: Rc<Vec<super::catalogue::CatEntry>>,
     /// The `core.generation` `cat_entries` was built from.
     pub(super) cat_generation: Option<u64>,
@@ -408,6 +424,7 @@ impl Editor {
             layout: Default::default(),
             cat_pinned: false,
             sub_pages: vec![],
+            outer: vec![],
             cat_entries: Rc::default(),
             cat_generation: None,
             cat_collapsed: Default::default(),
@@ -480,6 +497,8 @@ impl Editor {
     /// Call after every command: emits Changed, keeps menus consistent,
     /// scrolls the caret into view and restarts the caret blink.
     pub fn receive_document(&mut self, core: &Core, cx: &mut Context<Self>) {
+        // A whole document arrives: any open page closes first.
+        self.leave_pages();
         let sel = self.core.sel;
         let generation = self.core.generation;
         self.core = core.clone();
@@ -502,6 +521,7 @@ impl Editor {
     pub fn changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.core.reveal_caret();
         if self.core.dirty {
+            self.graft_pages();
             self.core.dirty = false;
             self.typing = true;
             self.hide_link_card(cx);
@@ -529,13 +549,112 @@ impl Editor {
         }
     }
 
+    /// The document itself, whatever page is open (what is saved).
+    pub fn root(&self) -> &Core {
+        self.outer.first().map_or(&self.core, |o| &o.core)
+    }
+
+    /// Open the 页面 / 卡片 `id` of the shown document: its title and blocks
+    /// become the page being edited; edits go back into the block as they happen.
+    pub fn open_page(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(doc) = self.core.page_doc(id) else { return };
+        let mut core = Core::new(doc);
+        core.generation = self.core.generation.wrapping_add(1);
+        let outer = std::mem::replace(&mut self.core, core);
+        self.outer.push(Outer { core: outer, page: id, grafted: None });
+        // Editing stays as it was: a tap on a row opens the page to read.
+        let editing = self.focus.is_focused(window);
+        self.page_switched(editing, window, cx);
+    }
+
+    /// Back from an open page to the document (or page) around it; the
+    /// caret goes after the page's row, not into its title.
+    pub fn close_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.graft_pages();
+        let Some(o) = self.outer.pop() else { return };
+        let generation = self.core.generation;
+        self.core = o.core;
+        self.core.generation = generation.wrapping_add(1);
+        self.core.block_sel = None;
+        self.core.cell_sel = None;
+        let us = self.core.units();
+        if let Some(i) = us.iter().position(|u| u.id == o.page) {
+            let next = us[i + 1..].iter().find(|u| u.text && u.scope == us[i].scope).map_or(o.page, |u| u.id);
+            self.core.sel = Selection::caret(Pos::new(next, if next == o.page { self.core.len_of(next) } else { 0 }));
+        }
+        self.page_switched(true, window, cx);
+        self.reveal = Some((super::render::Reveal::Block(o.page), 0));
+    }
+
+    /// Close open pages until `depth` are left (0: back to the document).
+    pub fn close_pages_to(&mut self, depth: usize, window: &mut Window, cx: &mut Context<Self>) {
+        while self.outer.len() > depth {
+            self.close_page(window, cx);
+        }
+    }
+
+    /// Close every open page at once (a whole document arrives, a rename).
+    pub(crate) fn leave_pages(&mut self) {
+        self.graft_pages();
+        if self.outer.is_empty() {
+            return;
+        }
+        let generation = self.core.generation;
+        self.core = self.outer.swap_remove(0).core;
+        self.outer.clear();
+        self.core.generation = generation.wrapping_add(1);
+        self.ro_doc = self.read_only.then(|| self.core.doc.clone());
+    }
+
+    /// Edits in the open page go back into its block, and on out to the
+    /// document: one undo step there per visit. Cheap when nothing changed.
+    pub fn graft_pages(&mut self) {
+        let Some(last) = self.outer.last() else { return };
+        if last.grafted == Some(self.core.generation) {
+            return;
+        }
+        let mut doc = self.core.doc.clone();
+        let (inner, top) = (self.core.generation, self.outer.len() - 1);
+        for i in (0..self.outer.len()).rev() {
+            let o = &mut self.outer[i];
+            if o.grafted.is_none() {
+                o.core.checkpoint(core::EditKind::Other);
+            }
+            o.grafted = Some(if i == top { inner } else { o.grafted.unwrap_or_default() });
+            o.core.graft_page(o.page, &doc);
+            if i > 0 {
+                doc = o.core.doc.clone();
+            }
+        }
+    }
+
+    /// A page opened or closed: menus and panels belonged to the other one.
+    fn page_switched(&mut self, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.marked = None;
+        self.menu = None;
+        self.slash = None;
+        self.hover = None;
+        self.cat_generation = None;
+        self.ro_doc = self.read_only.then(|| self.core.doc.clone());
+        self.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) });
+        self.refresh_find(false, cx);
+        if focus {
+            window.focus(&self.focus);
+        }
+        self.restart_blink(window, cx);
+        cx.emit(EditorEvent::Page);
+        cx.notify();
+    }
+
     pub(crate) fn receive_file_title(&mut self, title: &str, cx: &mut Context<Self>) {
+        self.leave_pages();
         self.core.receive_file_title(title);
         self.keep_read_only_title();
         cx.notify();
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
+        self.leave_pages();
         if self.core.doc.title.text == title {
             return;
         }
@@ -882,6 +1001,12 @@ impl Editor {
                 let nid = self.core.insert_block(Block::new(k, RichText::default()));
                 let p = self.core.ensure_paragraph_after(nid);
                 self.core.sel = Selection::caret(Pos::new(p, 0));
+            }
+            // A new page opens straight away, its title ready for typing.
+            SlashKind::Page | SlashKind::Card => {
+                let id = self.core.insert_page(kind == SlashKind::Card);
+                self.changed(window, cx);
+                return self.open_page(id, window, cx);
             }
             SlashKind::Countdown => {
                 let nid = self.core.insert_block(Block::new(BlockKind::Countdown(Default::default()), RichText::default()));

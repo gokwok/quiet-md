@@ -118,7 +118,7 @@ fn is_block_tag(name: &str) -> bool {
         "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "h7" | "h8" | "h9" | "ul" | "ol" | "li"
             | "checkbox" | "blockquote" | "hr" | "pre" | "img" | "table" | "grid" | "column"
             | "callout" | "whiteboard" | "source" | "figure" | "sheet" | "task" | "chat_card"
-            | "bookmark" | "html5-block" | "okr" | "sub-page-list" | "countdown"
+            | "bookmark" | "html5-block" | "okr" | "sub-page-list" | "countdown" | "page"
     )
 }
 
@@ -214,6 +214,11 @@ fn parse_block(e: &Element, out: &mut Vec<Block>) {
         "blockquote" => Block::new(BlockKind::Quote, RichText::default()).with_children(non_empty(parse_blocks(&e.children))),
         "hr" => Block::new(BlockKind::Divider, RichText::default()),
         "sub-page-list" => Block::new(BlockKind::SubPageList, RichText::default()),
+        // 页面 / 卡片: the title, then the page's blocks.
+        "page" => {
+            let (inline, nested) = split_inline_and_blocks(&e.children);
+            Block::new(BlockKind::Page { card: e.attr("view") == Some("card") }, inline_text(&inline)).with_children(nested)
+        }
         "countdown" => {
             let d = Countdown::default();
             let num = |k: &str| e.attr(k).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
@@ -304,8 +309,10 @@ fn parse_block(e: &Element, out: &mut Vec<Block>) {
     if e.name == "img" && e.attr("align").is_none() {
         block.align = Align::Center;
     }
-    block.folded = e.attr("folded") == Some("true");
+    // A page's content is always folded away; the file doesn't say so.
+    block.folded = e.attr("folded") == Some("true") || block.kind.is_page();
     block.bg = parse_bg(e, &block.kind);
+    block.font = parse_font(e, &block.kind);
     out.push(block);
 }
 
@@ -336,8 +343,21 @@ fn parse_li(li: &Element, ordered: bool) -> Block {
     b.align = parse_align(li);
     b.folded = li.attr("folded") == Some("true");
     b.bg = parse_bg(li, &b.kind);
+    b.font = parse_font(li, &b.kind);
     b.children = nested;
     b
+}
+
+/// A block's own font (`font="serif|mono|rounded"`), on the blocks that take a background.
+fn parse_font(e: &Element, kind: &BlockKind) -> Option<String> {
+    e.attr("font").filter(|f| kind.takes_bg() && matches!(*f, "serif" | "mono" | "rounded")).map(str::to_string)
+}
+
+fn font_attr(b: &Block) -> String {
+    match &b.font {
+        Some(f) if b.kind.takes_bg() => format!(" font=\"{}\"", esc_attr(f)),
+        _ => String::new(),
+    }
 }
 
 /// A block background; a callout's own `background-color` is its fill.
@@ -758,7 +778,7 @@ fn write_blocks(blocks: &[Block], s: &mut String, depth: usize) {
                         BlockKind::Ordered { seq: Some(n) } => format!(" seq=\"{n}\""),
                         _ => String::new(),
                     };
-                    s.push_str(&format!("<li{seq}{}{}{}>", align_attr(li.align), bg_attr(li), folded_attr(li.folded)));
+                    s.push_str(&format!("<li{seq}{}{}{}{}>", align_attr(li.align), bg_attr(li), font_attr(li), folded_attr(li.folded)));
                     write_inline(&li.text, s);
                     // An empty item's first child paragraph would be read
                     // back as the item's own text (parse_li); spell it out.
@@ -802,8 +822,8 @@ fn write_text_with_children(b: &Block, close: &str, s: &mut String, depth: usize
 
 fn write_block(b: &Block, s: &mut String, depth: usize) {
     indent(s, depth);
-    let al = format!("{}{}", align_attr(b.align), bg_attr(b));
-    let fo = folded_attr(b.folded && b.kind.has_text());
+    let al = format!("{}{}{}", align_attr(b.align), bg_attr(b), font_attr(b));
+    let fo = folded_attr(b.folded && b.kind.has_text() && !b.kind.is_page());
     match &b.kind {
         BlockKind::Text => {
             s.push_str(&format!("<p{al}{fo}>"));
@@ -861,6 +881,10 @@ fn write_block(b: &Block, s: &mut String, depth: usize) {
         }
         BlockKind::Divider => s.push_str("<hr/>\n"),
         BlockKind::SubPageList => s.push_str("<sub-page-list/>\n"),
+        BlockKind::Page { card } => {
+            s.push_str(&format!("<page{}{}>", if *card { " view=\"card\"" } else { "" }, align_attr(b.align)));
+            write_text_with_children(b, "</page>", s, depth);
+        }
         BlockKind::Countdown(c) => {
             s.push_str(&format!(
                 "<countdown duration=\"{}\" start-time=\"{}\" notify=\"{}\" color=\"{}\" timing=\"{}\"",
@@ -1336,6 +1360,23 @@ mod tests {
         for s in ["被折叠的段落", "尾随空格 \n", "\n \n", "fn main() {\n    println!(\"<hi> & 'q'\");\n\n}", "a = 1\nb = 2", "\\frac{1}{2}", "空项下的段落"] {
             assert!(text.contains(s), "{s:?} missing from {text:?}");
         }
+    }
+
+    /// 页面 / 卡片 read as page blocks anywhere blocks go: the title, then its blocks, always folded.
+    #[test]
+    fn page_blocks() {
+        let x = "<title>T</title><page>Plan<p>a</p><ul><li>b</li></ul></page><callout emoji=\"💡\"><page view=\"card\">C</page></callout><table><tbody><tr><td><page>D<p>e</p></page></td></tr></tbody></table>";
+        let doc = parse(x).unwrap();
+        let p = &doc.blocks[0];
+        assert_eq!((p.kind.clone(), p.text.text.as_str(), p.children.len(), p.folded), (BlockKind::Page { card: false }, "Plan", 2, true));
+        assert_eq!(doc.blocks[1].children[0].kind, BlockKind::Page { card: true });
+        let BlockKind::Table(t) = &doc.blocks[2].kind else { panic!("table expected") };
+        assert_eq!(t.rows[0][0].blocks[0].children[0].text.text, "e");
+        let out = serialize(&doc);
+        assert!(out.starts_with("<title>T</title>\n<page>Plan\n  <p>a</p>\n  <ul>\n    <li>b</li>\n  </ul>\n</page>\n") && !out.contains("folded"), "{out}");
+        assert!(out.contains("<page view=\"card\">C</page>") && out.contains("<td><page>D<p>e</p></page></td>"), "{out}");
+        assert_eq!(serialize(&parse(&out).unwrap()), out);
+        assert!(doc.plain_text().contains('e'));
     }
 
     /// Older versions indented the blocks inside a cell; that layout is not content.

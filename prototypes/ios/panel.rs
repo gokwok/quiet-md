@@ -53,6 +53,29 @@ pub enum Art {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Card { pub fill: Fill, pub paper: Hsla, pub ink: Hsla, pub name: String }
 
+/// 格式面板（`format.rs`）的一格：长什么样，点了交出什么，选没选中，能不能点，有没有一层浅底，占几份宽。
+#[derive(Clone, PartialEq, Debug)]
+pub struct Slot { pub look: Look, pub act: String, pub on: bool, pub enabled: bool, pub tile: bool, pub span: f64 }
+impl Slot {
+    pub fn new(look: Look, act: impl Into<String>) -> Self { Slot { look, act: act.into(), on: false, enabled: true, tile: false, span: 1. } }
+    pub fn on(mut self, on: bool) -> Self { self.on = on; self }
+    pub fn enabled(mut self, enabled: bool) -> Self { self.enabled = enabled; self }
+    pub fn tile(mut self) -> Self { self.tile = true; self }
+    pub fn span(mut self, span: f64) -> Self { self.span = span; self }
+}
+#[derive(Clone, PartialEq, Debug)]
+pub enum Look {
+    /// 字（可在前面带一个 SF Symbol），字号和字重照它预示的样子（标题大、正文小）。
+    Text(String, Option<&'static str>, f64, f64),
+    Symbol(&'static str),
+    /// 左边一道竖线、右边字：「焦点」的样子。
+    Bar(String),
+    /// 彩虹圈，中间是这一块现在的颜色（没有就是底色）。
+    Wheel(Option<Hsla>),
+    /// 字体：大字样用它自己的字体写，下面一行小字（样张，名字，设计）。
+    Font(String, String, &'static str),
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Node {
     /// 主面板顶上的小横条。
@@ -76,6 +99,10 @@ pub enum Node {
     Actions(Vec<(&'static str, String, String)>),
     /// 空着时的一句话。
     Empty(&'static str, String),
+    /// 一排小色点（格式面板的颜色），一排八颗；`None` 是「无」：空圈上一道斜线。点了交出 `act` + 序号。
+    Dots { fills: Vec<Option<Hsla>>, picked: Option<usize>, act: String },
+    /// 一行格子（格式面板），行高 `h`；`rule`：下面一条细线。
+    Cells { cells: Vec<Slot>, h: f64, rule: bool },
 }
 
 pub const PAD: f32 = 16.;
@@ -99,6 +126,8 @@ fn node_h(node: &Node, w: f64) -> f64 {
         Node::Cards { items, .. } => rows(items.len(), 3) * (thumb_h(w) + 26.),
         Node::Actions(_) => thumb_h(w) + 5.,
         Node::Empty(..) => 110.,
+        Node::Cells { h, .. } => *h,
+        Node::Dots { fills, .. } => rows(fills.len(), 8) * 48. + 6.,
     }
 }
 fn thumb_h(w: f64) -> f64 { ((w - PAD as f64 * 2. - 10.) / 3. * 0.68).round() }
@@ -192,6 +221,13 @@ fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, window: &Window) {
 }
 
 // ---- 构件
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGAffineTransform { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 }
+unsafe impl objc2::Encode for CGAffineTransform {
+    const ENCODING: Encoding = Encoding::Struct("CGAffineTransform", &[f64::ENCODING, f64::ENCODING, f64::ENCODING, f64::ENCODING, f64::ENCODING, f64::ENCODING]);
+}
 
 #[repr(C)]
 struct CGColor { _private: [u8; 0] }
@@ -611,6 +647,90 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64) {
                         tap(content, frame, act.clone());
                     }
                 }
+                Node::Dots { fills, picked, act } => {
+                    let d = 34.;
+                    let step = (inner - d) / 7.;
+                    for (i, f) in fills.iter().enumerate() {
+                        let frame = rect(pad + step * (i % 8) as f64, y + 6. + (i / 8) as f64 * 48., d, d);
+                        let on = *picked == Some(i);
+                        let dot = if on { rect(frame.origin.x + 4., frame.origin.y + 4., d - 8., d - 8.) } else { frame };
+                        match f {
+                            Some(c) => { fill(content, dot, &Fill::Color(*c), dot.size.width / 2.); ring(content, frame, d / 2., if on { super::glass::ui_color(*c) } else { ui(c"separatorColor") }, 0., if on { 2. } else { 1. / 3. }); }
+                            None => {
+                                ring(content, dot, dot.size.width / 2., ui(c"separatorColor"), 0., 1.);
+                                let slash = plain(content, rect(dot.origin.x + dot.size.width / 2. - 0.75, dot.origin.y + 3., 1.5, dot.size.height - 6.));
+                                let _: () = msg_send![slash, setBackgroundColor: ui(c"systemRedColor")];
+                                let t = CGAffineTransform { a: 0.7071, b: 0.7071, c: -0.7071, d: 0.7071, tx: 0., ty: 0. };
+                                let _: () = msg_send![slash, setTransform: t];
+                                if on { ring(content, frame, d / 2., primary, 0., 2.); }
+                            }
+                        }
+                        tap(content, frame, format!("{act}{i}"));
+                    }
+                }
+                Node::Cells { cells, h, rule } => {
+                    let total: f64 = cells.iter().map(|c| c.span).sum::<f64>().max(1.);
+                    let gap = 8.;
+                    let unit = (inner - gap * (cells.len().max(1) - 1) as f64) / total;
+                    let ch = (h - 10.).min(52.);
+                    let mut x = pad;
+                    for cell in cells {
+                        let cw = unit * cell.span;
+                        let frame = rect(x, y + (h - ch) / 2., cw, ch);
+                        x += cw + gap;
+                        let accent = super::glass::ui_color(crate::theme::Theme::primary());
+                        if cell.tile {
+                            let base = plain(content, frame);
+                            let _: () = msg_send![base, setBackgroundColor: ui(c"quaternarySystemFillColor")];
+                            round(base, 12.);
+                        }
+                        // 选中：字和图标的一格是浅的主色底加一圈描边（Craft 的「正文」），只有图标的只铺浅底。
+                        if cell.on {
+                            let base = plain(content, frame);
+                            let tint: *mut AnyObject = msg_send![accent, colorWithAlphaComponent: 0.14f64];
+                            let _: () = msg_send![base, setBackgroundColor: tint];
+                            round(base, 12.);
+                            if matches!(cell.look, Look::Text(..)) { let edge: *mut AnyObject = msg_send![accent, colorWithAlphaComponent: 0.55f64]; ring(content, frame, 12., edge, 0., 1.5); }
+                        }
+                        let ink = if !cell.enabled { ui(c"tertiaryLabelColor") } else { primary };
+                        // 字的宽度估一下（中文一个字一个字号，西文约一半），图标和竖线跟着字居中。
+                        let width = |text: &str, size: f64| text.chars().map(|c| if c.is_ascii() { 0.56 } else { 1. }).sum::<f64>() * size;
+                        let mid = frame.origin.x + cw / 2.;
+                        match &cell.look {
+                            Look::Text(text, sym, size, weight) => match sym {
+                                Some(name) => {
+                                    let tw = width(text, *size).min(cw - 34.);
+                                    let left = mid - (tw + 26.) / 2.;
+                                    icon(content, rect(left, frame.origin.y, 20., ch), name, 15., if cell.enabled { secondary } else { ink });
+                                    label(content, rect(left + 26., frame.origin.y, tw + 4., ch), text, font(*size, *weight, ""), ink, 0);
+                                }
+                                None => { label(content, rect(frame.origin.x + 4., frame.origin.y, cw - 8., ch), text, font(*size, *weight, ""), ink, 1); }
+                            },
+                            Look::Symbol(name) => { icon(content, frame, name, 18., ink); }
+                            Look::Bar(text) => {
+                                let tw = width(text, 16.);
+                                let left = mid - (tw + 12.) / 2.;
+                                let bar = plain(content, rect(left, frame.origin.y + ch / 2. - 11., 2.5, 22.));
+                                let _: () = msg_send![bar, setBackgroundColor: ink];
+                                round(bar, 1.25);
+                                label(content, rect(left + 12., frame.origin.y, tw + 4., ch), text, font(16., 0., ""), ink, 0);
+                            }
+                            Look::Wheel(color) => {
+                                let side = 34.;
+                                wheel(content, rect(mid - side / 2., frame.origin.y + (ch - side) / 2., side, side), *color);
+                            }
+                            Look::Font(sample, name, design) => {
+                                label(content, rect(frame.origin.x + 4., frame.origin.y + 6., cw - 8., ch * 0.55), sample, font(22., 0.3, design), ink, 1);
+                                label(content, rect(frame.origin.x + 4., frame.origin.y + ch * 0.58, cw - 8., ch * 0.32), name, font(12., 0., ""), secondary, 1);
+                            }
+                        }
+                        if cell.enabled { tap(content, frame, cell.act.clone()); }
+                    }
+                    if *rule {
+                        let line = plain(content, rect(pad + 4., y + h - 0.5, inner - 8., 1. / 3.));
+                        let _: () = msg_send![line, setBackgroundColor: ui(c"separatorColor")];
+                    }
+                }
                 Node::Empty(name, text) => {
                     icon(content, rect(pad, y + 22., inner, 30.), name, 24., ui(c"tertiaryLabelColor"));
                     label(content, rect(pad, y + 58., inner, 20.), text, font(15., 0., ""), secondary, 1);
@@ -621,8 +741,35 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64) {
     }
 }
 
-/// 控件被点了：回到 GPUI，交给 `stylepanel::action`。
-fn send(act: String) { super::menu::dispatch(move |w, window, cx| super::stylepanel::action(&act, w, window, cx)); }
+/// 彩虹圈（锥形渐变的一圈），中间一颗当前的颜色。
+unsafe fn wheel(content: *mut AnyObject, frame: CGRect, color: Option<Hsla>) {
+    unsafe {
+        let ring_view = plain(content, frame);
+        let layer: *mut AnyObject = msg_send![AnyClass::get(c"CAGradientLayer").unwrap(), layer];
+        let _: () = msg_send![layer, setType: ns_string("conic")];
+        let colors: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
+        for hue in [0., 0.17, 0.33, 0.5, 0.67, 0.83, 1.] {
+            let c: *mut AnyObject = msg_send![AnyClass::get(c"UIColor").unwrap(), colorWithHue: hue as f64, saturation: 0.8f64, brightness: 0.95f64, alpha: 1f64];
+            let _: () = msg_send![colors, addObject: cg(c) as *mut AnyObject];
+        }
+        let _: () = msg_send![layer, setColors: colors];
+        let _: () = msg_send![layer, setStartPoint: CGPoint::new(0.5, 0.5)];
+        let _: () = msg_send![layer, setEndPoint: CGPoint::new(0.5, 0.)];
+        let _: () = msg_send![layer, setFrame: rect(0., 0., frame.size.width, frame.size.height)];
+        let host: *mut AnyObject = msg_send![ring_view, layer];
+        let _: () = msg_send![host, addSublayer: layer];
+        round(ring_view, frame.size.width / 2.);
+        let inset = 4.;
+        let core = rect(frame.origin.x + inset, frame.origin.y + inset, frame.size.width - inset * 2., frame.size.height - inset * 2.);
+        let center = fill(content, core, &Fill::Color(color.unwrap_or_else(crate::theme::Theme::bg_body)), core.size.width / 2.);
+        let _: *mut AnyObject = center;
+    }
+}
+
+/// 控件被点了：回到 GPUI。格式面板的动作都以 `fmt-` 开头，其余是样式面板的。
+fn send(act: String) {
+    super::menu::dispatch(move |w, window, cx| if act.starts_with("fmt-") { super::format::action(&act, w, window, cx) } else { super::stylepanel::action(&act, w, window, cx) });
+}
 
 unsafe fn ns_string(s: &str) -> *mut AnyObject {
     let c = std::ffi::CString::new(s).unwrap_or_default();

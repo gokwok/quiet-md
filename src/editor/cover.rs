@@ -292,7 +292,8 @@ impl Editor {
     /// The 添加图标 / 添加封面 row: shown on header hover.
     pub(super) fn header_entries(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let doc = &self.core.doc;
-        let nothing_to_add = self.markdown || (doc.icon.is_some() && doc.cover.is_some());
+        // An open page keeps only its title and blocks: no icon or cover to add.
+        let nothing_to_add = self.markdown || !self.outer.is_empty() || (doc.icon.is_some() && doc.cover.is_some());
         if self.read_only || (nothing_to_add && !self.info.hidden) {
             return None;
         }

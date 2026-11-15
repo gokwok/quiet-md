@@ -749,6 +749,10 @@ pub enum BlockKind {
     Column { ratio: f32 },
     /// 子页面列表 (`<sub-page-list/>`): lists the document's child pages.
     SubPageList,
+    /// 页面 / 卡片 (`<page>标题<p>…</p></page>`): a sub-page. Its text is the
+    /// page's title and its children are the page's content, always folded
+    /// away in the document around it; shown as a row or, with `card`, a card.
+    Page { card: bool },
     /// 倒计时 (an add-on block; `<countdown …/>` is ours).
     Countdown(Countdown),
     /// 视频或文件 (`<source>`, or `<figure view-type><source/></figure>`).
@@ -768,7 +772,13 @@ impl BlockKind {
                 | BlockKind::Ordered { .. }
                 | BlockKind::Todo { .. }
                 | BlockKind::Code { .. }
+                | BlockKind::Page { .. }
         )
+    }
+
+    /// 页面 / 卡片: a title line holding a sub-page (its children, kept folded).
+    pub fn is_page(&self) -> bool {
+        matches!(self, BlockKind::Page { .. })
     }
 
     /// Container blocks whose children are rendered inside them.
@@ -876,6 +886,9 @@ pub struct Block {
     /// Whole-block background (`background-color` on the block's tag), drawn
     /// behind the block and its children.
     pub bg: Option<ColorName>,
+    /// This block's own font (`font` on the block's tag): `serif`, `mono` or
+    /// `rounded`; None follows the document. Only blocks that `takes_bg`.
+    pub font: Option<String>,
     pub children: Vec<Block>,
     /// Collapsed (`folded="true"`): hides children, and for a heading its
     /// section too.
@@ -890,6 +903,7 @@ impl Block {
             text,
             align: Align::Left,
             bg: None,
+            font: None,
             children: vec![],
             folded: false,
         }

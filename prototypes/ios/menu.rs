@@ -17,12 +17,15 @@ use crate::app::Workspace;
 /// 子菜单（有子项时它自己不能点，系统就地展开）。
 #[derive(Clone, PartialEq, Default)]
 pub struct Item { pub id: &'static str, pub title: SharedString, pub symbol: &'static str, pub checked: bool, pub group: u8, pub danger: bool, pub kids: Vec<Item>,
+    /// 灰着、点不了（还没做的功能先占个位）。
+    pub disabled: bool,
     /// 标题下面一行小字（照 Craft「排序方式」下面写着当前的「手动」）。iOS 15 起才有。
     pub subtitle: Option<SharedString> }
 impl Item {
     pub fn new(id: &'static str, title: impl Into<SharedString>, symbol: &'static str, group: u8) -> Self { Item { id, title: title.into(), symbol, group, ..Default::default() } }
     pub fn checked(mut self, on: bool) -> Self { self.checked = on; self }
     pub fn danger(mut self) -> Self { self.danger = true; self }
+    pub fn disabled(mut self) -> Self { self.disabled = true; self }
     pub fn kids(mut self, kids: Vec<Item>) -> Self { self.kids = kids; self }
     pub fn sub(mut self, text: impl Into<SharedString>) -> Self { self.subtitle = Some(text.into()); self }
 }
@@ -147,8 +150,9 @@ unsafe fn element(item: &Item, wait: bool) -> *mut AnyObject {
         let action: *mut AnyObject = msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(&item.title), image: image, identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler];
         // 1 = UIMenuElementStateOn
         if item.checked { let _: () = msg_send![action, setState: 1isize]; }
-        // 2 = UIMenuElementAttributesDestructive
-        if item.danger { let _: () = msg_send![action, setAttributes: 2usize]; }
+        // 1 = UIMenuElementAttributesDisabled，2 = Destructive
+        let attributes = usize::from(item.disabled) | if item.danger { 2 } else { 0 };
+        if attributes != 0 { let _: () = msg_send![action, setAttributes: attributes]; }
         subtitle(action);
         action
     }
@@ -337,7 +341,7 @@ fn preview() -> *mut AnyObject {
 /// 菜单项被点了。这是系统的回调，GPUI 可能正忙着：排到它的主线程队列里，轮到时再进工作区。
 pub(super) fn chosen(id: &'static str) { dispatch(move |w, window, cx| super::menu_action(id, w, window, cx)); }
 /// 同上，带着任意一段要在工作区里做的事（原生面板的控件用）。
-pub(super) fn dispatch(run: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) {
+pub(crate) fn dispatch(run: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static) {
     let Some((app, window, workspace)) = TARGET.with(|t| t.borrow().clone()) else { return; };
     let executor = app.foreground_executor().clone();
     executor.spawn(async move {

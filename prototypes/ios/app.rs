@@ -32,6 +32,7 @@ pub mod search;
 pub mod toast;
 pub mod veil;
 pub mod stylepanel;
+pub mod format;
 
 pub fn run() {
     crate::apple_files::install();
@@ -170,9 +171,9 @@ thread_local! { static GESTURE: std::cell::Cell<Option<f32>> = const { std::cell
 thread_local! { static RESTORING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// 换页的过渡：进文档、进文件夹从右边滑入淡入；返回时旧页往右滑走（`shot`），这一页带视差回来；标签页之间只淡入。
 /// `folder`：文件夹页是哪一个、在第几层。
-pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>) -> AnyElement {
+pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>, sub_depth: i32) -> AnyElement {
     let key = match view {
-        View::Doc => PageKey { stack: 0, depth: 100, folder: 0 },
+        View::Doc => PageKey { stack: 0, depth: 100 + sub_depth, folder: 0 },
         View::Folder => PageKey { stack: 0, depth: 2 + folder.map_or(0, |f| f.1) as i32, folder: folder.map_or(0, |f| { use std::hash::{Hash, Hasher}; let mut h = std::hash::DefaultHasher::new(); f.0.hash(&mut h); h.finish() }) },
         View::Home => PageKey { stack: 0, depth: (home_page() != HomePage::Hub) as i32, folder: 0 },
         // 设置也是从首页（左上角的空间头像）点进去的一页，第二级再往里一层。
@@ -736,6 +737,8 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         "tab-trash" => if w.view != View::Trash { w.show_view(View::Trash, cx) },
         "trash-empty-all" => { w.trash_menu = None; w.confirm = Some(crate::app::Confirm::EmptyTrash); cx.notify(); }
         _ if id.starts_with("find-") && search::menu_action(id, w, cx) => {}
+        _ if search::set_mode(id) => { cx.notify(); }
+        _ if keybar::menu_action(id, w, window, cx) => {}
         // 设置子页的选项行（`general::choice`）。
         "pref-lang-zh" | "pref-lang-en" => { let en = id == "pref-lang-en"; if crate::settings::prefs().english != en { w.set_pref(|p| p.english = en, cx); } }
         _ if id.starts_with("theme-pick-") => {
@@ -771,7 +774,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 "doc-width-full" => w.set_page_width(PageWidth::Full, cx),
                 "doc-find" => w.find_in_doc(false, window, cx),
                 "doc-text-size" => { style::set_sizing(true); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
-                "doc-style" => { stylepanel::open(); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
+                "doc-style" => { format::close(); stylepanel::open(); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
                 "doc-move" => w.open_move(vec![cur], window, cx),
                 "doc-pin" => w.toggle_pin(&cur, cx),
                 "doc-star" => w.toggle_star(&cur, cx),
@@ -924,7 +927,13 @@ pub fn search_bar_with(label: impl Into<SharedString>, cx: &mut Context<Workspac
     div().id("home-search-bar").relative().flex_none().mx(px(16.)).mt(px(4.)).h(px(SEARCH_H)).px(px(14.)).flex().items_center().gap(px(8.))
         .rounded_full().bg(search_fill()).active(|s| s.bg(Theme::fill_pressed()))
         .child(crate::ui::icon("search", 18., Theme::text_caption()))
-        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(17.)).text_color(Theme::text_caption()).child(label))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(17.)).text_color(Theme::text_caption()).child(label))
+        // 右边的搜索方式（照 Craft，IMG_9193）：点它弹菜单，点条上别处才打开搜索（系统的按钮盖在这一块上，先接住手指）。
+        .child(div().relative().flex_none().h_full().pl(px(10.)).mr(px(-4.)).pr(px(4.)).flex().items_center().gap(px(3.))
+            .text_size(px(15.)).text_color(Theme::text_placeholder())
+            .child(search::mode_label())
+            .child(crate::ui::icon("chevron-down", 12., Theme::text_placeholder()))
+            .child(menu::button("search-mode", search::mode_items())))
         // 记下自己画在哪：点了以后搜索页的输入框从这儿滑上去。
         .child(canvas(|bounds, _, _| search::bar_at(bounds), |_, _, _, _| {}).absolute().inset_0())
         .on_click(cx.listener(|w, _, window, cx| { search::opened(); w.open_search(window, cx) }))
@@ -1001,11 +1010,26 @@ pub fn long_press_layer() -> impl IntoElement {
 }
 
 thread_local! { static DOC_FROM: std::cell::Cell<View> = const { std::cell::Cell::new(View::Home) }; }
+/// 文档里打开了几层页面（页面 / 卡片，没打开是 0）：往里一层从右边滑入，回外面一层往右滑走。
+pub fn sub_depth(w: &Workspace, cx: &App) -> i32 {
+    w.editor.as_ref().map_or(0, |e| e.read(cx).outer.len() as i32)
+}
+/// 打开着的那一页（页面 / 卡片）在外面那一层里的块。
+fn open_page(w: &Workspace, cx: &App) -> Option<fdl_core::model::BlockId> {
+    w.editor.as_ref().and_then(|e| e.read(cx).outer.last().map(|o| o.page))
+}
 /// 从别的页进文档时记下是哪一页（文档里点链接去另一篇不改）。
 pub fn entered_doc(from: View) { DOC_FROM.with(|f| f.set(from)); }
 /// 文档页的返回：回到进来的那一页。从文件夹进的回那个文件夹（滚动位置还在），文件夹没了就回主页；
 /// 从主页进的回主页，首页、「所有文档」「文件夹」哪一页由 `home_page` 记着。
-pub fn doc_back(w: &mut Workspace, cx: &mut Context<Workspace>) {
+/// 打开着页面（页面 / 卡片）时先回外面那一层。
+pub fn doc_back(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    // 先拍下这一页：回外面一层时它往右滑走，和回主页一样。
+    if open_page(w, cx).is_some() && let Some(ed) = w.editor.clone() {
+        shot::capture_page();
+        ed.update(cx, |e, cx| e.close_page(window, cx));
+        return cx.notify();
+    }
     shot::leaving(w.current.clone());
     let folder = DOC_FROM.with(|f| f.get()) == View::Folder && w.folder_current.as_ref().is_some_and(|id| w.entries.iter().any(|e| &e.id == id && e.meta.folder.is_some()));
     w.show_view(if folder { View::Folder } else { View::Home }, cx);
@@ -1013,7 +1037,7 @@ pub fn doc_back(w: &mut Workspace, cx: &mut Context<Workspace>) {
 
 /// 跟手返回取消后要回到哪一页。
 #[derive(Clone)]
-enum Restore { Doc, Folder(String), Home(HomePage), Settings, SettingsRoot, Trash }
+enum Restore { Doc(Option<fdl_core::model::BlockId>), Folder(String), Home(HomePage), Settings, SettingsRoot, Trash }
 thread_local! { static RESTORE: std::cell::RefCell<Option<Restore>> = const { std::cell::RefCell::new(None) }; }
 
 /// 左缘右滑：文档回进来的那一页，文件夹、回收站和设置回主页，设置的第二级回第一级，主页拉出抽屉。文档、文件夹、主页的子页、回收站和设置
@@ -1033,7 +1057,7 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
             // 「选择」时跟手返回和左上角的返回一样：先退出选择，再回上一页。
             if w.batch.is_some() { w.batch = None; w.row_menu = None; }
             let restore = match w.view {
-                View::Doc => Restore::Doc,
+                View::Doc => Restore::Doc(open_page(w, cx)),
                 View::Folder => match w.folder_current.clone() { Some(id) => Restore::Folder(id), None => return },
                 View::Home if home_page() != HomePage::Hub => Restore::Home(home_page()),
                 View::Settings if settings_detail() => Restore::Settings,
@@ -1075,7 +1099,7 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
     if w.search_open { return w.close_search(window, cx); }
     w.batch = None;
     match w.view {
-        View::Doc => doc_back(w, cx),
+        View::Doc => doc_back(w, window, cx),
         View::Folder | View::Trash => w.show_view(View::Home, cx),
         View::Home if home_page() != HomePage::Hub => { set_home_page(HomePage::Hub); cx.notify(); }
         View::Settings if settings_detail() => { set_settings_detail(false); cx.notify(); }
@@ -1093,7 +1117,7 @@ fn pop(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
         },
         View::Home => { set_home_page(HomePage::Hub); cx.notify(); }
         View::Settings if settings_detail() => { set_settings_detail(false); cx.notify(); }
-        View::Doc => doc_back(w, cx),
+        View::Doc => doc_back(w, window, cx),
         _ => w.show_view(View::Home, cx),
     }
 }
@@ -1104,7 +1128,9 @@ fn restore(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) 
     shot::park_page(8);
     RESTORING.with(|r| r.set(true));
     match to {
-        Restore::Doc => w.show_view(View::Doc, cx),
+        // 从页面回外面一层又取消了：重新打开那一页。
+        Restore::Doc(Some(page)) => if let Some(ed) = w.editor.clone() { ed.update(cx, |e, cx| e.open_page(page, window, cx)); },
+        Restore::Doc(None) => w.show_view(View::Doc, cx),
         Restore::Folder(id) => { w.open(&id, window, cx); }
         Restore::Home(page) => { set_home_page(page); cx.notify(); }
         Restore::Settings => { set_settings_detail(true); cx.notify(); }
