@@ -5,6 +5,7 @@ use gpui::{prelude::FluentBuilder as _, *};
 use crate::app::{View, Workspace};
 use crate::theme::Theme;
 
+pub mod about;
 pub mod alert;
 pub mod appicon;
 pub mod card;

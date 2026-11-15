@@ -95,7 +95,7 @@ pub fn spaces_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
         div().id(("settings-space", i)).w_full().h(px(56.)).px(px(16.)).flex().items_center().gap(px(14.)).rounded(px(10.)).active(|d| d.bg(Theme::fill_pressed()))
             .child(space_icon(s, 30.))
             .child(div().flex_1().min_w_0().flex().flex_col()
-                .child(div().truncate().text_size(px(17.)).text_color(if s.available { Theme::text() } else { Theme::text_disabled() }).child(name(s)))
+                .child(div().truncate().text_size(px(17.)).text_color(if s.available { crate::settings::row_ink() } else { Theme::text_disabled() }).child(name(s)))
                 .child(div().text_size(px(13.)).text_color(Theme::text_caption()).child(if s.available { place } else { tr("找不到文件夹", "Missing") })))
             .when(on, |d| d.child(crate::ui::icon("check", 18., Theme::primary())))
             .when(s.available && !on, |d| d.on_click(move |_, _, cx| { let id = id.clone(); cx.defer(move |cx| { space::switch(id, cx); }); }))

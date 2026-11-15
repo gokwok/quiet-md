@@ -54,6 +54,9 @@ fn thumb(ground: u32, s: f32) -> Div {
         .child(bar(380., 236., 76., INK)).child(bar(508., 372., 52., LINE)).child(bar(600., 232., 52., LINE))
 }
 
+/// 现在用着的那张图标（关于页顶上）。
+pub fn current_icon(s: f32) -> Div { thumb(ICONS[current()].3, s) }
+
 /// 三张小样排一行，选中的那张外面一圈强调色。
 pub fn picker(cx: &mut Context<Workspace>) -> Div {
     let at = current();
