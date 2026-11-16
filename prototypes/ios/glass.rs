@@ -19,7 +19,7 @@ pub fn supported() -> bool { AnyClass::get(c"UIGlassEffect").is_some() && std::e
 pub type Icon = (&'static str, f32, Hsla);
 
 #[derive(Clone, PartialEq)]
-struct Look { frame: Bounds<Pixels>, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, radius: Option<f32>, bare: bool, actions: Vec<&'static str>, dark: bool }
+struct Look { frame: Bounds<Pixels>, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, radius: Option<f32>, bare: bool, stacked: bool, actions: Vec<&'static str>, dark: bool }
 struct Pane { key: &'static str, view: *mut AnyObject, image: *mut AnyObject, text: *mut AnyObject, tabs: Vec<*mut AnyObject>, hits: Vec<*mut AnyObject>, pill: *mut AnyObject, look: Option<Look>, seen: bool, shown: bool }
 
 thread_local! { static PANES: RefCell<Vec<Pane>> = const { RefCell::new(Vec::new()) }; }
@@ -57,30 +57,35 @@ impl Pane {
 /// 放在 GPUI 元素里的占位：把这个元素的位置交给同名的玻璃。胶囊形，圆角跟着短边走。
 /// 只有图标时图标居中；带文字时图标靠左、文字跟在后面（搜索条）。
 pub fn pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 圆角矩形的一块玻璃：自己拼的弹出菜单的底。首页的菜单已改用系统菜单（`menu.rs`），这两个留给系统菜单放不下的内容。
 #[allow(dead_code)]
 pub fn panel(key: &'static str, radius: f32) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: vec![], picked: None, radius: Some(radius), bare: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: vec![], picked: None, radius: Some(radius), bare: false, stacked: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 /// 玻璃菜单里的一行：自己没有玻璃，只有图标和字，叠在 `panel` 上面。
 #[allow(dead_code)]
 pub fn row(key: &'static str, icon: Icon, label: (SharedString, Hsla)) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+}
+
+/// 块动作栏的一格：原生图标在上、文字在下，点击仍交给下面的 GPUI。
+pub fn tile(key: &'static str, icon: Icon, label: SharedString) -> impl IntoElement {
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: Some(icon.2.opacity(0.06)), icon: Some(icon), label: Some((label.clone(), icon.2)), tabs: vec![], picked: None, radius: Some(16.), bare: true, stacked: true, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 自己接触摸的玻璃圆钮：按下时的拉伸和高光由系统给，点了把 `action` 交给 `ios::menu_action`。
 /// 这块地方的点击不再经过 GPUI。
 pub fn tap_pane(key: &'static str, icon: Icon, action: &'static str) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: None, tabs: vec![], picked: None, radius: None, bare: false, actions: vec![action], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: None, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![action], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 标签栏：一条玻璃上等分排开几个图标，`picked` 是当前那一格和垫在它下面的底色；`actions` 是各格点了交出去的标识
 /// （给了就由玻璃自己接触摸，同 `tap_pane`）。
 pub fn tab_pane(key: &'static str, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, actions: Vec<&'static str>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, actions: actions.clone(), dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, stacked: false, actions: actions.clone(), dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 按下时玻璃轻轻缩一下再弹回：GPUI 画不到玻璃上面，按压的反馈只能由原生视图给。
@@ -170,6 +175,11 @@ fn place(key: &'static str, look: Look, window: &Window) {
             // 没有自己的玻璃，但要压在作底的那块上面。
             let _: () = msg_send![pane.view, setEffect: std::ptr::null_mut::<AnyObject>()];
             let _: () = msg_send![parent, bringSubviewToFront: pane.view];
+            if look.stacked {
+                let _: () = msg_send![pane.view, setBackgroundColor: ui_color(look.tint.unwrap_or_else(gpui::transparent_black))];
+                let layer: *mut AnyObject = msg_send![pane.view, layer];
+                let _: () = msg_send![layer, setCornerRadius: 16f64];
+            }
         } else if old.as_ref().map(|o| o.tint) != Some(look.tint) {
             let effect: *mut AnyObject = msg_send![AnyClass::get(c"UIGlassEffect").unwrap(), effectWithStyle: 0isize];
             let _: () = msg_send![effect, setInteractive: !look.actions.is_empty()];
@@ -180,21 +190,24 @@ fn place(key: &'static str, look: Look, window: &Window) {
         let mut left = 14.;
         if let Some((name, size, color)) = look.icon {
             if old.as_ref().and_then(|o| o.icon).map(|i| (i.0, i.1)) != Some((name, size)) {
-                let _: () = msg_send![pane.image, setImage: icon_image(name, size)];
+                let _: () = msg_send![pane.image, setImage: icon_image(&if look.stacked { format!("editor-icons/{name}") } else { name.to_string() }, size)];
             }
             let _: () = msg_send![pane.image, setTintColor: ui_color(color)];
             let s = f64::from(size);
-            let ix = if look.label.is_some() { left } else { (w - s) / 2. };
-            let _: () = msg_send![pane.image, setFrame: CGRect::new(CGPoint::new(ix, (h - s) / 2.), CGSize::new(s, s))];
+            let ix = if look.label.is_some() && !look.stacked { left } else { (w - s) / 2. };
+            let _: () = msg_send![pane.image, setFrame: CGRect::new(CGPoint::new(ix, if look.stacked { 8. } else { (h - s) / 2. }), CGSize::new(s, s))];
             left += s + 8.;
         }
         let _: () = msg_send![pane.image, setHidden: look.icon.is_none()];
         if let Some((label, color)) = &look.label {
+            let font: *mut AnyObject = msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: if look.stacked { 11f64 } else { 16f64 }];
+            let _: () = msg_send![pane.text, setFont: font];
             let _: () = msg_send![pane.text, setText: ns_string(label)];
             let _: () = msg_send![pane.text, setTextColor: ui_color(*color)];
             // 只有文字的按钮，字居中（1 = NSTextAlignmentCenter）。
-            let _: () = msg_send![pane.text, setTextAlignment: if look.icon.is_none() { 1isize } else { 0isize }];
-            let _: () = msg_send![pane.text, setFrame: CGRect::new(CGPoint::new(left, 0.), CGSize::new((w - left - 14.).max(0.), h))];
+            let _: () = msg_send![pane.text, setTextAlignment: if look.icon.is_none() || look.stacked { 1isize } else { 0isize }];
+            let frame = if look.stacked { CGRect::new(CGPoint::new(2., h - 23.), CGSize::new((w - 4.).max(0.), 16.)) } else { CGRect::new(CGPoint::new(left, 0.), CGSize::new((w - left - 14.).max(0.), h)) };
+            let _: () = msg_send![pane.text, setFrame: frame];
         }
         let _: () = msg_send![pane.text, setHidden: look.label.is_none()];
         // 标签栏的图标各占一格，居中；选中那格下面垫一块胶囊。

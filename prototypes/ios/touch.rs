@@ -279,7 +279,7 @@ impl Editor {
 }
 
 /// 块选中。桌面靠手柄菜单和 Shift 点击；手机上选中整块后底部升起一条矮的动作栏，改类型再点「格式」展开块菜单，
-/// 每个块右边有一个圆圈，点它把这一块加进选区或拿出来（照 Craft，可以隔着选：`Core::toggle_pick`）。
+/// 选中块右边有一颗圆点，点它取消选择，左右横滑切换选择（照 Craft，可以隔着选：`Core::toggle_pick`）。
 impl Editor {
     fn block_bar_on(&self) -> bool {
         self.compact() && self.core.in_block_mode() && self.slash.is_none() && !self.block_drag.as_ref().is_some_and(|d| d.started) && !crate::ios::format::is_open()
@@ -291,12 +291,14 @@ impl Editor {
         let ids = self.core.block_sel_ids();
         let one = (ids.len() == 1).then(|| ids[0]);
         let tr = crate::settings::tr;
+        let glass = crate::ios::glass::supported();
         let item = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla| {
-            div().id(id).flex_1().min_w_0().h(px(52.)).flex().flex_col().items_center().justify_center().gap(px(3.)).rounded(px(12.))
+            div().id(id).flex_1().min_w_0().h(px(58.)).flex().flex_col().items_center().justify_center().gap(px(3.)).rounded(px(16.)).relative()
+                .when(!glass, |d| d.bg(tint.opacity(0.06)))
                 .active(|s| s.bg(Theme::fill_pressed()))
-                .child(icon(ic, 20., tint))
-                .child(div().text_size(px(11.)).line_height(px(14.)).text_color(tint).whitespace_nowrap().child(label))
-                .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); })
+                .when(glass, |d| d.child(crate::ios::glass::tile(id, (ic, 22., tint), label.into())))
+                .when(!glass, |d| d.child(icon(ic, 22., tint)).child(div().text_size(px(11.)).line_height(px(14.)).text_color(tint).whitespace_nowrap().child(label)))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| { cx.stop_propagation(); window.prevent_default(); if glass { crate::ios::glass::pulse(id); } })
         };
         let open = |sub: Option<BlockSub>| cx.listener(move |e: &mut Editor, _: &ClickEvent, _, cx| {
             let Some(block) = e.core.block_sel_ids().first().copied() else { return };
@@ -313,7 +315,7 @@ impl Editor {
             e.changed(window, cx);
             crate::ios::blocks_removed(n, copy);
         });
-        let bar = menu().map(crate::ios::sheet_plane).id("block-bar").occlude().w(crate::ios::menu_w(0.)).p(px(6.)).flex().items_center().gap(px(2.))
+        let bar = div().when(!glass, |d| d.bg(crate::theme::raised(Theme::bg_body())).shadow(crate::theme::shadow_menu())).rounded(px(24.)).relative().when(glass, |d| d.child(crate::ios::glass::panel("block-bar-glass", 24.))).id("block-bar").occlude().w(crate::ios::menu_w(0.)).p(px(6.)).flex().items_center().gap(px(4.))
             .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); })
             .when(one.is_some(), |d| d
                 // 「格式」：和键盘上方的「格式」是同一块面板（`crate::ios::format`）。
@@ -325,7 +327,7 @@ impl Editor {
         Some(rise_at("sheet-block-bar", self.rel(crate::ios::sheet_point()), bar))
     }
 
-    /// 选择圆圈：块选中时每个块第一行的右边一个，选中的实心。
+    /// 只在选中块右侧显示实心主色圆点；未选中块不画标记、不占点击区域。
     pub(super) fn block_circles(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if !self.block_bar_on() || self.menu.is_some() { return vec![]; }
         let picked: std::collections::HashSet<BlockId> = self.core.block_sel_ids().into_iter().collect();
@@ -338,23 +340,21 @@ impl Editor {
         // 和已有的圈挤在一起的也不给（引用、高亮块里的段落和容器自己的那一个，留容器的）。
         let mut ys = vec![];
         for id in vis.iter().copied() {
+            if !on(id) { continue; }
             if matches!(self.core.kind_of(id), None | Some(BlockKind::Grid | BlockKind::Column { .. })) || self.core.cell_of(id).is_some() { continue; }
             let Some(y) = self.mark_y(id) else { continue };
             // 横着滑的那一行的圈跟着它一起挪。
             let origin = point(view.right() - px(MARK_X) + px(self.swipe_offset(id).unwrap_or(0.)), y);
             if ys.iter().any(|o: &Pixels| (*o - y).abs() < px(22.)) { continue; }
             ys.push(y);
-            let on = on(id);
-            let dot = div().size(px(18.)).rounded_full().flex().items_center().justify_center()
-                .when(on, |d| d.bg(Theme::primary()).child(icon("check", 12., Theme::bg_body())))
-                .when(!on, |d| d.border_2().border_color(Theme::text_disabled()));
-            let hit = div().id(("block-circle", id.0)).occlude().size(px(GRIP)).flex().items_center().justify_center().child(dot)
+            let dot = div().size(px(14.)).rounded_full().bg(Theme::primary());
+            let hit = div().id(("block-circle", id.0)).occlude().w(px(44.)).h(px(44.)).flex().items_center().justify_center().child(dot)
                 .on_mouse_down(MouseButton::Left, cx.listener(move |ed: &mut Editor, _: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     window.prevent_default();
                     ed.toggle_block(id, window, cx);
                 }));
-            out.push(at(self.rel(origin), Anchor::TopLeft, hit));
+            out.push(at(self.rel(origin - point(px(4.), px(4.))), Anchor::TopLeft, hit.with_animation(SharedString::from(format!("pick-dot-{}", id.0)), Animation::new(std::time::Duration::from_millis(180)), |d, t| d.opacity(0.5 + 0.5 * t))));
         }
         out
     }
@@ -376,9 +376,15 @@ impl Editor {
     /// 中间的块不动（照 Craft 的任意多选）；拿掉最后一块时退出块选中。
     pub(super) fn toggle_block(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        window.refresh();
         if !self.core.in_block_mode() { return self.open_block_menu(id, false, window, cx) }
         self.core.toggle_pick(id);
         cx.notify();
+    }
+
+    pub fn finish_block_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.core.clear_block_sel(); self.menu = None; self.swipe = None; self.touch_menu = false;
+        window.refresh(); cx.notify();
     }
 
     /// 这一行现在横向挪开了多远（没在滑、已经弹回去了是 None）。

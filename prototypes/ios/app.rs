@@ -254,10 +254,11 @@ thread_local! { static EDITING: std::cell::Cell<bool> = const { std::cell::Cell:
 pub fn set_editing(on: bool) { EDITING.with(|e| e.set(on)); }
 pub fn editing() -> bool { EDITING.with(|e| e.get()) }
 
-/// 打字时文档页右上角的「完成」：一块主色的玻璃，点了收起键盘。
+/// 文档页右上角的「完成」：收起键盘或退出块选择。
 pub fn done_button() -> Stateful<Div> {
     div().id("doc-done").flex_none().size(px(44.)).rounded_full().occlude()
-        .child(glass::pane("doc-done", Some(Theme::primary()), Some(("check", 20., gpui::white())), None))
+        .when(glass::supported(), |d| d.child(glass::pane("doc-done", Some(Theme::primary()), Some(("check", 20., gpui::white())), None)))
+        .when(!glass::supported(), |d| d.bg(Theme::primary()).flex().items_center().justify_center().child(crate::ui::icon("check", 20., gpui::white())))
         .on_mouse_down(MouseButton::Left, |_, _, _| glass::pulse("doc-done"))
 }
 /// 底部面板贴底居中的那个点（窗口坐标）。
