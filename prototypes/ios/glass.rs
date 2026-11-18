@@ -79,9 +79,9 @@ pub fn row(key: &'static str, icon: Icon, label: (SharedString, Hsla)) -> impl I
     canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
-/// 块动作栏的一格：原生图标在上、文字在下，点击仍交给下面的 GPUI。
-pub fn tile(key: &'static str, icon: Icon, label: SharedString) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: Some(icon.2.opacity(0.06)), icon: Some(icon), label: Some((label.clone(), icon.2)), tabs: vec![], picked: None, radius: Some(16.), bare: true, stacked: true, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+/// 块动作栏的一格：原生图标在上、文字在下，点击仍交给下面的 GPUI。`fill` 是垫底的淡色（只有「删除」垫）。
+pub fn tile(key: &'static str, icon: Icon, label: SharedString, fill: Option<Hsla>) -> impl IntoElement {
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: fill, icon: Some(icon), label: Some((label.clone(), icon.2)), tabs: vec![], picked: None, radius: Some(16.), bare: true, stacked: true, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 自己接触摸的玻璃圆钮：按下时的拉伸和高光由系统给，点了把 `action` 交给 `ios::menu_action`。

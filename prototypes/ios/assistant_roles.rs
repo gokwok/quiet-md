@@ -533,6 +533,21 @@ pub(crate) fn avatar(role: &Role, size: f32) -> AnyElement {
     }
 }
 
+/// 角色头像的图片文件，给系统菜单用（`menu::Item::picture`）：自带头像、换上的照片，没换的是光球。按头像缓存。
+pub(crate) fn picture(role: &Role) -> Option<(SharedString, std::sync::Arc<[u8]>)> {
+    thread_local! { static PICTURES: RefCell<Vec<(SharedString, std::sync::Arc<[u8]>)>> = const { RefCell::new(Vec::new()) }; }
+    let key: SharedString = role.avatar.clone().unwrap_or_else(|| format!("orb-{}", role.voice_id)).into();
+    if let Some(found) = PICTURES.with(|p| p.borrow().iter().find(|(k, _)| *k == key).cloned()) { return Some(found); }
+    let bytes: Vec<u8> = match role.avatar.as_deref() {
+        Some(a) if let Some(n) = builtin(a) => BUILTIN[n - 1].to_vec(),
+        Some(a) => std::fs::read(avatar_path(a)?).ok()?,
+        None => orb_png(&role.voice_id)?,
+    };
+    let found = (key, std::sync::Arc::<[u8]>::from(bytes));
+    PICTURES.with(|p| p.borrow_mut().push(found.clone()));
+    Some(found)
+}
+
 fn open_avatars(w: &mut Workspace, cx: &mut Context<Workspace>) {
     super::super::glass::haptic();
     w.open_settings(Page::AssistantAvatar, cx);

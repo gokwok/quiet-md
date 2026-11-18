@@ -422,21 +422,24 @@ impl Editor {
         self.compact() && self.core.in_block_mode() && self.slash.is_none() && !self.block_drag.as_ref().is_some_and(|d| d.started) && !crate::ios::format::is_open()
     }
 
-    /// 块动作栏：格式 / 添加 / 剪切 / 复制 / 删除。选了多块时只留对多块有意义的后三项。
+    /// 块动作栏（照 Craft）：一条玻璃，一排动作（图标在上、小字在下，不垫底色），「删除」在最右，垫一层淡红。
+    /// 动作是 格式 / 添加 / 配音 / 剪切 / 复制，选了多块时只留对多块有意义的几项；最多六格，一行放得下。
     pub(super) fn block_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.block_bar_on() || self.menu.is_some() { return None; }
         let ids = self.core.block_sel_ids();
         let one = (ids.len() == 1).then(|| ids[0]);
         let tr = crate::settings::tr;
         let glass = crate::ios::glass::supported();
-        let item = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla| {
+        // 玻璃上图标和字是原生的（GPUI 画的会被玻璃盖住）；只有「删除」垫底色。
+        let tile = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla, fill: bool| {
             div().id(id).flex_1().min_w_0().h(px(58.)).flex().flex_col().items_center().justify_center().gap(px(3.)).rounded(px(16.)).relative()
-                .when(!glass, |d| d.bg(tint.opacity(0.06)))
+                .when(!glass && fill, |d| d.bg(tint.opacity(0.08)))
                 .active(|s| s.bg(Theme::fill_pressed()))
-                .when(glass, |d| d.child(crate::ios::glass::tile(id, (ic, 22., tint), label.into())))
+                .when(glass, |d| d.child(crate::ios::glass::tile(id, (ic, 22., tint), label.into(), fill.then(|| tint.opacity(0.08)))))
                 .when(!glass, |d| d.child(icon(ic, 22., tint)).child(div().text_size(px(11.)).line_height(px(14.)).text_color(tint).whitespace_nowrap().child(label)))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| { cx.stop_propagation(); window.prevent_default(); if glass { crate::ios::glass::pulse(id); } })
         };
+        let item = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla| tile(id, ic, label, tint, false);
         let open = |sub: Option<BlockSub>| cx.listener(move |e: &mut Editor, _: &ClickEvent, _, cx| {
             let Some(block) = e.core.block_sel_ids().first().copied() else { return };
             e.menu = Some(Menu::Block { block, sub });
@@ -473,9 +476,16 @@ impl Editor {
                 // 「格式」：和键盘上方的「格式」是同一块面板（`crate::ios::format`）。
                 .child(item("bb-format", "type", tr("格式", "Format"), Theme::text()).on_click(|_, _, _| crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open(w, window, cx)))))
             .when(one.is_some(), |d| d.child(item("bb-add", "square-plus", tr("添加", "Add"), Theme::text()).on_click(open(Some(BlockSub::Add(usize::MAX))))))
+            // 「配音」：和文字选区编辑菜单里的同一个入口（同样的角色、同样的结果），这里配的是选中的整块；块里有对话时还能只配对话。
+            .child({
+                let roles = crate::ios::voice::bar_items(self.core.has_dialogue(&ids));
+                let voice = item("bb-voice", "volume-2", tr("配音", "Voice"), Theme::text());
+                if roles.is_empty() { voice.on_click(cx.listener(|ed: &mut Editor, _, w, cx| crate::ios::voice::start_blocks(ed, crate::ios::voice::bar_pick(), w, cx))) }
+                else { voice.child(crate::ios::menu::button("bb-voice-menu", roles)) }
+            })
             .child(item("bb-cut", "scissors", tr("剪切", "Cut"), Theme::text()).on_click(act(true, true)))
             .child(item("bb-copy", "copy", tr("复制", "Copy"), Theme::text()).on_click(act(false, true)))
-            .child(item("bb-del", "trash-2", tr("删除", "Delete"), Theme::danger()).on_click(act(true, false)));
+            .child(tile("bb-del", "trash-2", tr("删除", "Delete"), Theme::danger(), true).on_click(act(true, false)));
         Some(rise_at("sheet-block-bar", self.rel(crate::ios::sheet_point()), bar))
     }
 

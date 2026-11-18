@@ -2423,6 +2423,36 @@ impl Core {
         true
     }
 
+    /// 选中的几块整块配音：这几块和它们里面的块（容器里的段落）的文字都带上标记，没选的块不算。
+    /// `dialogue`：只标引号里的对话（`dialogue`），引号本身和旁白不算。
+    pub fn set_voice_blocks(&mut self, clip: &str, ids: &[BlockId], dialogue: bool) -> bool {
+        let targets = self.voice_targets(ids, dialogue);
+        if targets.is_empty() {
+            return false;
+        }
+        self.checkpoint(EditKind::Other);
+        for (id, r) in targets {
+            self.text_mut(id).unwrap().update_marks(r, |m| m.voice = Some(clip.to_string()));
+        }
+        true
+    }
+
+    /// 选中的几块里有没有引号里的对话（有才给「仅对话」）。
+    pub fn has_dialogue(&self, ids: &[BlockId]) -> bool { !self.voice_targets(ids, true).is_empty() }
+
+    fn voice_targets(&self, ids: &[BlockId], dialogue: bool) -> Vec<(BlockId, Range<usize>)> {
+        let picked: HashSet<BlockId> = ids.iter().copied().collect();
+        let mut inside: HashSet<BlockId> = HashSet::default();
+        let mut targets = vec![];
+        self.doc.for_each_block(|b| {
+            if !picked.contains(&b.id) && !self.parent_of(b.id).is_some_and(|p| inside.contains(&p.id)) { return; }
+            inside.insert(b.id);
+            if !b.kind.has_text() || b.text.text.is_empty() || self.is_code(b.id) { return; }
+            if dialogue { targets.extend(self::dialogue(&b.text.text).into_iter().map(|r| (b.id, r))); } else { targets.push((b.id, 0..b.text.text.len())); }
+        });
+        targets
+    }
+
     /// 去掉一段配音（文字留着）。
     pub fn clear_voice(&mut self, clip: &str) {
         let parts = self.doc.voiced(clip);
@@ -3586,6 +3616,32 @@ fn roman(mut n: u32) -> String {
     s
 }
 
+/// 一段文字里引号里的对话（不含引号本身），按出现的顺序。成对的「」『』“”和英文双引号，只看最外层；没合上的不算。
+/// 引号也用来标词语（任何一句「被神灵听见」，落在…），所以要像说出来的话才算：里面以标点收尾（。！？，…），
+/// 或者引号在段首、冒号后面。
+pub fn dialogue(text: &str) -> Vec<Range<usize>> {
+    const PAIRS: [(char, char); 4] = [('「', '」'), ('『', '』'), ('“', '”'), ('"', '"')];
+    const ENDS: [char; 16] = ['。', '！', '？', '!', '?', '…', '，', ',', '、', '.', '~', '～', '—', '；', ';', '♪'];
+    let mut out = vec![];
+    // 开着的引号：哪一对、引号在哪、里面从哪开始、同一种套了几层。
+    let mut open: Option<((char, char), usize, usize, usize)> = None;
+    for (i, c) in text.char_indices() {
+        match &mut open {
+            None => if let Some(&pair) = PAIRS.iter().find(|p| p.0 == c) { open = Some((pair, i, i + c.len_utf8(), 1)); },
+            Some((pair, at, from, depth)) => {
+                if c == pair.1 { *depth -= 1; } else if c == pair.0 { *depth += 1; }
+                if *depth > 0 { continue; }
+                let inner = &text[*from..i];
+                let lead = text[..*at].trim_end();
+                let spoken = inner.trim_end().chars().last().is_some_and(|l| ENDS.contains(&l)) || lead.is_empty() || lead.ends_with(['：', ':']);
+                if spoken && !inner.trim().is_empty() { out.push(*from..i); }
+                open = None;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3600,6 +3656,41 @@ mod tests {
 
     fn id(c: &Core, n: usize) -> BlockId {
         c.units()[n].id
+    }
+
+    #[test]
+    fn voice_blocks_marks_only_the_picked_blocks() {
+        let mut c = doc("<title>t</title><p>甲</p><p>乙</p><blockquote><p>丙</p></blockquote>");
+        let (a, quote) = (id(&c, 1), c.doc.blocks[2].id);
+        assert!(c.set_voice_blocks("v", &[a, quote], false));
+        assert_eq!(xml(&c), "<title>t</title>\n<p><span voice=\"v\">甲</span></p>\n<p>乙</p>\n<blockquote>\n  <p><span voice=\"v\">丙</span></p>\n</blockquote>\n");
+        assert_eq!(c.doc.voice_text("v"), "甲\n丙");
+        c.undo();
+        assert!(c.doc.voiced("v").is_empty());
+    }
+
+    #[test]
+    fn dialogue_finds_spoken_quotes_not_quoted_words() {
+        let t = |s: &str| super::dialogue(s).into_iter().map(|r| s[r].to_owned()).collect::<Vec<_>>();
+        assert_eq!(t("「书塔记录大人物的事。」巴特摆了摆手，「不过您能来，『神灵』也许听见了。」"), ["书塔记录大人物的事。", "不过您能来，『神灵』也许听见了。"]);
+        assert_eq!(t("她不喜欢这类说法。任何一句「被神灵听见」，都显得格外沉重。"), Vec::<String>::new());
+        assert_eq!(t("「嗯」"), ["嗯"]);
+        assert_eq!(t("他说：「走吧」"), ["走吧"]);
+        assert_eq!(t("“Hello,” he said. \"Come in.\" She waved."), ["Hello,", "Come in."]);
+        assert_eq!(t("「没合上的引号。"), Vec::<String>::new());
+        assert_eq!(t("「」「。」"), ["。"]);
+    }
+
+    #[test]
+    fn voice_blocks_can_take_only_the_dialogue() {
+        let mut c = doc("<title>t</title><p>「走吧。」他说，「天要黑了。」</p><p>没有对话。</p>");
+        let (a, b) = (id(&c, 1), id(&c, 2));
+        assert!(c.has_dialogue(&[a, b]));
+        assert!(!c.has_dialogue(&[b]));
+        assert!(!c.set_voice_blocks("v", &[b], true));
+        assert!(c.set_voice_blocks("v", &[a, b], true));
+        assert_eq!(c.doc.voice_text("v"), "走吧。 天要黑了。");
+        assert_eq!(c.doc.voiced("v").len(), 2);
     }
 
     #[test]

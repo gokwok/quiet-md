@@ -22,6 +22,12 @@ use super::{assistant::{self, roles::Role}, menu};
 pub const PICK: &str = "edit-voice-";
 const PICKS: [&str; 12] = ["edit-voice-0", "edit-voice-1", "edit-voice-2", "edit-voice-3", "edit-voice-4", "edit-voice-5",
     "edit-voice-6", "edit-voice-7", "edit-voice-8", "edit-voice-9", "edit-voice-10", "edit-voice-11"];
+/// 选中块底部工具条「配音」菜单里的角色，和 `PICKS` 一一对应。
+const BAR: [&str; 12] = ["voice-bar-0", "voice-bar-1", "voice-bar-2", "voice-bar-3", "voice-bar-4", "voice-bar-5",
+    "voice-bar-6", "voice-bar-7", "voice-bar-8", "voice-bar-9", "voice-bar-10", "voice-bar-11"];
+/// 同一个菜单里的配音范围：整段、仅对话。
+const WHOLE: &str = "voice-bar-whole";
+const DIALOGUE: &str = "voice-bar-dialogue";
 /// 一行配音右边「…」菜单的按钮和两项，按 `slot` 编号。
 const MORE: [&str; 8] = ["voice-more-0", "voice-more-1", "voice-more-2", "voice-more-3", "voice-more-4", "voice-more-5", "voice-more-6", "voice-more-7"];
 const REDO: [&str; 8] = ["voice-redo-0", "voice-redo-1", "voice-redo-2", "voice-redo-3", "voice-redo-4", "voice-redo-5", "voice-redo-6", "voice-redo-7"];
@@ -129,15 +135,43 @@ pub fn menu_item() -> Option<super::editmenu::Item> {
 
 fn toast(text: &'static str) { menu::dispatch(move |w, _, cx| w.show_toast_kind(ui::ToastKind::Error, text, cx)); }
 
-/// 选了角色：给选区带上新的配音标识，开始生成。
-pub fn start(ed: &mut Editor, id: &str, window: &mut Window, cx: &mut Context<Editor>) {
+/// 选中块底部工具条里的「配音」：和编辑菜单里同一份角色、同样的顺序，带头像。几个角色时是菜单，一个时点了直接配（`bar_pick`）。
+/// 选中的块里有引号里的对话时，角色上面多一组二选一：「整段」配整块，「仅对话」只配引号里的话。点了菜单不收起、勾直接变，
+/// 记住到下次。菜单从底部工具条往上弹，系统把离手指最近的放在最下面（项倒着排），所以这里「仅对话」写在「整段」前面。
+pub fn bar_items(dialogue: bool) -> Vec<menu::Item> {
+    let roles = roles();
+    if roles.is_empty() || roles.len() < 2 && !dialogue { return vec![]; }
+    let mut items: Vec<menu::Item> = roles.iter().zip(BAR).map(|(r, id)| menu::Item::new(id, r.name().to_owned(), "", 0).picture(assistant::roles::picture(r))).collect();
+    if dialogue {
+        let only = prefs().speech_dialogue;
+        items.push(menu::Item::new(DIALOGUE, tr("仅对话", "Dialogue Only"), "quote.bubble", 1).checked(only).stay());
+        items.push(menu::Item::new(WHOLE, tr("整段", "Whole Block"), "text.alignleft", 1).checked(!only).stay());
+    }
+    items
+}
+pub fn bar_pick() -> &'static str { if roles().is_empty() { "edit-voice-none" } else { PICKS[0] } }
+
+/// 编辑菜单里选了角色：给选中的文字配音。
+pub fn start(ed: &mut Editor, id: &str, window: &mut Window, cx: &mut Context<Editor>) { begin(ed, id, None, window, cx) }
+
+/// 选中块的工具条里选了角色：选中的几块整块配音（没选的块不算，可以不相邻）。
+pub fn start_blocks(ed: &mut Editor, id: &str, window: &mut Window, cx: &mut Context<Editor>) {
+    let ids = ed.core.block_sel_ids();
+    let dialogue = prefs().speech_dialogue && ed.core.has_dialogue(&ids);
+    begin(ed, id, Some((ids, dialogue)), window, cx)
+}
+
+/// 两个入口之后都一样：带上新的配音标识、选区收到这段末尾、下面出现那一行，开始生成。
+fn begin(ed: &mut Editor, id: &str, blocks: Option<(Vec<BlockId>, bool)>, window: &mut Window, cx: &mut Context<Editor>) {
     let roles = roles();
     let Some(role) = id.strip_prefix(PICK).and_then(|n| n.parse::<usize>().ok()).and_then(|n| roles.get(n)) else {
         return toast(tr("先在 设置 › 语音 里添加角色", "Add a role in Settings › Voice first"));
     };
     if assistant::read_key().is_none() { return toast(tr("先在 设置 › 语音 里填写 API Key", "Add an API Key in Settings › Voice first")); }
     let clip = uuid::Uuid::new_v4().simple().to_string()[..16].to_owned();
-    if !ed.core.set_voice(&clip) { return; }
+    let marked = match &blocks { Some((ids, dialogue)) => ed.core.set_voice_blocks(&clip, ids, *dialogue), None => ed.core.set_voice(&clip) };
+    if !marked { return toast(tr("选中的内容里没有可以配音的文字", "There is no text to voice in the selection")); }
+    if blocks.is_some() { ed.core.clear_block_sel(); }
     let text = ed.core.doc.voice_text(&clip);
     if text.chars().count() > MAX_CHARS {
         ed.core.undo();
@@ -372,6 +406,7 @@ Input:
 - "lines": the passage to be spoken, split into numbered lines. Only these are performed.
 - "speaker": the character speaking them (the narration may call them by this name) and the traits of the voice.
 - "before", "after": the text right before and after the passage. The end of "before" and the start of "after" are the moments around the line and matter most: they say what is happening, what provoked the line and what it leads to. Never output them.
+- "between" (when the lines are picked out of a longer text, e.g. only the dialogue): the text between two lines, not spoken; {"after": n, ...} sits right after line n. It tells you how the lines around it are said (a gesture, a pause, a change of tone), so read it like "before" and "after". Never output it.
 - "title": the document title.
 - "language": the language of the script; "original" keeps each line's language.
 - "tags": whether to add audio tags.
@@ -425,10 +460,42 @@ fn request(doc: &Document, clip: &str, info: &Clip) -> (String, String, Vec<std:
     let voice = role.as_ref().map(|r| [r.voice_name(), r.traits()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).unwrap_or_default();
     let language = match info.lang.as_str() { "en" => "English", "ja" => "Japanese", _ => "original" };
     let lines: Vec<Value> = segs.iter().enumerate().map(|(i, r)| json!({ "n": i + 1, "text": &info.text[r.clone()] })).collect();
-    let user = json!({
-        "title": doc.title.text, "speaker": { "name": info.role, "voice": voice }, "language": language, "tags": info.tags && tagged(&info.model),
-        "before": tail(before.trim_end(), 1500), "after": head(after.trim(), 600), "lines": lines,
+    // 只配对话时，引号留在了念的文字外面：前后文和旁白两头的引号去掉。
+    let quote = |c: char| c.is_whitespace() || "「」『』“”\"".contains(c);
+    // 两句之间没念的文字：只配对话时的旁白（「……」他摆了摆手，「……」），或选了不相邻的块时中间那些块。
+    // 跨块的也算：上一句所在块的后半、中间的块、这一句所在块的前半。太长的两头各留一截。
+    let mut gaps: Vec<Option<String>> = vec![None; parts.len()];
+    let (mut gap, mut k) = (String::new(), 0);
+    doc.for_each_block(|b| {
+        let text = &b.text.text;
+        let mut from = 0;
+        while k < parts.len() && parts[k].0 == b.id {
+            let r = &parts[k].1;
+            if k > 0 {
+                gap.push_str(&text[from..r.start]);
+                let g = gap.replace('\u{fffc}', "");
+                let g = g.trim_matches(quote);
+                if g.chars().count() > 800 { gaps[k] = Some(format!("{}…{}", head(g, 400), tail(g, 400))); }
+                else if !g.is_empty() { gaps[k] = Some(g.to_owned()); }
+            }
+            gap.clear();
+            from = r.end;
+            k += 1;
+        }
+        if k > 0 && k < parts.len() { gap.push_str(&text[from..]); gap.push('\n'); }
     });
+    let mut between = vec![];
+    let mut at = 0;
+    for (i, (_, r)) in parts.iter().enumerate() {
+        if i > 0 { at += 1; }
+        if let Some(gap) = &gaps[i] { between.push(json!({ "after": segs.partition_point(|s| s.start < at), "text": gap })); }
+        at += r.len();
+    }
+    let mut user = json!({
+        "title": doc.title.text, "speaker": { "name": info.role, "voice": voice }, "language": language, "tags": info.tags && tagged(&info.model),
+        "before": tail(before.trim_end_matches(quote), 1500), "after": head(after.trim_start_matches(quote).trim_end(), 600), "lines": lines,
+    });
+    if !between.is_empty() { user["between"] = between.into(); }
     (PROMPT.to_owned(), user.to_string(), segs)
 }
 
@@ -640,6 +707,11 @@ fn row(clip: String, doc: &Document, cx: &mut Context<Editor>) -> AnyElement {
 
 /// 「…」菜单里的各项。改了语气标签、台词语言就按新的重新生成。
 pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> bool {
+    if id == DIALOGUE || id == WHOLE { w.set_pref(|p| p.speech_dialogue = id == DIALOGUE, cx); return true; }
+    if let Some(n) = BAR.iter().position(|k| *k == id) {
+        if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| start_blocks(ed, PICKS[n], window, cx)); }
+        return true;
+    }
     let at = |ids: &[&str; 8]| ids.iter().position(|k| *k == id);
     let (what, n) = if let Some(n) = at(&REDO) { ("redo", n) } else if let Some(n) = at(&DROP) { ("drop", n) } else if let Some(n) = at(&TAGS) { ("tags", n) }
         else if let Some(n) = at(&SHOW) { ("show", n) } else if let Some((l, n)) = LANG.iter().enumerate().find_map(|(l, ids)| at(ids).map(|n| (l, n))) { (["lang-0", "lang-1", "lang-2"][l], n) }

@@ -30,7 +30,7 @@ b</code></pre></td></tr></tbody></table>
 <p></p>
 "#;
 
-const TEXTS: &[&str] = &["a", "中文", "😀", " ", "ab cd", "é", "👍🏽", "x"];
+const TEXTS: &[&str] = &["a", "中文", "😀", " ", "ab cd", "é", "👍🏽", "x", "「对。」"];
 const PASTES: &[&str] = &["一\n二", "a\n\nb\nc", "\n", "😀\n中", "line"];
 
 struct Rng(u64);
@@ -226,6 +226,16 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
             if rng.chance(25) {
                 c.clear_voice(clip);
                 return format!("clear_voice({clip})");
+            }
+            if rng.chance(30) {
+                // 选中块底部工具条的「配音」：选中的块，或随便挑一两块（可以不相邻）。
+                let mut ids = c.block_sel_ids();
+                if ids.is_empty() {
+                    let order = c.block_order(false);
+                    if !order.is_empty() { for _ in 0..1 + rng.below(2) { ids.push(*rng.pick(&order)); } }
+                }
+                let dialogue = rng.below(2) == 0;
+                return format!("set_voice_blocks({clip}, {ids:?}, {dialogue}) = {}", c.set_voice_blocks(clip, &ids, dialogue));
             }
             format!("set_voice({clip}) = {}", c.set_voice(clip))
         }

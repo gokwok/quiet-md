@@ -22,7 +22,11 @@ pub struct Item { pub id: &'static str, pub title: SharedString, pub symbol: &'s
     /// 灰着、点不了（还没做的功能先占个位）。
     pub disabled: bool,
     /// 标题下面一行小字（照 Craft「排序方式」下面写着当前的「手动」）。iOS 15 起才有。
-    pub subtitle: Option<SharedString> }
+    pub subtitle: Option<SharedString>,
+    /// 代替图标的一张图（角色头像）：缓存用的名字和图片文件（PNG、WebP…），画成圆的。
+    pub picture: Option<(SharedString, std::sync::Arc<[u8]>)>,
+    /// 点了菜单不收起（打勾的开关：勾就地变）。iOS 16 起才有。
+    pub stay: bool }
 impl Item {
     pub fn new(id: &'static str, title: impl Into<SharedString>, symbol: &'static str, group: u8) -> Self { Item { id, title: title.into(), symbol, group, ..Default::default() } }
     pub fn checked(mut self, on: bool) -> Self { self.checked = on; self }
@@ -30,6 +34,8 @@ impl Item {
     pub fn disabled(mut self) -> Self { self.disabled = true; self }
     pub fn kids(mut self, kids: Vec<Item>) -> Self { self.kids = kids; self }
     pub fn sub(mut self, text: impl Into<SharedString>) -> Self { self.subtitle = Some(text.into()); self }
+    pub fn picture(mut self, picture: Option<(SharedString, std::sync::Arc<[u8]>)>) -> Self { self.picture = picture; self }
+    pub fn stay(mut self) -> Self { self.stay = true; self }
 }
 
 struct Button { key: &'static str, view: *mut AnyObject, frame: Bounds<Pixels>, items: Vec<Item>, dark: bool, seen: bool, shown: bool }
@@ -141,7 +147,8 @@ unsafe fn menu(title: &str, image: *mut AnyObject, items: &[Item], wait: bool) -
 }
 unsafe fn element(item: &Item, wait: bool) -> *mut AnyObject {
     unsafe {
-        let image: *mut AnyObject = if item.symbol.is_empty() { std::ptr::null_mut() } else { msg_send![AnyClass::get(c"UIImage").unwrap(), systemImageNamed: ns_string(item.symbol)] };
+        let image: *mut AnyObject = if let Some((key, bytes)) = &item.picture { picture(key, bytes) }
+            else if item.symbol.is_empty() { std::ptr::null_mut() } else { msg_send![AnyClass::get(c"UIImage").unwrap(), systemImageNamed: ns_string(item.symbol)] };
         let subtitle = |e: *mut AnyObject| if let Some(s) = &item.subtitle {
             let ok: bool = msg_send![e, respondsToSelector: objc2::sel!(setSubtitle:)];
             if ok { let _: () = msg_send![e, setSubtitle: ns_string(s)]; }
@@ -152,11 +159,40 @@ unsafe fn element(item: &Item, wait: bool) -> *mut AnyObject {
         let action: *mut AnyObject = msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(&item.title), image: image, identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler];
         // 1 = UIMenuElementStateOn
         if item.checked { let _: () = msg_send![action, setState: 1isize]; }
-        // 1 = UIMenuElementAttributesDisabled，2 = Destructive
-        let attributes = usize::from(item.disabled) | if item.danger { 2 } else { 0 };
+        // 1 = UIMenuElementAttributesDisabled，2 = Destructive，8 = KeepsMenuPresented
+        let attributes = usize::from(item.disabled) | if item.danger { 2 } else { 0 } | if item.stay { 8 } else { 0 };
         if attributes != 0 { let _: () = msg_send![action, setAttributes: attributes]; }
         subtitle(action);
         action
+    }
+}
+
+/// 菜单里的头像：解开图片，裁成圆、按屏幕倍数画成 26pt（菜单不会替我们缩放、裁圆），原色不着色。按名字缓存。
+unsafe fn picture(key: &SharedString, bytes: &[u8]) -> *mut AnyObject {
+    thread_local! { static PICTURES: RefCell<Vec<(SharedString, *mut AnyObject)>> = const { RefCell::new(Vec::new()) }; }
+    if let Some(image) = PICTURES.with(|p| p.borrow().iter().find(|(k, _)| k == key).map(|(_, i)| *i)) { return image; }
+    const SIDE: f64 = 26.;
+    unsafe {
+        let data: *mut AnyObject = msg_send![AnyClass::get(c"NSData").unwrap(), dataWithBytes: bytes.as_ptr().cast::<std::ffi::c_void>(), length: bytes.len()];
+        let source: *mut AnyObject = msg_send![AnyClass::get(c"UIImage").unwrap(), imageWithData: data];
+        if source.is_null() { return std::ptr::null_mut(); }
+        let size: CGSize = msg_send![source, size];
+        let scale = SIDE / size.width.min(size.height).max(1.);
+        let (w, h) = (size.width * scale, size.height * scale);
+        let draw = block2::RcBlock::new(move |_context: *mut AnyObject| {
+            let oval: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPathWithOvalInRect: CGRect::new(CGPoint::new(0., 0.), CGSize::new(SIDE, SIDE))];
+            let _: () = msg_send![oval, addClip];
+            let _: () = msg_send![source, drawInRect: CGRect::new(CGPoint::new((SIDE - w) / 2., (SIDE - h) / 2.), CGSize::new(w, h))];
+        });
+        let renderer: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRenderer").unwrap(), alloc];
+        let renderer: *mut AnyObject = msg_send![renderer, initWithSize: CGSize::new(SIDE, SIDE)];
+        let image: *mut AnyObject = msg_send![renderer, imageWithActions: &*draw];
+        let _: () = msg_send![renderer, release];
+        // 1 = UIImageRenderingModeAlwaysOriginal
+        let image: *mut AnyObject = msg_send![image, imageWithRenderingMode: 1isize];
+        let _: *mut AnyObject = msg_send![image, retain];
+        PICTURES.with(|p| p.borrow_mut().push((key.clone(), image)));
+        image
     }
 }
 
