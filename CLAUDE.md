@@ -35,7 +35,15 @@ scripts/check.sh        # cargo test --release + clippy --all-targets 零警告
 
 想每次提交自动检查：`git config core.hooksPath scripts/hooks`。
 
-发布版本时，把两个 `Cargo.toml` 的版本号一起更新。未经用户明确要求，不创建提交。
+发布桌面版本时，把两个 `Cargo.toml` 的版本号一起更新。未经用户明确要求，不创建提交。
+
+## 默认发布流程
+
+用户提及「发布」时，默认通过 TestFlight 分发 iOS 内部测试版。用户明确指定桌面发布、App Store 上架或其他渠道时，以指定渠道为准。
+
+- 复用 App Store Connect 的「留白 Quiet.md」（`6836195254`）、Bundle ID `com.s1dashu.quietmd.prototype` 和内部组「个人设备测试」。
+- 按 [iOS 发布说明](prototypes/ios/README.md#通过-testflight-发布到-iphone)核对下一个构建号，运行仓库检查和模拟器冒烟测试，用 `prototypes/ios/testflight/archive.sh` 生成带匹配 dSYM 的真机归档，再用同目录的 `upload.sh` 上传。每次发布保留归档。
+- 跟进 Apple 处理及出口合规问题，核实构建已进入 **Testing**、目标组已关联且本人已受邀或已接受邀请，再报告可以安装。登录或双重验证交由用户在 Apple 界面完成。
 
 ## 用户数据（绝对不要碰）
 

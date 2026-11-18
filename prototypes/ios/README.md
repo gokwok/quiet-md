@@ -147,6 +147,26 @@ python3 prototypes/ios/sign-device.py /path/to/profile.mobileprovision --app "/p
 
 脚本会检查描述文件，将其嵌入指定的 App 包，重新签名并核对最终权限。描述文件和签名私钥由开发者本地管理。
 
+## 通过 TestFlight 发布到 iPhone
+
+本项目使用 App Store Connect 中已有的「留白 Quiet.md」（App ID `6836195254`、Bundle ID `com.s1dashu.quietmd.prototype`）。内部组「个人设备测试」已启用自动分发。其他团队首次部署时，须先在自己的账号中登记对应的标识、iCloud 容器和应用记录。
+
+1. 在 [TestFlight 构建列表](https://appstoreconnect.apple.com/apps/6836195254/testflight)查看本版本已上传的最大构建号，选一个更大的整数。运行仓库检查和 iOS 模拟器冒烟测试。
+2. 在已登录开发团队的 Mac 上使用正式版 Xcode、XcodeGen、rsvg-convert、Python Pillow 和 Rust 的 `aarch64-apple-ios` 目标归档。以下命令中的构建号按本次发布填写，开发描述文件名称按本机配置填写。
+
+   ```sh
+   export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+   export BUILD_NUMBER="<新的构建号>"
+   TEAM_ID=B66GHCCV6S DEVELOPMENT_PROFILE="Quiet md iOS iCloud Development" \
+     prototypes/ios/testflight/archive.sh
+   archive="target/ios/testflight/Quiet-${BUILD_NUMBER}.xcarchive"
+   prototypes/ios/testflight/upload.sh "$archive"
+   ```
+
+   归档脚本打包 Release 真机程序、App Store 图标和对应的 Rust dSYM，验证签名、arm64 UUID 和调试行表。保留每次发布的归档以便解析崩溃。上传脚本使用 Xcode 自动管理分发签名，保留构建号，随包上传符号，并将构建限定为内部测试。使用 Xcode 管理开发签名时可省略 `DEVELOPMENT_PROFILE`。
+3. 等 Apple 完成处理。若状态为 **Missing Compliance**，按该构建实际使用的加密实现回答问卷。确认目标构建状态为 **Testing**，已关联「个人设备测试」，且目标账号显示 **Invited** 或已接受邀请。遇到登录或双重验证时，由账号持有人在 Apple 页面完成。
+4. 首次在 iPhone 安装 TestFlight，从 Apple 邀请邮件进入并点「接受」和「安装」。以后从 TestFlight 更新，也可以开启自动更新。每个构建可测试 90 天。
+
 ## 验证
 
 安装 XcodeGen 后，在上面的专用 iPhone 18 Pro 模拟器运行以下命令。测试按该型号的屏幕坐标操作，要求软件键盘可见。
