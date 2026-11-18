@@ -76,6 +76,8 @@ On first launch, Quiet.md puts a **Getting started** guide into an empty library
 
 The interface is available in English and Simplified Chinese.
 
+An [iPhone prototype](prototypes/ios/README.md) shares the desktop editor and document format. The guide covers building from source, running the simulator tests, and signing a device build.
+
 ## Performance
 
 Frame processing time over 100 consecutive operations in a mixed document of **1 million characters** and 549 chapters:

@@ -165,4 +165,4 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 
 ## 文件夹级同步
 
-当前使用方式是多个设备选择同一个 iCloud Drive 空间文件夹。Apple 适配负责系统文件协调、NSFileVersion 和 NSMetadataQuery；文件传输由系统处理。iOS 文件夹授权通过 `prototypes/ios/files.rs` 的安全书签恢复。官方容器自动发现和一键移入 / 移出尚未接入，真机验收清单见 `prototypes/ios/README.md`。
+当前使用方式是多个设备选择同一个 iCloud Drive 空间文件夹。Apple 适配负责系统文件协调、NSFileVersion 和 NSMetadataQuery；文件传输由系统处理。iOS 文件夹授权通过 `prototypes/ios/files.rs` 的安全书签恢复。iOS 启动时还会查询应用的 iCloud 容器。容器可用时，空间设置通过系统文件管理器在本机与容器之间迁移空间。签名条件和真机验收清单见 [iOS 原型说明](../prototypes/ios/README.md)。

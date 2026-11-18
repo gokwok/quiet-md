@@ -68,7 +68,7 @@ iOS 自己的代码在本目录，补丁里只留挂接点：
 
 文档库在应用沙盒的 `Documents/Quiet.md`，首次启动放入「开始指南」。编辑后按桌面的节奏保存，进入后台时立即保存。
 
-插入的图片、附件和上传的封面，文档里记的是绝对路径，而 iOS 每次安装或更新应用都会换沙盒的路径。读的时候 `store::rehome`（核心库）把这种路径改接过来：不在当前文档库里、文件又已不存在时，取它最后一个 `assets/` 之后的部分到当前库里找。文档文件里写的仍是旧的绝对路径。
+新插入的库内资源使用相对路径 `assets/…`，随空间一起移动。读取旧文档时，核心库也能在当前空间的 `assets/` 下查找原沙盒路径已失效的资源。详见[文档库格式](../../docs/FORMAT.md)。
 
 ### 原生玻璃
 
@@ -136,6 +136,16 @@ prototypes/ios/run-simulator.sh "$device"
 
 省略设备参数时，脚本只构建并签名 `target/ios/Quiet.md Prototype.app`。原型使用独立的 bundle ID，文档库在模拟器的沙盒里。测试时用 `SIMCTL_CHILD_QUIET_MD_HOME` 指定别的文档库；相对路径落在沙盒的临时目录。
 
+## 真机开发签名
+
+先准备为真机目标 `aarch64-apple-ios` 构建的 App 包，以及为 `com.s1dashu.quietmd.prototype` 创建的开发描述文件。描述文件须包含测试设备、允许 [QuietMd.entitlements](QuietMd.entitlements) 请求的 iCloud 权限，并与本机钥匙串中的开发签名身份匹配。对已有的真机包执行：
+
+```sh
+python3 prototypes/ios/sign-device.py /path/to/profile.mobileprovision --app "/path/to/Quiet.md Prototype.app"
+```
+
+脚本会检查描述文件，将其嵌入指定的 App 包，重新签名并核对最终权限。描述文件和签名私钥由开发者本地管理。
+
 ## 验证
 
 安装 XcodeGen 后，在上面的专用 iPhone 18 Pro 模拟器运行以下命令。测试按该型号的屏幕坐标操作，要求软件键盘可见。
@@ -146,15 +156,20 @@ prototypes/ios/verify-simulator.sh "$device"
 
 测试用 `QUIET_MD_IOS_SAMPLE` 让文档库只放 [sample.xml](sample.xml) 并直接打开它，在独立的临时文档库里长按拖动、双击选中 `Quiet`、点击拼音键盘输入 `nihao`，再选择「你好」。`QUIET_MD_IOS_VERIFY_BACKGROUND` 关掉定时保存，测试按 Home 后由脚本核对磁盘中的文字、合并单元格和 LaTeX 源码，然后重启并截图。可在生成的 `Result.xcresult` 查看触屏选区、拼音候选和提交后的截图。
 
-## iCloud 文件夹空间（2026-11-14）
+## iCloud 空间
 
-按 vault 的文件夹方式使用：在新建空间或首次创建页选择一个 iCloud Drive 文件夹，其他设备选择同一个文件夹。iCloud 负责传输，应用只做文件协调、外部变更刷新、下载状态和必要的冲突副本保护。iOS 用系统文件夹选择器；安全书签保存在本机应用数据目录的 `quiet-md/space-bookmarks.json`，启动时恢复授权，书签变旧时更新。
+有两种使用方式：
+
+- **选择已有文件夹。** 在新建空间或首次创建页选择 iCloud Drive 文件夹，其他设备选择同一文件夹。这个方式只需系统文件选择器授权。安全书签保存在本机的 `quiet-md/space-bookmarks.json`，应用启动时恢复授权。
+- **使用应用的 iCloud 容器。** 启动时查询系统授予的容器。在容器可用且已开启 iCloud 云盘的设备上，可在空间设置的「存放位置」中选择「本机」或「iCloud」。应用先保存当前文档，再由系统移动整个空间。位于应用主目录的首个空间暂不支持迁移。
+
+文件传输由 iCloud Drive 负责。应用负责文件协调、外部变更刷新、下载状态和冲突副本保护。
 
 所有空间统一升级 FORMAT 4：逐文档 JSON、列表缓存、本机阅读状态、相对资源路径和旧索引备份见 `docs/FORMAT.md`。旧版本不能打开升级后的空间。首次测试只用新建的测试空间，不要用真实文档库。
 
-已验证：`scripts/check.sh` 通过（126 个 core 测试、48 个应用测试，以及指南往返）；桌面临时库迁移、重开、外部更新、未保存编辑保护、数字后缀冲突副本；iOS 编译通过，模拟器显示迁移后的首页和新增的文件夹位置选项。
+2026-11-14 验证记录：`scripts/check.sh` 通过（126 个 core 测试、48 个应用测试，以及指南往返）；桌面临时库迁移、重开、外部更新、未保存编辑保护、数字后缀冲突副本；iOS 编译通过，模拟器显示迁移后的首页和新增的文件夹位置选项。
 
-尚未验证：真实 iCloud 传输、两台设备离线同时编辑后的系统版本冲突，以及 iOS 外部提供器授权在杀进程 / 重启后的恢复。官方 iCloud 容器自动发现和「移到 iCloud / 移回本机」尚未接入；当前文件夹方案不需要官方容器 entitlement，自编译版本也能使用。
+真机待验收项包括应用容器内空间的双向迁移、跨设备传输、两端离线编辑后的版本冲突，以及重启后外部文件夹授权的恢复。
 
 真机验收只建一个空的测试文件夹：
 1. Mac 和 iOS 都把同一个 iCloud Drive 测试文件夹添加为空间。
