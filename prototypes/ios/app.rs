@@ -307,20 +307,44 @@ pub fn doc_top() -> f32 { chrome_top() + if style::banded() { style::GAP } else 
 /// 手机上的滚动条：和系统的一样细，只在内容滚动时出现，停下不久淡出，不接触摸（桌面那条常驻、能拖）。
 /// `seen` 记着上次画时滚到哪、最后一次变化的时刻；`top`、`bottom` 是悬浮的外壳占去的两头。
 pub fn scroll_thumb(seen: &std::cell::Cell<Option<(Pixels, Option<std::time::Instant>)>>, bounds: Bounds<Pixels>, offset: Pixels, content: Pixels, top: f32, bottom: f32, window: &mut Window) {
+    let view = bounds.size.height;
+    paint_thumb(seen, bounds, offset, offset / (content-view).max(px(1.)), view / content.max(px(1.)), top, bottom, window);
+}
+
+// 虚拟列表只测量访问过的行。用视口两端所在的行和行内比例表示进度，未访问的行也计入总长。
+pub fn document_thumb(seen: &std::cell::Cell<Option<(Pixels, Option<std::time::Instant>)>>, bounds: Bounds<Pixels>, list: &ListState, bottom: f32, window: &mut Window) {
+    let n = list.item_count();
+    let first = list.logical_scroll_top();
+    let view = list.viewport_bounds();
+    let Some(row) = list.bounds_for_item(first.item_ix) else { return };
+    let fraction = |y: Pixels, row: Bounds<Pixels>| ((y-row.top())/row.size.height.max(px(0.01))).clamp(0.,1.);
+    let start = first.item_ix as f32 + fraction(view.top(),row);
+    let mut end = start;
+    for ix in first.item_ix..n {
+        let Some(row) = list.bounds_for_item(ix) else { break };
+        end = ix as f32 + fraction(view.bottom(),row);
+        if row.bottom() >= view.bottom() { break; }
+    }
+    let span = (end-start).max(0.);
+    let travel = n as f32 - span;
+    paint_thumb(seen, bounds, list.scroll_px_offset_for_scrollbar().y, start/travel.max(f32::EPSILON), span/n as f32, doc_top(), bottom, window);
+}
+
+fn paint_thumb(seen: &std::cell::Cell<Option<(Pixels, Option<std::time::Instant>)>>, bounds: Bounds<Pixels>, offset: Pixels, progress: f32, visible: f32, top: f32, bottom: f32, window: &mut Window) {
     const HOLD: f32 = 0.7;
     const FADE: f32 = 0.25;
     let moved = match seen.get() {
-        Some((last, at)) => if (last - offset).abs() > px(0.5) { Some(std::time::Instant::now()) } else { at },
+        Some((last, at)) => if last != offset { Some(std::time::Instant::now()) } else { at },
         None => None,
     };
     seen.set(Some((offset, moved)));
     let (Some(at), view) = (moved, bounds.size.height) else { return };
     let t = at.elapsed().as_secs_f32();
-    if t >= HOLD + FADE || content <= view + px(1.) { return; }
+    if t >= HOLD + FADE || visible >= 1. { return; }
     window.request_animation_frame();
     let track = (view - px(top + bottom + 8.)).max(px(1.));
-    let h = (track * (view / content)).max(px(36.)).min(track);
-    let y = bounds.top() + px(top + 4.) + (track - h) * (offset / (content - view)).clamp(0., 1.);
+    let h = (track * visible).max(px(36.)).min(track);
+    let y = bounds.top() + px(top + 4.) + (track - h) * progress.clamp(0., 1.);
     let alpha = if t < HOLD { 1. } else { 1. - (t - HOLD) / FADE };
     window.paint_quad(fill(Bounds::new(point(bounds.right() - px(6.), y), size(px(3.), h)), Theme::scrollbar_thumb().opacity(alpha)).corner_radii(px(1.5)));
 }

@@ -3454,8 +3454,11 @@
  }
  
  impl Editor {
-@@ -31,7 +33,11 @@
+@@ -29,9 +31,14 @@
+         let sb = self.scrollbar.clone();
+         let sb2 = sb.clone();
          let list2 = list.clone();
++        let picking = self.block_bar_on();
          canvas(
              move |bounds, window, _| {
 -                let (offset, content, view) = list.estimated_scroll_metrics();
@@ -3467,18 +3470,19 @@
                  let (content, h) = match sb.grab.get() {
                      Some((_, content, h)) => (content, h),
                      None => (content, (view * (view / content)).max(px(MIN_H)).min(bounds.size.height)),
-@@ -46,6 +52,10 @@
+@@ -46,6 +53,11 @@
              },
              move |bounds, state, window, _| {
                  let sb = sb2;
 +                if crate::ios::compact(window) {
-+                    crate::ios::scroll_thumb(&sb.seen, bounds, list2.scroll_px_offset_for_scrollbar().y.abs(), list2.max_offset_for_scrollbar().y + bounds.size.height, crate::ios::doc_top(), 0., window);
++                    let bottom = if picking { (bounds.bottom()-crate::ios::sheet_point().y+px(70.)).max(px(0.)) } else { px(0.) };
++                    crate::ios::document_thumb(&sb.seen, bounds, &list2, f32::from(bottom), window);
 +                    return;
 +                }
                  let Some((top, h, content, view, hitbox)) = state else {
                      sb.grab.set(None);
                      return;
-@@ -88,7 +98,7 @@
+@@ -88,7 +100,7 @@
                                  let f = ((ev.position.y - dy - bounds.top()) / travel).clamp(0., 1.);
                                  // At the end, go to the real bottom: the rows there may not
                                  // be measured yet, so the estimate can stop short.
