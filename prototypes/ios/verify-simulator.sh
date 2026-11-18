@@ -53,6 +53,26 @@ assert note.find(".//td[@colspan='2']/p").text == "合并单元格"
 assert [el.text for el in note.findall(".//latex")] == [
     r"S=\pi r^2", r"\displaystyle\frac{1}{2}+\sqrt{x^2+1}",
 ]
+glass = [p for p in tmp.glob("Quiet.md-glass-check-*") if p.stat().st_mtime_ns >= before.stat().st_mtime_ns]
+assert len(glass) == 1, "Expected the isolated Liquid Glass test library"
+glass_note, = (glass[0] / "docs").glob("*.xml")
+doc = ET.fromstring("<doc>" + glass_note.read_text(encoding="utf-8") + "</doc>")
+para = doc.find("p")
+assert "".join(para.itertext()) == "触屏选区：双击选择 Quiet，长按拖动选择中文。"
+assert any(a.get("href") == "https://example.org/quiet" and "".join(a.itertext()) == "Quiet" for a in para.iter("a"))
+for prefix in ["Quiet.md-source-check-", "Quiet.md-code-check-"]:
+    home, = [p for p in tmp.glob(prefix + "*") if p.stat().st_mtime_ns >= before.stat().st_mtime_ns]
+    note, = (home / "docs").glob("*.xml")
+    root = ET.fromstring("<doc>" + note.read_text(encoding="utf-8") + "</doc>")
+    if prefix == "Quiet.md-source-check-":
+        assert "+1" in root.findtext(".//latex")
+    else:
+        pre = root.find(".//pre")
+        assert pre.get("lang", "").lower() == "bash" and "+ 7" in "".join(pre.itertext())
+table_home, = [p for p in tmp.glob("Quiet.md-table-check-*") if p.stat().st_mtime_ns >= before.stat().st_mtime_ns]
+table_note, = (table_home / "docs").glob("*.xml")
+table = ET.fromstring("<doc>" + table_note.read_text(encoding="utf-8") + "</doc>").find(".//table")
+assert len(table.findall(".//tr")) == 4
 print(libraries[0])
 PY
 )

@@ -5,4 +5,6 @@
 <table><colgroup><col width="128"/><col width="128"/></colgroup><thead><tr><th><p>项目</p></th><th><p>数值</p></th></tr></thead><tbody><tr><td><p>半径</p></td><td><p>3</p></td></tr><tr><td colspan="2"><p>合并单元格</p></td></tr></tbody></table>
 <p>行内公式 <latex>S=\pi r^2</latex></p>
 <p><latex>\displaystyle\frac{1}{2}+\sqrt{x^2+1}</latex></p>
+<h1>代码示例</h1>
+<pre lang="Python"><code>area = 3.14 * r ** 2</code></pre>
 </doc>
