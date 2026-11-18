@@ -2449,9 +2449,7 @@ impl Core {
     /// Adds `id` to the block selection, or takes it out, without the blocks in between (touch: a block's
     /// circle). Not in block mode: selects just `id`. Taking out the last one leaves block mode.
     pub fn toggle_pick(&mut self, id: BlockId) {
-        if id == TITLE || matches!(self.kind_of(id), None | Some(BlockKind::Grid | BlockKind::Column { .. })) {
-            return;
-        }
+        if id == TITLE || matches!(self.kind_of(id), None | Some(BlockKind::Column { .. })) { return; }
         let mut ids = self.block_sel_ids();
         if ids.is_empty() {
             return self.select_block(id);
@@ -2472,6 +2470,29 @@ impl Core {
         self.block_sel = Some(tag);
         self.cell_sel = None;
         self.pick = Some((tag, ids));
+    }
+
+    /// Keep the previous picks and add a visible range. Passing the same base
+    /// on each drag update lets the range shrink when the finger turns back.
+    pub fn extend_block_picks(&mut self, base: &[BlockId], span: Option<(BlockId, BlockId)>) {
+        let visible = self.block_order(true);
+        let mut include: HashSet<BlockId> = base.iter().copied().collect();
+        if let Some((a,b)) = span {
+            let pos = |id| visible.iter().position(|v| *v == id);
+            let (Some(a),Some(b)) = (pos(a),pos(b)) else { return };
+            let range = &visible[a.min(b)..=a.max(b)];
+            include.extend(range.iter().copied());
+            if include.len() == range.len() {
+                self.select_range(visible[a.min(b)],visible[a.max(b)]);
+                return;
+            }
+        }
+        let ids: Vec<_> = visible.into_iter().filter(|id| include.contains(id)).collect();
+        let ids = self.topmost_in(&ids, &path_index(&self.doc.blocks));
+        if let (Some(&first),Some(&last)) = (ids.first(),ids.last()) {
+            self.select_range(first,last);
+            self.pick = Some((self.block_sel.unwrap(),ids));
+        } else { self.clear_block_sel(); }
     }
 
     /// Blocks in document order. With `visible`, content hidden by folded
@@ -2582,11 +2603,16 @@ impl Core {
     pub fn block_sel_ids(&self) -> Vec<BlockId> {
         let Some(bs) = self.block_sel else { return vec![] };
         let Some(picked) = self.picked() else { return self.range_ids(bs.anchor, bs.head) };
-        let mut all: Vec<BlockId> = picked.iter().flat_map(|id| self.range_ids(*id, *id)).collect();
-        let order = self.block_order(false);
-        all.sort_by_key(|b| order.iter().position(|x| x == b));
-        all.dedup();
-        self.topmost_in(&all, &path_index(&self.doc.blocks))
+        let picked: HashSet<_> = picked.iter().copied().collect();
+        let visible: HashSet<_> = self.block_order(true).into_iter().collect();
+        let paths = path_index(&self.doc.blocks);
+        let mut scope = None;
+        let all: Vec<_> = self.block_order(false).into_iter().filter(|id| {
+            let path = &paths[id];
+            if visible.contains(id) { scope = picked.contains(id).then(|| &path[..path.len()-1]); }
+            scope.is_some_and(|p| covers(p,path))
+        }).collect();
+        self.topmost_in(&all,&paths)
     }
 
     /// The blocks from `anchor` to `head` (either order) in document order, top-most only.
@@ -2810,6 +2836,12 @@ impl Core {
             self.insert_after(last, b);
             self.sel = Selection::caret(Pos::new(id, 0));
         }
+    }
+
+    /// Enter block selection directly, including sections hidden by folded headings.
+    pub fn select_all_blocks(&mut self) {
+        let order = self.block_order(true);
+        if let (Some(&first), Some(&last)) = (order.first(), order.last()) { self.select_range(first, last); }
     }
 
     /// ⌘A: block text → enclosing cell / table / callout → whole document.
@@ -3805,6 +3837,29 @@ mod tests {
         c.backspace();
         c.delete_selected_blocks();
         assert_eq!(xml(&c).matches("<table>").count(), 1, "{}", xml(&c));
+    }
+
+    #[test]
+    fn extending_picks_keeps_gaps_and_can_reverse() {
+        let mut c = doc("<p>A</p><p>B</p><p>C</p><p>D</p><p>E</p>");
+        let ids: Vec<_> = c.doc.blocks.iter().map(|b| b.id).collect();
+        let [a,_,c1,d,e] = ids[..] else { unreachable!() };
+        c.extend_block_picks(&[a], Some((e,c1)));
+        assert_eq!(c.block_sel_ids(), vec![a,c1,d,e]);
+        c.extend_block_picks(&[a], Some((e,d)));
+        assert_eq!(c.block_sel_ids(), vec![a,d,e]);
+        c.extend_block_picks(&[a], None);
+        assert_eq!(c.block_sel_ids(), vec![a]);
+    }
+
+    #[test]
+    fn select_all_blocks_includes_folded_sections() {
+        let mut c = doc("<title>Title</title><p>first</p><h1>fold</h1><p>hidden</p>");
+        let ids: Vec<_> = c.doc.blocks.iter().map(|b| b.id).collect();
+        c.toggle_fold(ids[1]);
+        c.select_block(ids[0]);
+        c.select_all_blocks();
+        assert_eq!(c.block_sel_ids(), ids);
     }
 
     #[test]
