@@ -122,14 +122,14 @@ fn roles() -> Vec<Role> {
     roles
 }
 
-/// 编辑菜单里的「配音」：一个角色时直接配，几个时是子菜单，没有角色时点了提示去添加。
+/// 编辑菜单里的「配音」：一个角色时直接配，几个时是子菜单（带头像），没有角色时点了提示去添加。
 pub fn menu_item() -> Option<super::editmenu::Item> {
     let title: SharedString = tr("配音", "Voice Over").into();
     let roles = roles();
     Some(match roles.len() {
         0 => ("edit-voice-none", title, vec![]),
         1 => (PICKS[0], title, vec![]),
-        _ => ("edit-voice-menu", title, roles.iter().enumerate().map(|(i, r)| (PICKS[i], SharedString::from(r.name().to_owned()))).collect()),
+        _ => ("edit-voice-menu", title, roles.iter().enumerate().map(|(i, r)| (PICKS[i], SharedString::from(r.name().to_owned()), assistant::roles::picture(r))).collect()),
     })
 }
 

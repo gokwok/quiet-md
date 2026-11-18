@@ -168,7 +168,7 @@ unsafe fn element(item: &Item, wait: bool) -> *mut AnyObject {
 }
 
 /// 菜单里的头像：解开图片，裁成圆、按屏幕倍数画成 26pt（菜单不会替我们缩放、裁圆），原色不着色。按名字缓存。
-unsafe fn picture(key: &SharedString, bytes: &[u8]) -> *mut AnyObject {
+pub(crate) unsafe fn picture(key: &SharedString, bytes: &[u8]) -> *mut AnyObject {
     thread_local! { static PICTURES: RefCell<Vec<(SharedString, *mut AnyObject)>> = const { RefCell::new(Vec::new()) }; }
     if let Some(image) = PICTURES.with(|p| p.borrow().iter().find(|(k, _)| k == key).map(|(_, i)| *i)) { return image; }
     const SIDE: f64 = 26.;
