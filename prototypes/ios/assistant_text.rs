@@ -84,6 +84,16 @@ fn key_status(id: &str) -> Option<bool> {
 
 fn refresh_key(id: &str) { KEYS.with(|k| { k.borrow_mut().insert(id.to_owned(), super::key_saved(secret(id))); }); }
 
+/// 写台本这类小活用的模型：快速模型，没选就用主模型。(接口地址, Key, 模型, 推理强度)。
+pub(crate) fn quick() -> Option<(String, String, String, Option<String>)> {
+    let p = prefs();
+    [&p.text_fast, &p.text_main].into_iter().find_map(|s| {
+        let provider = p.text_providers.iter().find(|pr| pr.id == s.provider && !s.model.is_empty())?;
+        let key = super::read_secret(secret(&provider.id)).unwrap_or_default();
+        Some((provider.base_url.clone(), key, s.model.clone(), Some(s.effort.clone()).filter(|e| !e.is_empty())))
+    })
+}
+
 fn find(id: &str) -> Option<Provider> { prefs().text_providers.into_iter().find(|p| p.id == id) }
 
 /// 进文本的几页：重新看一眼钥匙串；哪家的模型列表还没有、地址变了或上次失败了，就去取。

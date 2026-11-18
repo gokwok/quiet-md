@@ -103,6 +103,7 @@ fn models(current: &str, cx: &mut Context<Workspace>) -> AnyElement {
 
 pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
     if action.starts_with("text-") { return text::menu_action(action, w, cx); }
+    if action.starts_with("speech-role-lang-") { return roles::menu_action(action, w, cx); }
     if !action.starts_with(MODEL_ACTION) { return false; }
     if let Some(&(_, id, ..)) = MODELS.iter().find(|m| m.0 == action) && prefs().speech_model != id {
         w.set_pref(|p| p.speech_model = id.into(), cx);

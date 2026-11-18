@@ -21,11 +21,25 @@ pub struct Role {
     /// 音色的特点（性别 · 年龄 · 口音），收藏时记下，卡片上当副标题。
     #[serde(default)]
     traits: String,
+    /// 配音前用快速模型给台词加上语气标签（`[叹气]` 这类，只有 v3、v4 认）。
+    #[serde(default)]
+    pub tags: bool,
+    /// 配音时把台词译成哪种语言：空是原文，`en`、`ja`。
+    #[serde(default)]
+    pub lang: String,
 }
 
 impl Role {
     pub fn voice_id(&self) -> &str { &self.voice_id }
     pub fn name(&self) -> &str { &self.name }
+    pub fn voice_name(&self) -> &str { &self.voice_name }
+    pub fn traits(&self) -> &str { &self.traits }
+}
+
+/// 台词语言：(菜单项, 代码, 名称)。
+pub const LANGS: [(&str, &str, &str); 3] = [("speech-role-lang-0", "", "原文"), ("speech-role-lang-1", "en", "English"), ("speech-role-lang-2", "ja", "日本語")];
+pub fn lang_name(code: &str) -> SharedString {
+    match LANGS.iter().find(|l| l.1 == code) { Some(&(_, "", _)) | None => tr("原文", "Original").into(), Some(l) => l.2.into() }
 }
 
 /// 只认要用的几项，别的字段 ElevenLabs 加了减了都不影响（`voice_id` 以外都是可选的）。
@@ -337,7 +351,7 @@ fn add_role(w: &mut Workspace, voice: &Voice, cx: &mut Context<Workspace>) {
     if prefs().speech_roles.iter().any(|r| r.voice_id == voice.voice_id) { return open_role(w, voice.voice_id.clone(), cx); }
     super::super::glass::haptic();
     let name = voice.name().to_owned();
-    let role = Role { voice_id: voice.voice_id.clone(), voice_name: name.clone(), name: name.clone(), avatar: None, preview_url: voice.preview_url.clone(), traits: voice.traits() };
+    let role = Role { voice_id: voice.voice_id.clone(), voice_name: name.clone(), name: name.clone(), avatar: None, preview_url: voice.preview_url.clone(), traits: voice.traits(), tags: false, lang: String::new() };
     w.set_pref(|p| p.speech_roles.push(role), cx);
     if prefs().speech_roles.iter().any(|r| r.voice_id == voice.voice_id) {
         POPPED.with(|p| { let mut p = p.borrow_mut(); p.0 = voice.voice_id.clone(); p.1 += 1; });
@@ -394,7 +408,34 @@ pub fn detail(cx: &mut Context<Workspace>) -> AnyElement {
     div().pt(px(12.)).flex().flex_col().gap(px(32.))
         .child(hero)
         .child(general::card(rows))
+        .child(script_rows(&role, cx))
         .into_any_element()
+}
+
+/// 「台本」：配音前要不要让快速模型加语气标签、把台词译成哪种语言。每段配音的「…」里还能单独改。
+fn script_rows(role: &Role, cx: &mut Context<Workspace>) -> AnyElement {
+    let id = role.voice_id.clone();
+    let tags = item("speech-role-tags", tr("语气标签", "Audio Tags"), None, None, general::toggle("speech-role-tags-toggle", role.tags))
+        .on_click(cx.listener(move |w, _, _, cx| {
+            super::super::glass::haptic();
+            w.set_pref(|p| if let Some(r) = p.speech_roles.iter_mut().find(|r| r.voice_id == id) { r.tags = !r.tags; }, cx);
+        })).into_any_element();
+    let items = LANGS.iter().map(|&(action, code, _)| menu::Item::new(action, lang_name(code), "", 0).checked(role.lang == code)).collect();
+    let lang = div().relative().w_full().h(px(54.)).px(px(18.)).flex().items_center().gap(px(12.))
+        .child(div().flex_1().min_w_0().text_size(px(17.)).text_color(row_ink()).child(tr("台词语言", "Line Language")))
+        .child(div().flex_none().text_size(px(17.)).text_color(Theme::text_caption()).child(lang_name(&role.lang)))
+        .child(ui::icon("chevron-up-down", 16., row_chevron()))
+        .child(menu::button("speech-role-lang-menu", items))
+        .into_any_element();
+    general::titled(Some(tr("台本", "Script")), vec![tags, lang]).into_any_element()
+}
+
+/// 角色页「台词语言」菜单里的一项。
+pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
+    let Some(&(_, code, _)) = LANGS.iter().find(|l| l.0 == action) else { return false };
+    let id = EDITING.with(|e| e.borrow().clone());
+    w.set_pref(|p| if let Some(r) = p.speech_roles.iter_mut().find(|r| r.voice_id == id) { r.lang = code.into(); }, cx);
+    true
 }
 
 fn rename(w: &mut Workspace, role: &Role, cx: &mut Context<Workspace>) {
@@ -425,7 +466,7 @@ fn avatar_path(id: &str) -> Option<PathBuf> {
 }
 
 /// 自带的头像（`avatars/*.webp`，只给语音角色用，编进二进制）。选了的话 `Role::avatar` 存 `builtin-NN`（从 1 数）。
-const BUILTIN: [&[u8]; 21] = [
+const BUILTIN: [&[u8]; 38] = [
     include_bytes!("avatars/01.webp"),
     include_bytes!("avatars/02.webp"),
     include_bytes!("avatars/03.webp"),
@@ -447,6 +488,23 @@ const BUILTIN: [&[u8]; 21] = [
     include_bytes!("avatars/19.webp"),
     include_bytes!("avatars/20.webp"),
     include_bytes!("avatars/21.webp"),
+    include_bytes!("avatars/22.webp"),
+    include_bytes!("avatars/23.webp"),
+    include_bytes!("avatars/24.webp"),
+    include_bytes!("avatars/25.webp"),
+    include_bytes!("avatars/26.webp"),
+    include_bytes!("avatars/27.webp"),
+    include_bytes!("avatars/28.webp"),
+    include_bytes!("avatars/29.webp"),
+    include_bytes!("avatars/30.webp"),
+    include_bytes!("avatars/31.webp"),
+    include_bytes!("avatars/32.webp"),
+    include_bytes!("avatars/33.webp"),
+    include_bytes!("avatars/34.webp"),
+    include_bytes!("avatars/35.webp"),
+    include_bytes!("avatars/36.webp"),
+    include_bytes!("avatars/37.webp"),
+    include_bytes!("avatars/38.webp"),
 ];
 const BUILTIN_PREFIX: &str = "builtin-";
 
