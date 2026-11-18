@@ -79,6 +79,11 @@ root = ET.fromstring("<doc>" + backspace_note.read_text(encoding="utf-8") + "</d
 assert root.findtext("p") == "触屏选区：双击选择 Quiet，长按拖动选择中文。12"
 assert root.findall("p")[1].text == "中文输入："
 assert root[3].tag == "table"
+range_home, = [p for p in tmp.glob("Quiet.md-range-check-*") if p.stat().st_mtime_ns >= before.stat().st_mtime_ns]
+range_note, = (range_home / "docs").glob("*.xml")
+root = ET.fromstring("<doc>" + range_note.read_text(encoding="utf-8") + "</doc>")
+assert root[1].tag == "p" and root[1].text == "x"
+assert root[2].tag == "table", "Typing should replace the text selected across both paragraphs"
 print(libraries[0])
 PY
 )

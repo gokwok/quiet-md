@@ -2,6 +2,37 @@ import XCTest
 
 final class EditorSmoke: XCTestCase {
     @MainActor
+    func testTextSelectionHandlesKeepKeyboard() throws {
+        guard #available(iOS 26, *) else { throw XCTSkip("Requires phone selection handles") }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchEnvironment["QUIET_MD_HOME"] = "Quiet.md-range-check-\(UUID().uuidString)"
+        app.launchEnvironment["QUIET_MD_IOS_SAMPLE"] = "1"
+        app.launch()
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        func at(_ x: CGFloat, _ y: CGFloat) -> XCUICoordinate {
+            origin.withOffset(CGVector(dx: x, dy: y))
+        }
+        let word = at(187, 248)
+        let keyboard = app.keyboards.firstMatch
+        word.tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        word.doubleTap()
+        // 「Quiet」的两个手柄。向左拉到段首，再向下跨段拉到第二段末尾。
+        at(171, 234).press(forDuration: 0.05, thenDragTo: at(16, 234))
+        at(210, 268).press(forDuration: 0.05, thenDragTo: at(210, 335))
+        XCTAssertTrue(keyboard.exists, "Dragging a text selection should keep the keyboard visible")
+        app.typeText("x")
+        // 普通正文下滑依然能收键盘，再点一下正文应该重新开始输入。
+        at(160, 248).press(forDuration: 0.05, thenDragTo: at(160, 425), withVelocity: .slow, thenHoldForDuration: 0.5)
+        XCTAssertTrue(keyboard.waitForNonExistence(timeout: 5))
+        at(26, 248).tap()
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5) || app.state == .runningBackgroundSuspended)
+    }
+
+    @MainActor
     func testKeyboardDeletesEmptyParagraph() throws {
         let app = XCUIApplication()
         app.launchEnvironment["QUIET_MD_HOME"] = "Quiet.md-backspace-check-\(UUID().uuidString)"

@@ -3,7 +3,7 @@ use gpui::*;
 use serde_json::{Value, json};
 use fdl_core::{editor::table_ops::{CellSel, CellSelKind}, model::{Align, BlockKind, ColorName, Marks}};
 use crate::{ios::editor_surface::Surface, settings::{text, tr}, feishu_theme as theme};
-use super::{menus, view::{Editor, Mark, Menu}};
+use super::{core::Selection, menus, view::{Editor, Mark, Menu}};
 
 fn tool(mut item: Value, on: bool) -> Value { item["iconOnly"] = json!(true); item["on"] = json!(on); item }
 fn menu(title: &str, symbol: &str, children: Vec<Value>) -> Value {
@@ -167,7 +167,27 @@ fn dot(item:Value, color:Option<Hsla>, on:bool) -> Value {
     item["swatch"] = color.map(Rgba::from).map_or_else(|| json!([]), |c| json!([c.r,c.g,c.b,c.a])); item
 }
 
+pub(super) struct RangeDrag { original: Selection, offset: Point<Pixels>, keep_keyboard: bool }
+
 impl Editor {
+    pub(super) fn range_drag_move(&mut self, ev: &TouchDragEvent, w: &Window, cx: &mut Context<Self>) -> bool {
+        let Some(drag) = &self.range_drag else { return false };
+        // GPUI iOS 会在分发触摸前把向下拖动当作收键盘。手柄拖动期间保留原输入状态。
+        if drag.keep_keyboard && self.focus.is_focused(w) { w.request_virtual_keyboard(); }
+        let before = self.core.sel;
+        if ev.phase == TouchPhase::Cancelled {
+            self.core.sel = drag.original;
+        } else {
+            self.drag_text_endpoint(ev.position + drag.offset);
+        }
+        if ev.phase != TouchPhase::Moved {
+            self.range_drag = None;
+            self.touch_menu = !self.core.sel.is_collapsed();
+        }
+        if ev.phase != TouchPhase::Moved || self.core.sel != before { cx.notify(); }
+        true
+    }
+
     pub(super) fn phone_selection_handles(&self,window:&Window,cx:&Context<Self>) -> Vec<AnyElement> {
         if !crate::ios::editor_surface::enabled() || !self.selection_bar() || self.menu.is_some() || !self.focus.is_focused(window) { return vec![]; }
         let (start,end)=self.core.ordered();
@@ -176,9 +196,25 @@ impl Editor {
             let Some((p,line))=self.point_of(pos) else {continue};
             if p.y < px(crate::ios::doc_top()) || p.y+line>crate::ios::visible_height(window) {continue;}
             let tint=crate::theme::Theme::primary();
+            let editor = cx.entity();
+            let touch = canvas(|b,w,_| w.insert_hitbox(b, HitboxBehavior::Normal), move |_,hit,w,_| {
+                let editor = editor.clone();
+                w.on_mouse_event(move |ev: &TouchDragEvent, phase, w, cx| {
+                    if phase != DispatchPhase::Bubble || ev.phase != TouchPhase::Started || !hit.is_hovered_at(ev.start_position,w) { return; }
+                    editor.update(cx, |e,cx| {
+                        if !e.selection_bar() || !e.focus.is_focused(w) { return; }
+                        let offset = point(p.x, p.y + line/2.) - ev.start_position;
+                        e.range_drag = Some(RangeDrag { original:e.core.sel, offset, keep_keyboard:crate::ios::keyboard_up(w) });
+                        e.core.sel = Selection { anchor:fixed, head:pos };
+                        e.touch_menu = false;
+                        w.prevent_default(); cx.stop_propagation(); cx.notify();
+                    });
+                });
+            }).absolute().inset_0();
             let handle=div().id(if first {"range-start"} else {"range-end"}).relative().w(px(24.)).h(line+px(10.))
                 .child(div().absolute().left(px(11.)).top(if first {px(8.)} else {px(0.)}).w(px(2.)).h(line).bg(tint))
                 .child(div().absolute().left(px(7.)).top(if first {px(0.)} else {line}).size(px(10.)).rounded_full().bg(tint))
+                .child(touch)
                 .on_mouse_down(MouseButton::Left,cx.listener(move |e,_,w,cx| {
                     cx.stop_propagation(); w.prevent_default(); e.core.sel.anchor=fixed; e.core.sel.head=pos;
                     e.touch_menu=false; e.dragging=true; cx.notify();

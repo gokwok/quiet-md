@@ -87,7 +87,10 @@ impl Editor {
             let ed = editor.clone();
             window.on_mouse_event(move |ev: &TouchDragEvent, phase, w, cx| {
                 if phase == DispatchPhase::Bubble && (ev.phase != TouchPhase::Started || body.is_hovered_at(ev.start_position,w)) {
-                    ed.update(cx, |ed,cx| { if !ed.pick_touch(ev,w,cx) { ed.grip_touch(ev,w,cx); } });
+                    ed.update(cx, |ed,cx| {
+                        if ev.phase != TouchPhase::Started && ed.range_drag_move(ev,w,cx) { cx.stop_propagation(); return; }
+                        if !ed.pick_touch(ev,w,cx) { ed.grip_touch(ev,w,cx); }
+                    });
                 }
             });
         }).absolute().inset_0()
