@@ -73,6 +73,12 @@ table_home, = [p for p in tmp.glob("Quiet.md-table-check-*") if p.stat().st_mtim
 table_note, = (table_home / "docs").glob("*.xml")
 table = ET.fromstring("<doc>" + table_note.read_text(encoding="utf-8") + "</doc>").find(".//table")
 assert len(table.findall(".//tr")) == 4
+backspace_home, = [p for p in tmp.glob("Quiet.md-backspace-check-*") if p.stat().st_mtime_ns >= before.stat().st_mtime_ns]
+backspace_note, = (backspace_home / "docs").glob("*.xml")
+root = ET.fromstring("<doc>" + backspace_note.read_text(encoding="utf-8") + "</doc>")
+assert root.findtext("p") == "触屏选区：双击选择 Quiet，长按拖动选择中文。12"
+assert root.findall("p")[1].text == "中文输入："
+assert root[3].tag == "table"
 print(libraries[0])
 PY
 )

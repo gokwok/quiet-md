@@ -1417,7 +1417,11 @@ impl Core {
             return;
         }
         if self.is_code(prev.id) {
-            // Don't merge text into code; just move the caret.
+            // Remove the empty paragraph without appending anything to the code.
+            if self.block(id).is_some_and(|b| b.text.is_empty() && b.children.is_empty()) {
+                self.remove_subtree(id);
+                self.normalize();
+            }
             self.sel = Selection::caret(Pos::new(prev.id, self.len_of(prev.id)));
             return;
         }
@@ -3757,6 +3761,19 @@ mod tests {
         c.backspace();
         c.delete_selected_blocks();
         assert_eq!(xml(&c).matches("<table>").count(), 1, "{}", xml(&c));
+    }
+
+    #[test]
+    fn backspace_removes_empty_paragraph_after_code() {
+        let mut c = doc("<pre><code>x</code></pre><p></p><p>next</p>");
+        let before = xml(&c);
+        let us = c.units();
+        c.sel = Selection::caret(Pos::new(us[2].id, 0));
+        c.backspace();
+        assert!(c.block(us[2].id).is_none());
+        assert_eq!(c.sel.head, Pos::new(us[1].id, 1));
+        assert!(c.undo());
+        assert_eq!(xml(&c), before);
     }
 
     #[test]

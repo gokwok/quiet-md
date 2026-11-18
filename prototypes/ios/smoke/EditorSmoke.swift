@@ -2,6 +2,26 @@ import XCTest
 
 final class EditorSmoke: XCTestCase {
     @MainActor
+    func testKeyboardDeletesEmptyParagraph() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["QUIET_MD_HOME"] = "Quiet.md-backspace-check-\(UUID().uuidString)"
+        app.launchEnvironment["QUIET_MD_IOS_SAMPLE"] = "1"
+        app.launch()
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        // 第一段末尾回车，再点软键盘的退格；两个数字应连在同一段。
+        origin.withOffset(CGVector(dx: 220, dy: 284)).tap()
+        let keyboard = app.keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
+        app.typeText("1\n")
+        let delete = keyboard.keys["delete"]
+        XCTAssertTrue(delete.waitForExistence(timeout: 5))
+        delete.tap()
+        app.typeText("2")
+        XCUIDevice.shared.press(.home)
+        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5) || app.state == .runningBackgroundSuspended)
+    }
+
+    @MainActor
     func testFormatPanelConsumesOutsideTouch() throws {
         guard #available(iOS 26, *) else { throw XCTSkip("Requires native format panel") }
         let app = XCUIApplication()

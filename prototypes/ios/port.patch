@@ -3950,14 +3950,26 @@
          self.changed(window, cx);
      }
  
-@@ -2671,6 +2767,24 @@
+@@ -2670,7 +2766,36 @@
+     DistributeCols,
  }
  
++impl Editor {
++    // UIKit 把当前块当作整个输入框。空段落也有一个可删除的段落边界，
++    // 只在 UITextInput 的 UTF-16 视图里表示它，文档本身始终为空。
++    fn ime_empty_paragraph(&self) -> bool {
++        let id = self.core.sel.head.block;
++        !self.read_only && self.marked.is_none() && self.core.sel.is_collapsed()
++            && self.core.block_sel.is_none() && self.core.cell_sel.is_none()
++            && self.core.block(id).is_some_and(|b| matches!(b.kind, BlockKind::Text) && b.text.is_empty() && b.children.is_empty())
++    }
++}
++
  impl EntityInputHandler for Editor {
 +    #[cfg(target_os = "ios")]
 +    fn text_length_utf16(&mut self, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
 +        let text = self.core.text_of(self.core.sel.head.block)?;
-+        Some(text.text.encode_utf16().count())
++        Some(if text.is_empty() && self.ime_empty_paragraph() { 1 } else { text.text.encode_utf16().count() })
 +    }
 +
 +    #[cfg(target_os = "ios")]
@@ -3975,7 +3987,27 @@
      fn text_for_range(
          &mut self,
          range: Range<usize>,
-@@ -2699,12 +2813,19 @@
+@@ -2679,6 +2804,11 @@
+         _: &mut Context<Self>,
+     ) -> Option<String> {
+         let t = self.head_text()?;
++        if t.is_empty() && self.ime_empty_paragraph() {
++            let r = range.start.min(1)..range.end.min(1);
++            actual.replace(r.clone());
++            return Some("\n"[r].to_string());
++        }
+         let r = from16(&t, range.start)..from16(&t, range.end);
+         actual.replace(to16(&t, r.start)..to16(&t, r.end));
+         Some(t[r].to_string())
+@@ -2686,6 +2816,7 @@
+ 
+     fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+         let t = self.head_text()?;
++        if t.is_empty() && self.ime_empty_paragraph() { return Some(UTF16Selection { range: 1..1, reversed: false }); }
+         let (r, reversed) = self.reported_range(&t);
+         Some(UTF16Selection { range: to16(&t, r.start)..to16(&t, r.end), reversed })
+     }
+@@ -2699,12 +2830,22 @@
          Some(to16(&t.text, r.start)..to16(&t.text, r.end))
      }
  
@@ -3987,6 +4019,9 @@
  
      fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
          self.pointer_hidden = true;
++        if text.is_empty() && range == Some(0..1) && self.ime_empty_paragraph() {
++            return self.on_backspace(&k::Backspace, window, cx);
++        }
 +        // 手机：软键盘的退格是一次空的替换。「/」菜单点进了一类时，先回上一级，这一下不删字。
 +        if text.is_empty() && self.marked.is_none() && self.slash_up() {
 +            // 系统删之前先把要删的那个字选上了：光标放回「/」后面。
@@ -3997,7 +4032,7 @@
          if self.core.in_block_mode() {
              return;
          }
-@@ -2720,7 +2841,8 @@
+@@ -2720,7 +2861,8 @@
                  self.core.sel = Selection { anchor: Pos::new(head, r.start), head: Pos::new(head, r.end) };
              }
          }
@@ -4007,7 +4042,7 @@
      }
  
      fn replace_and_mark_text_in_range(
-@@ -2760,7 +2882,8 @@
+@@ -2760,7 +2902,8 @@
              let b = from16(&t2, base + ns.end);
              self.core.sel = Selection { anchor: Pos::new(head, a), head: Pos::new(head, b) };
          }
