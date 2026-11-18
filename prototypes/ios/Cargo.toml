@@ -51,3 +51,7 @@ debug = 0
 # 上游在调试构建里对此 debug_assert，关掉后行为与发布构建、与桌面一致。
 [profile.dev.package.gpui-pre]
 debug-assertions = false
+
+[profile.release]
+debug = "line-tables-only"
+split-debuginfo = "packed"

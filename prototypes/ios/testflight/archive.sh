@@ -43,5 +43,14 @@ app="$work/Quiet.xcarchive/Products/Applications/Quiet.app"
 codesign --verify --strict "$app"
 # 确认归档里打包了本次 Release 的可执行文件。签名和 strip 会改变文件哈希，但保留 Mach-O UUID。
 [ "$(xcrun dwarfdump --uuid "$binary" | cut -d ' ' -f 2)" = "$(xcrun dwarfdump --uuid "$app/quiet_md_ios" | cut -d ' ' -f 2)" ]
+mkdir -p "$work/Quiet.xcarchive/dSYMs"
+dsym="$work/Quiet.xcarchive/dSYMs/Quiet.app.dSYM"
+ditto "$binary.dSYM/" "$dsym"
+# Cargo 在 DWARF 文件名末尾加了哈希；Xcode 用包内可执行文件名查找符号。
+set -- "$dsym"/Contents/Resources/DWARF/quiet_md_ios-*
+mv "$1" "$dsym/Contents/Resources/DWARF/quiet_md_ios"
+relocations="$dsym/Contents/Resources/Relocations/aarch64"
+if [ -f "$relocations/${1##*/}.yml" ]; then mv "$relocations/${1##*/}.yml" "$relocations/quiet_md_ios.yml"; fi
+sh "$here/verify-symbols.sh" "$work/Quiet.xcarchive"
 mv "$work/Quiet.xcarchive" "$archive"
 echo "$archive"

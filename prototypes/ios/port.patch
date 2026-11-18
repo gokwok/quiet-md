@@ -16,7 +16,7 @@
 +    let triple = if sim { "arm64-apple-ios17.0-simulator" } else { "arm64-apple-ios17.0" };
 +    let object = Path::new(&std::env::var("OUT_DIR").unwrap()).join("EditorSurface.o");
 +    println!("cargo:rerun-if-changed=EditorSurface.m");
-+    let status = std::process::Command::new("xcrun").args(["--sdk", sdk, "clang", "-target", triple, "-fobjc-arc", "-fmodules", "-c", "EditorSurface.m", "-o"]).arg(&object).status().unwrap();
++    let status = std::process::Command::new("xcrun").args(["--sdk", sdk, "clang", "-target", triple, "-gline-tables-only", "-fobjc-arc", "-fmodules", "-c", "EditorSurface.m", "-o"]).arg(&object).status().unwrap();
 +    assert!(status.success(), "UIKit editor controls failed to compile");
 +    println!("cargo:rustc-link-arg={}", object.display());
 +}
