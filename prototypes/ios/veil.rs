@@ -10,7 +10,7 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-struct Veil { view: *mut AnyObject, glass: *mut AnyObject, frost: *mut AnyObject, smoke: *mut AnyObject, milk: *mut AnyObject, haze: *mut AnyObject, rim: *mut AnyObject, title: *mut AnyObject, sub: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, home: bool, centered: bool, text: (String, String), shown: bool }
+struct Veil { view: *mut AnyObject, glass: *mut AnyObject, frost: *mut AnyObject, smoke: *mut AnyObject, milk: *mut AnyObject, haze: *mut AnyObject, rim: *mut AnyObject, title: *mut AnyObject, sub: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, home: bool, wash: Option<Hsla>, centered: bool, text: (String, String), shown: bool }
 thread_local! { static VEIL: RefCell<Option<Veil>> = const { RefCell::new(None) }; }
 /// 首页左上角的空间头像（系统视图：外框、图片、上次的样子）。
 /// `blur`：同一个头像（立起来的那张图）的高斯模糊版，过渡完露面时先是它、再化成清楚的（`reveal`）。
@@ -113,8 +113,6 @@ pub fn page_header(scroll: &ScrollHandle, title: SharedString) -> impl IntoEleme
     }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
 }
 
-/// 深色文档顶栏那层黑的浓度。
-const MILK_DARK: f32 = 0.62;
 
 fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
     let smoked = dark && home;
@@ -200,7 +198,7 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
                 let _: () = msg_send![content, addSubview: l];
                 l
             };
-            *slot = Some(Veil { view, glass: material, frost, smoke, milk, haze, rim, title: make(15., 0.3), sub: make(11., 0.), frame: Bounds::default(), dark: None, home: false, centered: false, text: Default::default(), shown: false });
+            *slot = Some(Veil { view, glass: material, frost, smoke, milk, haze, rim, title: make(15., 0.3), sub: make(11., 0.), frame: Bounds::default(), dark: None, home: false, wash: None, centered: false, text: Default::default(), shown: false });
         }
         let veil = slot.as_mut().unwrap();
         if veil.frame != frame || veil.dark != Some(dark) || veil.home != home {
@@ -218,22 +216,24 @@ fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
             let _: () = msg_send![veil.haze, setFrame: CGRect::new(CGPoint::new(0., 0.), rect.size)];
             let _: () = msg_send![veil.rim, setFrame: CGRect::new(CGPoint::new(0., rect.size.height - 1.), CGSize::new(rect.size.width, 1.))];
         }
-        if veil.dark != Some(dark) || veil.home != home {
+        let tint = if home { white().opacity(0.8) } else { crate::editor_theme::Theme::bg_body().opacity(0.84) };
+        if veil.dark != Some(dark) || veil.home != home || veil.wash != Some(tint) {
+            veil.wash = Some(tint);
             veil.dark = Some(dark);
             veil.home = home;
             let _: () = msg_send![veil.view, setOverrideUserInterfaceStyle: if dark { 2isize } else { 1isize }];
             let _: () = msg_send![veil.smoke, setHidden: !smoked];
             // 首页深色之外都用「微糊 + 一层底色」：下面的字淡淡透出来、看不真切（IMG_9146、IMG_9224）。
             // 文档页原来是系统磨砂 + Clear 玻璃，字整个糊没了，玻璃露出来的底边还是一条亮线。
-            // 文档的主题顶上是深色时（按钮上的字是白的）底色换成黑。
+            // 文档用当前纸色，即使同为浅色，切换纸张也要刷新。
             let milky = !smoked;
-            let wash: *const CGColor = msg_send![super::glass::ui_color(if dark { crate::theme::rgbaf(0, 0, 0, MILK_DARK) } else { crate::theme::rgbaf(255, 255, 255, 0.8) }), CGColor];
+            let wash: *const CGColor = msg_send![super::glass::ui_color(tint), CGColor];
             let _: () = msg_send![veil.milk, setBackgroundColor: wash];
             let _: () = msg_send![veil.glass, setHidden: milky];
             let _: () = msg_send![veil.frost, setHidden: milky];
             let _: () = msg_send![veil.haze, setHidden: !milky];
             let _: () = msg_send![veil.milk, setHidden: !milky];
-            let _: () = msg_send![veil.rim, setOpacity: if smoked || dark { 0.28f32 } else { 0.5f32 }];
+            let _: () = msg_send![veil.rim, setOpacity: if !home { 0f32 } else if smoked { 0.28f32 } else { 0.5f32 }];
         }
         if !veil.shown { veil.shown = true; fade(veil.view, 1.); }
     });

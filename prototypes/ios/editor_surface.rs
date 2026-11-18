@@ -101,6 +101,11 @@ impl Surface {
     }
     pub fn list(&mut self) { self.rows.push(json!({"list":true,"h":0})); }
     pub fn page(mut self, key: &'static str, window: &Window, cx: &Context<Editor>, preview: Option<String>) -> AnyElement {
+        // 轻点页外沿用同一关闭动作，回到阅读态；滑动不触发关闭。
+        if let Some(close) = self.rows[0]["items"][0]["action"].as_u64().and_then(|i| self.handlers.get(i as usize)).cloned() {
+            let outside = self.action(move |ed,v,w,cx| { close(ed,v,w,cx); w.blur(cx); hide_keyboard(); });
+            self.rows[0]["outside"] = outside.into();
+        }
         let top = window.insets().safe_area.top;
         let w = window.viewport_size().width;
         let h = (window.viewport_size().height - top - window.insets().ime.bottom).max(px(100.));

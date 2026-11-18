@@ -334,9 +334,9 @@ pub fn top_fade(page: Hsla, titled: bool) -> impl IntoElement {
 
 /// 文档页顶栏中间的小字标题：正文的标题滚到顶栏底下后淡入，下面一行是所在的文件夹。
 pub fn doc_title(title: SharedString, folder: Option<SharedString>) -> AnyElement {
-    let (ink, sub) = style::chrome_ink().unwrap_or((Theme::text(), Theme::text_caption()));
     // 有毛玻璃带时标题写在带子上（原生的），这里只留位置。
-    if veil::on() { return veil::title(title, folder, ink, sub).into_any_element(); }
+    if veil::on() { return veil::title(title, folder, Theme::text(), Theme::text_caption()).into_any_element(); }
+    let (ink, sub) = style::chrome_ink().unwrap_or((Theme::text(), Theme::text_caption()));
     div().id("doc-title").w_full().flex().flex_col().items_start()
         .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(15.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(title))
         .children(folder.map(|f| div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).line_height(px(14.)).text_color(sub).child(f)))

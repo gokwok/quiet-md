@@ -2,6 +2,28 @@ import XCTest
 
 final class EditorSmoke: XCTestCase {
     @MainActor
+    func testFormatPanelConsumesOutsideTouch() throws {
+        guard #available(iOS 26, *) else { throw XCTSkip("Requires native format panel") }
+        let app = XCUIApplication()
+        app.launchEnvironment["QUIET_MD_HOME"] = "Quiet.md-format-touch-\(UUID().uuidString)"
+        app.launchEnvironment["QUIET_MD_IOS_SAMPLE"] = "1"
+        app.launch()
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        let word = origin.withOffset(CGVector(dx: 187, dy: 248))
+        word.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        origin.withOffset(CGVector(dx: 78, dy: 516)).tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        // 静止后抬指，避免 UIKit 把下一次轻点用来停止横向惯性。
+        word.press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: 290, dy: 248)),
+                   withVelocity: .slow, thenHoldForDuration: 0.5)
+        word.tap()
+        XCTAssertFalse(app.keyboards.firstMatch.waitForExistence(timeout: 1))
+        word.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testSelectionOpensLinkPanel() throws {
         guard #available(iOS 26, *) else { throw XCTSkip("Requires Liquid Glass") }
         let app = XCUIApplication()

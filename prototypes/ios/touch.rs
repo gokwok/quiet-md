@@ -49,6 +49,26 @@ const SWIPE_BACK: f32 = 0.24;
 /// 编辑时光标所在的块右侧有一个拖动标记，点它选中整块（并升起块动作栏），按住拖动就排序；
 /// 长按一个块直接把它提起来拖（照 Craft，编辑时也是：选词用双击，或在光标上再点一下出编辑菜单）。
 impl Editor {
+    pub(super) fn phone_panel_open(&self) -> bool {
+        self.compact() && (self.menu.is_some() || self.slash.is_some() || self.expanded_panel() || self.core.cell_sel.is_some())
+    }
+    pub(super) fn dismiss_phone_panel(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Menu::Block { sub: sub @ Some(BlockSub::Indent | BlockSub::Color), .. }) = &mut self.menu {
+            *sub = None;
+        } else if matches!(self.menu, Some(Menu::Link { .. })) {
+            self.close_link_panel(window,cx); window.blur(cx); crate::ios::editor_surface::hide_keyboard();
+        } else if matches!(self.menu, Some(Menu::Equation { .. })) {
+            self.close_equation_editor(true,window,cx); window.blur(cx);
+        } else if self.menu.is_some() { self.menu = None; }
+        else if self.slash.is_some() { self.slash = None; }
+        else if self.find.is_some() { self.close_find(window, cx); window.blur(cx); }
+        else if self.cat_pinned { self.cat_pinned = false; }
+        else if self.core.cell_sel.is_some() && !self.cell_tap(at, cx) {
+            self.core.cell_sel = None; self.table_page = 0;
+        }
+        cx.notify();
+    }
+
     /// 编辑时光标所在的块：右侧画拖动标记。
     fn grip_block(&self, window: &Window) -> Option<BlockId> {
         if !self.compact() || self.read_only || !self.focus.is_focused(window) || self.menu.is_some() || self.slash.is_some() { return None; }
@@ -460,9 +480,10 @@ impl Editor {
 
     /// 编辑时点正文下面的空白：退出编辑（收起键盘），不再把光标放到文末。没在编辑时照旧是从文末开始写。
     pub(super) fn tap_below(&mut self, at: Option<Point<Pixels>>, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.compact() || self.read_only || !self.focus.is_focused(window) { return false; }
+        if !self.compact() || self.read_only || !(self.focus.is_focused(window) || self.core.in_block_mode()) { return false; }
         // `at`：点在列表最后一项（文末的点击区）之下才算；点击区自己接到的不用再判断。
         if let Some(at) = at && !self.list.bounds_for_item(self.items.len().saturating_sub(1)).is_some_and(|b| at.y > b.bottom()) { return false; }
+        if self.core.in_block_mode() { self.finish_block_selection(window, cx); }
         (self.menu, self.slash, self.touch_menu) = (None, None, false);
         // 可聚焦的外层在按下时会自己把焦点拿回来：拦掉。
         window.prevent_default();
@@ -538,7 +559,7 @@ impl Editor {
 
     /// 横着的平移开始了：落在能滑的一行上就认下这次手势。
     fn swipe_begin(&mut self, at: Point<Pixels>, dx: f32, cx: &mut Context<Self>) {
-        if !self.compact() || self.read_only || crate::ios::overlay() || self.slash.is_some() || self.block_drag.is_some() || self.dragging || self.core.cell_sel.is_some() { return; }
+        if !self.compact() || self.read_only || self.selection_bar() || crate::ios::overlay() || self.slash.is_some() || self.block_drag.is_some() || self.dragging || self.core.cell_sel.is_some() { return; }
         if self.menu.is_some() || !self.list.viewport_bounds().contains(&at) { return; }
         // 手指下面的那一行：文本、标题、列表项各一行，引用、高亮块、分栏连同里面的算一行（`render::Item`）。
         let rows = self.row_ids();

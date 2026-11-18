@@ -47,6 +47,9 @@ void quiet_hide_keyboard(void) {
 - (void)send:(NSNumber *)action value:(NSString *)value {
     if (action) quiet_editor_action(self.key.UTF8String, action.unsignedIntegerValue, value.UTF8String);
 }
+- (void)tappedBackdrop {
+    [self send:self.rows.firstObject[@"outside"] value:@""];
+}
 - (NSDictionary *)rowFor:(UIView *)v {
     return v.tag >= 0 && v.tag < (NSInteger)self.rows.count ? self.rows[v.tag] : nil;
 }
@@ -342,8 +345,7 @@ void quiet_editor_surface(UIView *parent, const char *key, const char *model, do
                 UIControl *backdrop = [[UIControl alloc] initWithFrame:parent.bounds];
                 backdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
                 backdrop.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:0.26];
-                __weak QuietEditorSurface *weak=v;
-                [backdrop addAction:[UIAction actionWithHandler:^(__unused UIAction *a) { [weak send:[weak.rows.firstObject[@"items"] firstObject][@"action"] value:@""]; }] forControlEvents:UIControlEventTouchUpInside];
+                [backdrop addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:v action:@selector(tappedBackdrop)]];
                 [parent addSubview:backdrop]; v.backdrop=backdrop;
             }
             v.key = name; v.accessibilityIdentifier = [@"quiet.editor." stringByAppendingString:name]; v.fields = [NSMutableDictionary dictionary]; v.lines = [NSMutableArray array];

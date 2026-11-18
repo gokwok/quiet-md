@@ -542,7 +542,7 @@
 +            && self.editor.as_ref().is_some_and(|e| e.read(cx).focus.is_focused(window)) { window.focus(&self.focus, cx); }
 +        let covered = self.drawer || self.search_open || self.doc_menu || self.mode_menu || self.row_menu.is_some() || self.doc_info.is_some() || self.confirm.is_some() || self.move_dlg.is_some() || self.export_md.is_some()
 +            || self.space_menu || self.space_form.is_some();
-+        crate::ios::set_overlay(self.view != View::Doc || covered);
++        crate::ios::set_overlay(self.view != View::Doc || covered || crate::ios::stylepanel::is_open() || crate::ios::format::is_open() || crate::ios::style::sizing());
 +        // 主页自己的菜单也从底部升起，正好压在搜索和新建上。
 +        // 手机上的确认框（`ios::alert`）不压暗、不收起玻璃：背后的页面原样留着，只是点不动。
 +        let alert = compact && self.confirm.as_ref().is_some_and(|c| c.plain()) && !(self.drawer || self.search_open || self.doc_menu || self.mode_menu || self.row_menu.is_some() || self.doc_info.is_some() || self.move_dlg.is_some() || self.export_md.is_some());
@@ -591,7 +591,7 @@
                  .child(
                      div()
                          .flex_1()
-@@ -1431,14 +1622,25 @@
+@@ -1431,14 +1622,33 @@
                                  .flex_1()
                                  .min_w_0()
                                  .h_full()
@@ -606,8 +606,16 @@
                          .children(self.render_shortcuts(cx)),
                  )
 +                .children(crate::ios::keybar::render(self, window, cx))
++                .when(compact && (covered || crate::ios::stylepanel::is_open() || crate::ios::format::is_open()), |d| d.child(
++                    div().id("document-panel-backdrop").absolute().inset_0().occlude()
++                        .on_mouse_down(MouseButton::Left, |_, w, cx| { w.prevent_default(); cx.stop_propagation(); })
++                        .on_click(cx.listener(|ws, _, _, cx| {
++                            if crate::ios::format::is_open() { crate::ios::format::done(ws, cx); }
++                            else if crate::ios::stylepanel::is_open() { crate::ios::stylepanel::close(); cx.notify(); }
++                            cx.stop_propagation();
++                        }))))
 +                // 悬浮的顶栏画在正文之后，才接得到点击。
-+                .when(crate::ios::floating(), |d| d.children((!crate::ios::veil::on() && !crate::ios::style::banded() && !self.editor.as_ref().is_some_and(|e| e.read(cx).cover_on_top())).then(|| crate::ios::top_fade(crate::editor_theme::Theme::bg_body(), self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled())))).children(crate::ios::veil::on().then(|| div().absolute().top_0().left_0().right_0().h(px(crate::ios::chrome_top())).child(crate::ios::veil::slot(crate::ios::style::chrome_ink().map_or(crate::theme::dark(), |(ink, _)| ink.l > 0.5))))).child(self.top_bar(cx)))
++                .when(crate::ios::floating(), |d| d.children((!crate::ios::veil::on() && !crate::ios::style::banded() && !self.editor.as_ref().is_some_and(|e| e.read(cx).cover_on_top())).then(|| crate::ios::top_fade(crate::editor_theme::Theme::bg_body(), self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled())))).children(crate::ios::veil::on().then(|| div().absolute().top_0().left_0().right_0().h(px(crate::ios::chrome_top())).child(crate::ios::veil::slot(crate::theme::dark())))).child(self.top_bar(cx)))
                  .into_any_element(),
 +            // 手机：搜索页整个盖住时，底下那页不画（打开后打字更顺）。
 +            View::Home | View::Folder | View::Trash if crate::ios::is_compact() && self.search_open && crate::ios::search::covering() => div().flex_1().into_any_element(),
@@ -618,7 +626,7 @@
              View::Settings => self.render_settings(cx),
          };
          let move_dlg = self.render_move_dialog(cx);
-@@ -1450,13 +1652,20 @@
+@@ -1450,13 +1660,23 @@
          // surface beside it; the change of value is the only line between
          // them (no gutter, radius, border or shadow).
          // A document sits on its theme's page colour.
@@ -628,6 +636,9 @@
 +        let note = div().id("note").relative().flex_1().min_w_0().h_full().flex().bg(page).pt(if matches!(self.view, View::Doc | View::Home | View::Folder | View::Trash | View::Settings) && crate::ios::floating() { px(0.) } else { safe.top }).pb(if !crate::ios::floating() { safe.bottom } else { match self.view { View::Home | View::Folder => px(0.), View::Settings => px(0.), _ if crate::ios::style::banded() && !crate::ios::keyboard_up(window) => px(0.), _ => safe.bottom } }).pr(safe.right).when(!self.sidebar_open, |d| d.pl(safe.left))
 +            // 文档自己的背景铺在最下面，一直到屏幕的四边；有背景时纸（正文那一块）两侧内缩、上沿让到顶栏下面。
 +            .children(crate::ios::style::backdrop())
++            // 系统键盘顶角透明。延续工具栏的纸色，一直铺到键盘后面。
++            .when(self.view == View::Doc && compact && crate::ios::keyboard_up(window), |d| d.child(
++                div().absolute().left_0().right_0().bottom_0().h(window.insets().ime.bottom).bg(page)))
 +            .child(crate::ios::page(main, self.view, self.folder_current.as_deref().filter(|_| self.view == View::Folder).map(|id| (id, self.ancestors(id).len())), crate::ios::sub_depth(self, cx)))
              // Files from the Finder dropped on 主页 or a folder's page are imported there.
              .when(matches!(self.view, View::Home | View::Folder), |d| d
@@ -642,7 +653,7 @@
          div()
              .id("workspace")
              .key_context("Workspace")
-@@ -1480,6 +1689,9 @@
+@@ -1480,6 +1700,9 @@
              // whichever window macOS considers active.
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
              .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
@@ -652,7 +663,7 @@
              .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
                  crate::quick_note::persist(cx);
                  if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
-@@ -1496,7 +1708,7 @@
+@@ -1496,7 +1719,7 @@
              .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
              .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
              .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
@@ -661,7 +672,7 @@
                  cx.notify();
              }))
              .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
-@@ -1533,7 +1745,7 @@
+@@ -1533,7 +1756,7 @@
              }))
              // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
              .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
@@ -670,7 +681,7 @@
                  if ev.keystroke.key == "escape" && w.has_home_drag() {
                      w.cancel_home_drag(cx); cx.stop_propagation(); return;
                  }
-@@ -1565,10 +1777,17 @@
+@@ -1565,10 +1788,17 @@
                  if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
                  cx.stop_propagation();
              }))
@@ -689,7 +700,7 @@
              .children(row_menu)
              .children(doc_menu)
              .children(mode_menu)
-@@ -1580,6 +1799,7 @@
+@@ -1580,6 +1810,7 @@
              .children(move_dlg)
              .children(space_menu)
              .children(space_dialog)
@@ -3261,7 +3272,7 @@
                  }
 +                // 阅读模式也能长按选词（为了复制）。
 +                #[cfg(target_os = "ios")]
-+                {
++                if !entity.read(cx).phone_panel_open() && !crate::ios::overlay() {
 +                    let editor = entity.clone();
 +                    window.on_mouse_event(move |ev: &LongPressEvent, phase, window, cx| {
 +                        if phase == DispatchPhase::Bubble {
@@ -3299,7 +3310,7 @@
                      let e = entity.clone();
                      window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
                          if phase == DispatchPhase::Bubble {
-@@ -1577,7 +1638,7 @@
+@@ -1577,9 +1638,12 @@
                      .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                      .on_drag_move(cx.listener(Self::file_drag_move))
                      .on_drop(cx.listener(Self::drop_files))
@@ -3307,8 +3318,13 @@
 +                    .child(list(self.list.clone(), cx.processor(Self::render_item)).size_full().relative().top(px(self.bounce_offset()))),
              )
              .child(self.page_scrollbar())
++            .when(self.phone_panel_open(), |d| d.child(div().id("editor-panel-backdrop").absolute().inset_0().occlude()
++                .on_mouse_down(MouseButton::Left, |_, w, cx| { w.prevent_default(); cx.stop_propagation(); })
++                .on_click(cx.listener(|ed, ev: &ClickEvent, w, cx| { ed.dismiss_phone_panel(ev.position(), w, cx); cx.stop_propagation(); }))))
              .children(file_line)
-@@ -1612,6 +1673,8 @@
+             .children(catalogue)
+             .children(overlays)
+@@ -1612,6 +1676,8 @@
  impl Editor {
      /// "N 字" chip at the bottom right while text is selected (§2).
      fn word_counter(&self) -> Option<AnyElement> {
@@ -3317,7 +3333,7 @@
          let n = if self.core.in_block_mode() {
              let index = core::block_index(&self.core.doc);
              self.core
-@@ -1671,6 +1734,7 @@
+@@ -1671,6 +1737,7 @@
              spec.color = Theme::todo_done();
              spec.strike_all = true;
          }
@@ -3325,7 +3341,7 @@
          spec
      }
  }
-@@ -1746,6 +1810,7 @@
+@@ -1746,6 +1813,7 @@
                      .child(div().flex_1().min_w_0().ml(px(8.)).child(self.blocks(&b.children, Env { color: tc, in_callout: true, width: env.width - 66., ..env }, cx)))
                      .into_any_element()
              }
@@ -3333,7 +3349,7 @@
              BlockKind::Divider => div()
                  .h(px(25.))
                  .flex()
-@@ -1831,7 +1896,8 @@
+@@ -1831,7 +1899,8 @@
              .when(selected && !matches!(b.kind, BlockKind::Table(_) | BlockKind::File(_)), |d| {
                  // Rows of a flattened subtree continue the highlight below.
                  let (tint, r) = self.ed.block_tint();
@@ -3343,7 +3359,7 @@
                  d.child(if self.flat == Some(b.id) { hl.rounded_t(px(r)) } else { hl.rounded(px(r)) })
              })
              .into_any_element()
-@@ -1948,7 +2014,7 @@
+@@ -1948,7 +2017,7 @@
                          MouseButton::Left,
                          cx.listener(move |e, _, window, cx| {
                              cx.stop_propagation();

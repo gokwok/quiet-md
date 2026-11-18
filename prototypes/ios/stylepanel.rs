@@ -1,8 +1,8 @@
 //! 文档的「样式」面板（照 Craft）：主面板七格，点进去是各自的一页。内容拼成 `panel::Node`，由原生的玻璃面板画；
-//! 点了什么由 `action` 收，改的是这篇文档的 `DocStyle`（`style.rs` 负责画出来）。面板不压暗、不拦上面的正文，改了立刻看得到。
+//! 点了什么由 `action` 收，改的是这篇文档的 `DocStyle`（`style.rs` 负责画出来）。面板保持正文亮度，改动立即可见；点面板外收起。
 use std::cell::{Cell, RefCell};
 
-use gpui::{prelude::FluentBuilder as _, *};
+use gpui::*;
 use objc2::{ClassType, define_class, msg_send};
 use objc2::runtime::{AnyClass, AnyObject, NSObject};
 
@@ -245,7 +245,6 @@ pub fn element(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement>
     let width = viewport.width - px(26.);
     let height = px(super::panel::height(&nodes, f32::from(width)));
     Some(div().id("style-panel").absolute().left(px(13.)).bottom(super::insets().bottom.max(px(34.)) + px(1.)).w(width).h(height).occlude()
-        .when(page == Page::Main, |d| d.on_mouse_down_out(cx.listener(|_, _, _, cx| { close(); cx.notify(); })))
         .child(super::panel::slot(nodes)).into_any_element())
 }
 
