@@ -215,8 +215,11 @@ impl Editor {
                 .child(div().absolute().left(px(11.)).top(if first {px(8.)} else {px(0.)}).w(px(2.)).h(line).bg(tint))
                 .child(div().absolute().left(px(7.)).top(if first {px(0.)} else {line}).size(px(10.)).rounded_full().bg(tint))
                 .child(touch)
-                .on_mouse_down(MouseButton::Left,cx.listener(move |e,_,w,cx| {
-                    cx.stop_propagation(); w.prevent_default(); e.core.sel.anchor=fixed; e.core.sel.head=pos;
+                .on_mouse_down(MouseButton::Left,cx.listener(move |e,ev:&MouseDownEvent,w,cx| {
+                    cx.stop_propagation(); w.prevent_default();
+                    // 短词两端的拖柄几乎盖住整个词：双击选词后的第三下多半落在拖柄上，照样是选中整段。
+                    if ev.click_count>=3 { e.select_paragraph(); return cx.notify(); }
+                    e.core.sel.anchor=fixed; e.core.sel.head=pos;
                     e.touch_menu=false; e.dragging=true; cx.notify();
                 }));
             handles.push(super::overlays::at(self.rel(point(p.x-px(12.),p.y-if first {px(8.)} else {px(0.)})),Anchor::TopLeft,handle));

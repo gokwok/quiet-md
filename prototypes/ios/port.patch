@@ -4017,7 +4017,14 @@
          let eq = self.cache.borrow().get(&pos.block).and_then(|l| l.equation_at(ev.position));
          if let Some(ix) = eq
              && !ev.modifiers.shift
-@@ -2377,7 +2438,10 @@
+@@ -2371,13 +2432,17 @@
+             let r = core::word_at(&text, pos.offset);
+             self.set_caret(Pos::new(pos.block, r.start), false);
+             self.core.sel.head = Pos::new(pos.block, r.end);
++            self.touch_double_tap();
+         } else if ev.click_count >= 3 {
+             self.set_caret(Pos::new(pos.block, 0), false);
+             self.core.sel.head = Pos::new(pos.block, text.len());
          } else {
              self.set_caret(pos, false);
          }
@@ -4028,7 +4035,7 @@
          self.restart_blink(window, cx);
          cx.notify();
      }
-@@ -2394,6 +2458,43 @@
+@@ -2394,6 +2459,43 @@
          }
      }
  
@@ -4072,7 +4079,7 @@
      /// Mouse-up (or a move without the button) ends a text drag. Events can
      /// arrive before the frame that registers the window-level drag listeners,
      /// so the element-level handlers call this too.
-@@ -2405,6 +2506,7 @@
+@@ -2405,6 +2507,7 @@
              }
              self.link_ui.click = None;
              self.dragging = false;
@@ -4080,7 +4087,7 @@
              cx.notify();
          }
      }
-@@ -2484,7 +2586,9 @@
+@@ -2484,7 +2587,9 @@
  
      /// Click in the empty area below the content: focus a trailing empty paragraph.
      pub fn on_click_below(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -4091,7 +4098,7 @@
          if self.read_only {
              return;
          }
-@@ -2499,7 +2603,14 @@
+@@ -2499,7 +2604,14 @@
  
      /// Handle (⋮⋮) click: select the block and open its menu; "+" opens the add panel.
      pub fn open_block_menu(&mut self, block: BlockId, add: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -4107,7 +4114,7 @@
          self.slash = None;
          self.menu_hovered = false;
          if add {
-@@ -2521,6 +2632,8 @@
+@@ -2521,6 +2633,8 @@
          if !matches!(act, BlockAct::HeaderRow | BlockAct::HeaderCol) {
              self.menu = None;
          }
@@ -4116,7 +4123,7 @@
          match act {
              BlockAct::Cut => {
                  self.core.select_block(block);
-@@ -2573,7 +2686,7 @@
+@@ -2573,7 +2687,7 @@
              BlockAct::HeaderCol => self.core.table_toggle_header_col(block),
              BlockAct::DistributeCols => self.core.table_distribute(block),
          }
@@ -4125,7 +4132,7 @@
          self.changed(window, cx);
      }
  
-@@ -2670,7 +2783,36 @@
+@@ -2670,7 +2784,36 @@
      DistributeCols,
  }
  
@@ -4162,7 +4169,7 @@
      fn text_for_range(
          &mut self,
          range: Range<usize>,
-@@ -2679,6 +2821,11 @@
+@@ -2679,6 +2822,11 @@
          _: &mut Context<Self>,
      ) -> Option<String> {
          let t = self.head_text()?;
@@ -4174,7 +4181,7 @@
          let r = from16(&t, range.start)..from16(&t, range.end);
          actual.replace(to16(&t, r.start)..to16(&t, r.end));
          Some(t[r].to_string())
-@@ -2686,6 +2833,7 @@
+@@ -2686,6 +2834,7 @@
  
      fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
          let t = self.head_text()?;
@@ -4182,7 +4189,7 @@
          let (r, reversed) = self.reported_range(&t);
          Some(UTF16Selection { range: to16(&t, r.start)..to16(&t, r.end), reversed })
      }
-@@ -2699,12 +2847,22 @@
+@@ -2699,12 +2848,22 @@
          Some(to16(&t.text, r.start)..to16(&t.text, r.end))
      }
  
@@ -4207,7 +4214,7 @@
          if self.core.in_block_mode() {
              return;
          }
-@@ -2720,7 +2878,8 @@
+@@ -2720,7 +2879,8 @@
                  self.core.sel = Selection { anchor: Pos::new(head, r.start), head: Pos::new(head, r.end) };
              }
          }
@@ -4217,7 +4224,7 @@
      }
  
      fn replace_and_mark_text_in_range(
-@@ -2760,7 +2919,8 @@
+@@ -2760,7 +2920,8 @@
              let b = from16(&t2, base + ns.end);
              self.core.sel = Selection { anchor: Pos::new(head, a), head: Pos::new(head, b) };
          }

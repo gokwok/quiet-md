@@ -280,6 +280,7 @@ impl Editor {
 /// 面板收起后的退场照旧由 `ios::shot` 做（从拖到的位置滑出屏幕）。同一时间只有一块在拖。
 #[derive(Clone, Copy)]
 struct Pull { key: &'static str, from: f32, dy: f32, back: Option<(std::time::Instant, f32)> }
+thread_local! { static DOUBLE_TAP: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) }; }
 thread_local! { static PULL: std::cell::Cell<Option<Pull>> = const { std::cell::Cell::new(None) }; }
 /// 面板上沿往下这么高的一条接这个手势（就是抓手让出的那一条，不压第一行）；拖过多远松手算收起；弹回用时。
 const PULL_ZONE: f32 = crate::ios::GRAB_ROOM;
@@ -819,6 +820,11 @@ impl Editor {
             // 「格式」换成原有的选区工具栏。
             "edit-format" => { self.touch_menu = false; self.toolbar_hidden = false; return cx.notify(); }
             _ if id.starts_with(crate::ios::voice::PICK) => { self.touch_menu = false; return crate::ios::voice::start(self, id, window, cx); }
+            // 双击选词后菜单出来了，第三下点击被系统拿去收菜单，到不了编辑器：收起得这么快就当第三下，选中整段。
+            _ if DOUBLE_TAP.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500)) && !self.core.sel.is_collapsed() => {
+                self.select_paragraph();
+                return cx.notify();
+            }
             // 系统收起了菜单。全选之后菜单要留着（换成带剪切、复制的那一条），那一次收起不算。
             _ => { if !self.touch_keep.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(600)) { self.touch_menu = false; cx.notify(); } return; }
         };
@@ -834,6 +840,20 @@ impl Editor {
             && self.slash.is_none() && self.core.ordered().0.block != super::core::TITLE
             && matches!(self.menu, None | Some(Menu::TurnInto | Menu::Align | Menu::Color | Menu::TbMore))
     }
+
+    /// 连点三下：选中选区所在的那一段，编辑菜单留着。
+    pub(super) fn select_paragraph(&mut self) {
+        let block = self.core.sel.head.block;
+        let Some(len) = self.core.text_of(block).map(|t| t.len()) else { return };
+        self.set_caret(super::core::Pos::new(block, 0), false);
+        self.core.sel.head = super::core::Pos::new(block, len);
+        self.dragging = false;
+        self.touch_menu = true;
+        self.touch_keep = Some(std::time::Instant::now());
+    }
+
+    /// 双击选了词（`on_mouse_down`）：记下时间，见 `touch_menu_action`。
+    pub(super) fn touch_double_tap(&self) { DOUBLE_TAP.set(Some(std::time::Instant::now())); }
 
     /// 按下前的状态：松手时用来判断是不是「点在原来的光标上」。
     pub(super) fn touch_press(&mut self, window: &Window) {
