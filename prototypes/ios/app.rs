@@ -599,11 +599,24 @@ pub fn doc_menu_items(w: &Workspace) -> Vec<menu::Item> {
     ];
     if crate::printing::SUPPORTED { items.push(Item::new("doc-print", text("打印"), "printer", 4)); }
     items.push(Item::new("doc-info", text("文档信息"), "info.circle", 5));
-    let mut more = vec![Item::new("doc-refs", text("显示引用列表"), "", 0).checked(refs_shown)];
-    if !w.reading() { more.push(Item::new("doc-clean-empty", crate::settings::tr("清理空段落", "Remove empty paragraphs"), "eraser", 1)); }
+    let mut more = vec![Item::new("doc-refs", if refs_shown { crate::settings::tr("隐藏引用列表", "Hide references") } else { text("显示引用列表") }, "link", 0)];
+    if !w.reading() {
+        more.push(Item::new("doc-select-all-blocks", crate::settings::tr("选中所有块", "Select all blocks"), "checklist", 0));
+        more.push(Item::new("doc-clean-empty", crate::settings::tr("清理空段落", "Remove empty paragraphs"), "eraser", 0));
+    }
     items.push(Item::new("", text("更多"), "ellipsis.circle", 6).kids(more));
     items.push(Item::new("doc-delete", text("删除"), "trash", 6).danger());
     items
+}
+
+pub fn select_all_blocks(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if let Some(ed) = w.editor.clone().filter(|e| !e.read(cx).read_only) {
+        ed.update(cx, |e,cx| {
+            e.core.select_all_blocks();
+            e.menu = None; e.slash = None;
+            window.blur(cx); window.refresh(); cx.notify();
+        });
+    }
 }
 
 pub fn clean_empty_paragraphs(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
@@ -771,6 +784,10 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         "new-folder-create" => w.finish_new_folder(true, window, cx),
         "new-folder-cancel" => w.finish_new_folder(false, window, cx),
         // 系统提示框（`alert.rs`）的两颗按钮。
+        "confirm-hide-refs-always" => if let Some(crate::app::Confirm::Refs { show: false, no_ask }) = &mut w.confirm {
+            *no_ask = true;
+            w.confirm_ok(window, cx);
+        }
         "confirm-ok" => w.confirm_ok(window, cx),
         "confirm-cancel" => { w.confirm = None; w.after_save = None; cx.notify(); }
         "fab-new-folder" => { let parent = if w.view == View::Folder { w.folder_current.clone() } else { None }; w.new_folder(parent, window, cx); }
@@ -803,6 +820,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 "doc-pdf" => w.export_pdf(&cur, window, cx),
                 "doc-md" => w.open_export_md(&cur, cx),
                 "doc-print" => w.print_doc(&cur, window, cx),
+                "doc-select-all-blocks" => select_all_blocks(w, window, cx),
                 "doc-clean-empty" => clean_empty_paragraphs(w, window, cx),
                 "doc-info" => w.open_doc_info(window, cx),
                 "doc-refs" => { let shown = !w.entries.iter().find(|e| e.id == cur).is_some_and(|e| e.meta.refs_hidden); w.ask_refs(!shown, cx); }

@@ -32,7 +32,7 @@ pub fn begin(window: &Window) {
 
 /// 这一帧要这个提示框。`danger` 时确定按钮是红的。返回假是没弹出来（还没有窗口，或者上面正弹着别的）：
 /// 调用的地方这一帧自己画一张（`ios::alert`），不然只剩一层点不动的遮罩。
-pub fn show(title: &str, body: &str, action: &str, danger: bool) -> bool {
+pub fn show(title: &str, body: &str, action: &str, danger: bool, refs_hide: Option<bool>) -> bool {
     SEEN.with(|s| s.set(true));
     if ANSWERED.with(|a| a.get()) { return true; }
     let key = format!("{title}\n{body}\n{action}");
@@ -63,11 +63,20 @@ pub fn show(title: &str, body: &str, action: &str, danger: bool) -> bool {
         };
         // 1 = Cancel，2 = Destructive，0 = Default
         add(crate::settings::text("取消"), 1, "confirm-cancel");
+        if refs_hide == Some(true) {
+            add(crate::settings::tr("隐藏且不再提示", "Hide and don’t ask again"), 0, "confirm-hide-refs-always");
+        }
         let ok = add(action, if danger { 2 } else { 0 }, "confirm-ok");
         if !danger { let _: () = msg_send![alert, setPreferredAction: ok]; }
         // 深浅色跟应用的设置，不跟系统。
         let _: () = msg_send![alert, setOverrideUserInterfaceStyle: if crate::theme::dark() { 2isize } else { 1isize }];
         let _: *mut AnyObject = msg_send![alert, retain];
+        if refs_hide.is_some() {
+            let none: Option<&block2::Block<dyn Fn()>> = None;
+            let _: () = msg_send![controller, presentViewController: alert, animated: true, completion: none];
+            SHOWN.with(|s| *s.borrow_mut() = Some((key, alert)));
+            return true;
+        }
         let addr = alert as usize;
         // 呈现的容器有时到这一刻才搭好：当场藏一次，转场做完再补一次。
         let done = block2::RcBlock::new(move || undim(addr as *mut AnyObject));

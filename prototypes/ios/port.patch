@@ -823,11 +823,35 @@
                      .id("dm-more-menu")
                      .occlude()
                      .w(px(210.))
-@@ -302,13 +304,18 @@
+@@ -283,32 +285,28 @@
+                     .py(px(PAD))
+                     .child(recorder())
+                     .child(
+-                        sub_item("dm-refs", crate::settings::text("显示引用列表"))
+-                            .justify_between()
+-                            .child(
+-                                div()
+-                                    .flex_none()
+-                                    .w(px(28.))
+-                                    .h(px(16.))
+-                                    .rounded_full()
+-                                    .p(px(2.))
+-                                    .flex()
+-                                    .when(refs_shown, |d| d.justify_end())
+-                                    .bg(if refs_shown { Theme::primary_500() } else { Theme::block_placeholder() })
+-                                    .child(div().size(px(12.)).rounded_full().bg(crate::theme::raised(Theme::bg_body()))),
+-                            )
++                        sub_item("dm-refs", if refs_shown { crate::settings::tr("隐藏引用列表", "Hide references") } else { crate::settings::text("显示引用列表") })
+                             .on_click(cx.listener(move |w, _, _, cx| {
+                                 w.close_doc_menu(cx);
                                  w.ask_refs(!refs_shown, cx);
                              })),
                      )
-+                    .when(!self.reading(), |d| d.child(sub_item("dm-clean-empty", crate::settings::tr("清理空段落", "Remove empty paragraphs"))
++                    .when(!self.reading(), |d| d.child(sub_item("dm-select-all-blocks", crate::settings::tr("选中所有块", "Select all blocks"))
++                        .on_click(cx.listener(|w, _, window, cx| {
++                            w.close_doc_menu(cx);
++                            crate::ios::select_all_blocks(w, window, cx);
++                        }))).child(sub_item("dm-clean-empty", crate::settings::tr("清理空段落", "Remove empty paragraphs"))
 +                        .on_click(cx.listener(|w, _, window, cx| {
 +                            w.close_doc_menu(cx);
 +                            crate::ios::clean_empty_paragraphs(w, window, cx);
@@ -6693,7 +6717,7 @@
      /// The confirmation dialog: a modal (white, radius 16), a 15pt
      /// semibold title, one line of 13pt body, 取消 and the action button on
      /// the right.
-@@ -315,6 +375,7 @@
+@@ -315,10 +375,11 @@
                  crate::settings::text("清空"),
                  true,
              ),
@@ -6701,15 +6725,24 @@
              Confirm::Purge(_) => (crate::settings::text("确认彻底删除？").to_string(), crate::settings::text("彻底删除后，该页面及其子页面将无法恢复").to_string(), crate::settings::text("删除"), true),
              Confirm::Refs { show: false, .. } => (
                  crate::settings::text("是否隐藏引用列表？").to_string(),
-@@ -351,6 +412,7 @@
+-                crate::settings::text("选择隐藏后，协作者将无法查看本文的引用列表。如需重新显示，可点击文档右上角的更多按钮“...”，打开“显示引用列表”开关。").to_string(),
++                crate::settings::tr("隐藏后，可在文档的「更多」菜单中选择「显示引用列表」恢复。", "To show the references again, choose Show References in the document’s More menu.").to_string(),
+                 crate::settings::text("隐藏"),
+                 false,
+             ),
+@@ -351,6 +412,11 @@
              Confirm::Refs { show: false, no_ask } => Some(*no_ask),
              _ => None,
          };
++        if crate::ios::is_compact() && matches!(c, Confirm::Refs { .. })
++            && crate::ios::alert::show(&title, &body, action, danger, Some(no_ask.is_some())) {
++            return Some(div().absolute().inset_0().occlude().into_any_element());
++        }
 +        let phone_text = (title.clone(), body.clone());
          let ok = primary_button("confirm-ok", action);
          let ok = if danger { ok.bg(Theme::danger()).hover(|s| s.bg(theme::c(craft::R600))).active(|s| s.bg(theme::c(craft::R700))) } else { ok };
          let dialog = dialog("confirm-dialog")
-@@ -398,42 +460,33 @@
+@@ -398,42 +464,33 @@
                              w.resolve_save_failed(false, window, cx);
                          })))
                      })
@@ -6749,7 +6782,7 @@
 +                _ => phone_text.0,
 +            };
 +            // 有系统提示框时用它（`ios::alert`）：这里只留一层透明的遮罩。没有时照旧自己画一张。
-+            if crate::ios::alert::native() && crate::ios::alert::show(&title, &phone_text.1, action, danger) { div().into_any_element() }
++            if crate::ios::alert::native() && crate::ios::alert::show(&title, &phone_text.1, action, danger, None) { div().into_any_element() }
 +            else { crate::ios::alert(title, phone_text.1, action, danger, cx).into_any_element() }
 +        } else { dialog.into_any_element() };
          Some(
