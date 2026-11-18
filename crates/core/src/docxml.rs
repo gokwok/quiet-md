@@ -664,6 +664,9 @@ fn walk_inline(nodes: &[Node], marks: &Marks, out: &mut RichText) {
                         m.link = e.attr("href").map(str::to_string);
                     }
                     "span" => {
+                        if let Some(v) = e.attr("voice") {
+                            m.voice = Some(v.into());
+                        }
                         if let Some(c) = e.attr("text-color") {
                             m.text_color = Some(ColorName(c.into()));
                         }
@@ -1035,6 +1038,10 @@ fn write_table(t: &Table, s: &mut String, depth: usize) {
 /// wrappers share the elements, so a colored paragraph is one `<span>`.
 fn wrappers(m: &Marks) -> Vec<(String, &'static str)> {
     let mut w = vec![];
+    // 配音在最外层：一段配音里换了颜色、加粗，也还是同一个 `<span voice>`。
+    if let Some(v) = &m.voice {
+        w.push((format!("<span voice=\"{}\">", esc_attr(v)), "</span>"));
+    }
     if m.text_color.is_some() || m.bg_color.is_some() {
         let mut open = "<span".to_string();
         if let Some(c) = &m.text_color {

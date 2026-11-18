@@ -9,8 +9,8 @@ use objc2::{ClassType, define_class, msg_send};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-/// 菜单里的一项：交给 `ios::menu_action` 的标识和标题。
-pub type Item = (&'static str, SharedString);
+/// 菜单里的一项：交给 `ios::menu_action` 的标识、标题，和子项（有子项时它自己不能点，系统翻到下一页列出子项）。
+pub type Item = (&'static str, SharedString, Vec<(&'static str, SharedString)>);
 
 thread_local! { static INTERACTION: Cell<*mut AnyObject> = const { Cell::new(std::ptr::null_mut()) }; }
 thread_local! { static CONFIG: Cell<*mut AnyObject> = const { Cell::new(std::ptr::null_mut()) }; }
@@ -49,10 +49,17 @@ fn build() -> *mut AnyObject {
     let items = SHOWN.with(|s| s.borrow().as_ref().map(|(_, items)| items.clone())).unwrap_or_default();
     unsafe {
         let children: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
-        for (id, title) in items {
+        let action = |id: &'static str, title: &str| -> *mut AnyObject {
             let handler = block2::RcBlock::new(move |_action: *mut AnyObject| super::menu::chosen(id));
-            let action: *mut AnyObject = msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(&title), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler];
-            let _: () = msg_send![children, addObject: action];
+            msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(title), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler]
+        };
+        for (id, title, kids) in items {
+            let item = if kids.is_empty() { action(id, &title) } else {
+                let list: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
+                for (id, title) in kids { let _: () = msg_send![list, addObject: action(id, &title)]; }
+                msg_send![AnyClass::get(c"UIMenu").unwrap(), menuWithTitle: ns_string(&title), children: list]
+            };
+            let _: () = msg_send![children, addObject: item];
         }
         msg_send![AnyClass::get(c"UIMenu").unwrap(), menuWithChildren: children]
     }

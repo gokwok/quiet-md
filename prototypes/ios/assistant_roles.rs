@@ -23,6 +23,11 @@ pub struct Role {
     traits: String,
 }
 
+impl Role {
+    pub fn voice_id(&self) -> &str { &self.voice_id }
+    pub fn name(&self) -> &str { &self.name }
+}
+
 /// 只认要用的几项，别的字段 ElevenLabs 加了减了都不影响（`voice_id` 以外都是可选的）。
 #[derive(Clone, Deserialize)]
 struct Voice {
@@ -92,7 +97,7 @@ pub(super) fn key_changed() {
 
 /// 没换头像的音色：一颗柔光球（照 ElevenLabs 的音色头像）。按 voice_id 定颜色和光斑位置，同一个音色在哪儿都一样。
 /// GPUI 没有模糊，光球是 SVG（几团高斯模糊的色块裁在圆里）用 resvg 画成 PNG，按音色缓存。
-pub(super) fn orb(id: &str, size: f32) -> Div {
+pub(crate) fn orb(id: &str, size: f32) -> Div {
     let image = ORBS.with(|orbs| {
         if let Some((_, image)) = orbs.borrow().iter().find(|(k, _)| k == id) { return Some(image.clone()); }
         let image = std::sync::Arc::new(Image::from_bytes(ImageFormat::Png, orb_png(id)?));
@@ -462,7 +467,7 @@ fn circle(size: f32, image: impl Into<ImageSource>) -> AnyElement {
 }
 
 /// 角色头像：换过的是圆形照片或自带头像，没换的是这个音色的光球。
-fn avatar(role: &Role, size: f32) -> AnyElement {
+pub(crate) fn avatar(role: &Role, size: f32) -> AnyElement {
     if let Some(n) = role.avatar.as_deref().and_then(builtin) { return circle(size, builtin_image(n)); }
     match role.avatar.as_deref().and_then(avatar_path).filter(|path| path.is_file()) {
         Some(path) => circle(size, path),

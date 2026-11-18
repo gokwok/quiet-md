@@ -152,7 +152,7 @@ pub(super) fn key_saved(item: Secret) -> Option<bool> {
 
 pub fn refresh_key_status() { KEY_SAVED.with(|saved| saved.set(key_saved(ELEVENLABS))); }
 
-fn read_key() -> Option<String> { read_secret(ELEVENLABS) }
+pub(crate) fn read_key() -> Option<String> { read_secret(ELEVENLABS) }
 
 pub(super) fn read_secret(item: Secret) -> Option<String> {
     unsafe {

@@ -40,7 +40,7 @@ impl Model {
 /// 流式对话里陆续收到的东西。
 pub enum Event { Thinking, Text(String), Done, Failed(String) }
 
-fn runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| tokio::runtime::Builder::new_multi_thread().worker_threads(1).thread_name("quiet-md-llm").enable_all().build().expect("tokio runtime"))
 }

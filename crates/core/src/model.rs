@@ -40,6 +40,8 @@ pub struct Marks {
     pub link: Option<String>,
     pub text_color: Option<ColorName>,
     pub bg_color: Option<ColorName>,
+    /// 配音：这段文字有一段配好的音频，值是音频的标识（`assets/voice/<标识>.*`）。跨块的一段配音每块都带同一个标识。
+    pub voice: Option<String>,
     /// Inline object (equation, button, mention, ...). Each object is one
     /// U+FFFC in the text.
     pub inline: Option<Inline>,
@@ -377,6 +379,7 @@ fn typing_marks(m: &Marks) -> Marks {
         link: None,
         code: false,
         inline: None,
+        voice: None,
         ..m.clone()
     }
 }
@@ -1031,6 +1034,33 @@ impl Document {
             }
         }
         walk(&self.blocks, &mut out);
+        out
+    }
+
+    /// 带着这段配音的地方，按文档顺序：哪一块、块里的哪几段。
+    pub fn voiced(&self, clip: &str) -> Vec<(BlockId, Range<usize>)> {
+        let mut out: Vec<(BlockId, Range<usize>)> = vec![];
+        self.for_each_block(|b| {
+            for (r, m) in b.text.spans() {
+                if m.voice.as_deref() != Some(clip) { continue; }
+                match out.last_mut() {
+                    Some((id, last)) if *id == b.id && last.end == r.start => last.end = r.end,
+                    _ => out.push((b.id, r)),
+                }
+            }
+        });
+        out
+    }
+
+    /// 配音念的那段文字：各段接起来，跨块处是一个换行。
+    pub fn voice_text(&self, clip: &str) -> String {
+        let parts = self.voiced(clip);
+        let mut out = String::new();
+        self.for_each_block(|b| for (i, (id, r)) in parts.iter().enumerate() {
+            if *id != b.id { continue; }
+            if i > 0 { out.push(if parts[i - 1].0 == *id { ' ' } else { '\n' }); }
+            out.push_str(&b.text.text[r.clone()]);
+        });
         out
     }
 

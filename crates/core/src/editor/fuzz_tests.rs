@@ -124,7 +124,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
     }
     let us = c.units();
     let any = |rng: &mut Rng| rng.pick(&us).id;
-    match rng.below(25) {
+    match rng.below(26) {
         0..=2 => {
             let s = *rng.pick(TEXTS);
             c.insert_text(s);
@@ -220,6 +220,15 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
         20 => table_step(c, rng),
         21 => object_step(c, rng),
         22 => page_step(c, rng),
+        23 => {
+            // 配音：两个标识轮着用，好让相邻、重叠的两段配音也碰到；有时再去掉一段。
+            let clip = *rng.pick(&["v1", "v2"]);
+            if rng.chance(25) {
+                c.clear_voice(clip);
+                return format!("clear_voice({clip})");
+            }
+            format!("set_voice({clip}) = {}", c.set_voice(clip))
+        }
         24 => format!("remove_empty_paragraphs({})", c.remove_empty_paragraphs()),
         _ => {
             c.trailing_line();

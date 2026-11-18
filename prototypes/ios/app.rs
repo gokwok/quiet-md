@@ -35,6 +35,7 @@ pub mod toast;
 pub mod veil;
 pub mod stylepanel;
 pub mod format;
+pub mod voice;
 
 pub fn run() {
     crate::apple_files::install();
@@ -810,6 +811,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         _ if id.starts_with("find-") && search::menu_action(id, w, cx) => {}
         _ if search::set_mode(id) => { cx.notify(); }
         _ if keybar::menu_action(id, w, window, cx) => {}
+        _ if voice::menu_action(id, w, window, cx) => {}
         // 设置子页的选项行（`general::choice`）。
         "pref-lang-zh" | "pref-lang-en" => { let en = id == "pref-lang-en"; if crate::settings::prefs().english != en { w.set_pref(|p| p.english = en, cx); } }
         _ if assistant::menu_action(id, w, cx) => {}

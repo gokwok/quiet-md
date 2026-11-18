@@ -3251,7 +3251,15 @@
              BlockKind::Divider => div()
                  .h(px(20.))
                  .w_full()
-@@ -507,10 +516,11 @@
+@@ -489,6 +498,7 @@
+             .w_full()
+             .children(bg)
+             .child(content)
++            .when(!self.ghost, |d| d.children(crate::ios::voice::rows(b, &self.ed.core.doc, cx)))
+             .child(record_bounds(b.id, self.bounds.clone()))
+             .children(handle)
+             .children(self.fold_button(b, env, cx))
+@@ -507,10 +517,11 @@
                  )
              })
              // A table draws its own selection (tinted bars and cells).
@@ -3265,7 +3273,7 @@
                  d.child(if self.flat == Some(b.id) { hl.rounded_t(px(r)) } else { hl.rounded(px(r)) })
              })
              .into_any_element()
-@@ -696,7 +706,7 @@
+@@ -696,7 +707,7 @@
                          MouseButton::Left,
                          cx.listener(move |e, _, window, cx| {
                              cx.stop_propagation();
@@ -3274,7 +3282,7 @@
                              e.core.toggle_todo(id);
                              e.changed(window, cx);
                          }),
-@@ -1040,6 +1050,7 @@
+@@ -1040,6 +1051,7 @@
          self.core.doc.title.text.len().hash(&mut h);
          self.core.doc.icon.is_some().hash(&mut h);
          self.core.doc.cover.as_ref().map(|_| cover_h.to_bits()).hash(&mut h);
@@ -3282,7 +3290,7 @@
          self.info.hidden.hash(&mut h);
          let mut keys = vec![h.finish()];
          let links = self.links_key();
-@@ -1117,6 +1128,17 @@
+@@ -1117,6 +1129,17 @@
          super::grid::item_containing(&self.items, &self.core.doc.blocks, id)
      }
  
@@ -3300,7 +3308,7 @@
      fn render_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
          let Some(item) = self.items.get(ix).cloned() else { return div().into_any_element() };
          if let Item::Block { path, .. } = &item {
-@@ -1151,6 +1173,8 @@
+@@ -1151,6 +1174,8 @@
                  spec.size = theme::title().size;
                  spec.line_height = theme::title().line_height;
                  spec.weight = FontWeight(theme::style().num("title.weight"));
@@ -3309,7 +3317,7 @@
                  if let Some(c) = theme::style().color("title.color") { spec.color = c; }
                  let tf = theme::style().font("title.font");
                  if tf != theme::body_font() { spec.font = Some(tf); }
-@@ -1161,8 +1185,9 @@
+@@ -1161,8 +1186,9 @@
                  div()
                      .relative()
                      .group("doc-header")
@@ -3321,7 +3329,7 @@
                      .children(self.header_entries(cx))
                      .child(
                          div()
-@@ -1171,6 +1196,8 @@
+@@ -1171,6 +1197,8 @@
                              .children(self.doc_icon_el(cx))
                              .child(div().flex_1().min_w_0().child(r.text_el(TITLE, &self.core.doc.title, spec, Align::Left, Some(crate::settings::text("请输入标题").into())))),
                      )
@@ -3330,7 +3338,7 @@
                      .into_any_element()
              }
              Item::Block { path, gap } => {
-@@ -1203,6 +1230,8 @@
+@@ -1203,6 +1231,8 @@
                      .relative()
                      .pt(px(gap))
                      .pl(px(25. * depth as f32))
@@ -3339,7 +3347,7 @@
                      .when(dimmed, |d| d.opacity(0.5))
                      .children(bgs.into_iter().map(|(d, fill)| {
                          div()
-@@ -1221,8 +1250,8 @@
+@@ -1221,8 +1251,8 @@
                                  .absolute()
                                  .top_0()
                                  .bottom_0()
@@ -3350,7 +3358,7 @@
                                  .when(last, |d| d.rounded_b(px(self.block_tint().1)))
                                  .bg(self.block_tint().0),
                          )
-@@ -1234,7 +1263,7 @@
+@@ -1234,7 +1264,7 @@
                  .w_full()
                  // An open 页面 has no reference list: the references are the document's.
                  .children(if self.outer.is_empty() { self.refs_list(window, cx) } else { None })
@@ -3359,7 +3367,7 @@
                  .on_mouse_down(MouseButton::Left, cx.listener(Self::on_click_below))
                  .into_any_element(),
          };
-@@ -1243,7 +1272,8 @@
+@@ -1243,7 +1273,8 @@
          let padded = div().w_full().pl(px(self.layout.ml)).pr(px(self.layout.mr)).child(content);
          match cover {
              // The cover spans the whole pane, above the padded header.
@@ -3369,7 +3377,7 @@
              None => padded.into_any_element(),
          }
      }
-@@ -1254,6 +1284,8 @@
+@@ -1254,6 +1285,8 @@
      fn apply_reveal(&mut self, window: &mut Window) {
          let Some((req, tries)) = self.reveal.take() else { return };
          let view = self.list.viewport_bounds();
@@ -3378,7 +3386,7 @@
          let caret_rect = |p: Pos| {
              self.cache.borrow().get(&p.block).map(|l| Bounds::new(l.position_for(p.offset), size(px(2.), l.line_height)))
          };
-@@ -1299,10 +1331,12 @@
+@@ -1299,10 +1332,12 @@
      }
  
      fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3391,7 +3399,7 @@
          let overlays = self.render_overlays(window, cx);
          let lightbox = self.lightbox_el(window, cx);
          let toast = self.toast_el(window);
-@@ -1404,7 +1438,7 @@
+@@ -1404,7 +1439,7 @@
                      }
                  }
                  if pointer_hidden {
@@ -3400,7 +3408,7 @@
                      let e = entity.clone();
                      window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
                          if phase == DispatchPhase::Bubble {
-@@ -1577,9 +1611,13 @@
+@@ -1577,9 +1612,13 @@
                      .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                      .on_drag_move(cx.listener(Self::file_drag_move))
                      .on_drop(cx.listener(Self::drop_files))
@@ -3415,7 +3423,7 @@
              .children(file_line)
              .children(catalogue)
              .children(overlays)
-@@ -1612,6 +1650,8 @@
+@@ -1612,6 +1651,8 @@
  impl Editor {
      /// "N 字" chip at the bottom right while text is selected (§2).
      fn word_counter(&self) -> Option<AnyElement> {
@@ -3424,7 +3432,7 @@
          let n = if self.core.in_block_mode() {
              let index = core::block_index(&self.core.doc);
              self.core
-@@ -1671,6 +1711,7 @@
+@@ -1671,6 +1712,7 @@
              spec.color = Theme::todo_done();
              spec.strike_all = true;
          }
@@ -3432,7 +3440,7 @@
          spec
      }
  }
-@@ -1746,6 +1787,7 @@
+@@ -1746,6 +1788,7 @@
                      .child(div().flex_1().min_w_0().ml(px(8.)).child(self.blocks(&b.children, Env { color: tc, in_callout: true, width: env.width - 66., ..env }, cx)))
                      .into_any_element()
              }
@@ -3440,7 +3448,15 @@
              BlockKind::Divider => div()
                  .h(px(25.))
                  .flex()
-@@ -1828,10 +1870,11 @@
+@@ -1810,6 +1853,7 @@
+             .w_full()
+             .children(bg)
+             .child(content)
++            .when(!self.ghost, |d| d.children(crate::ios::voice::rows(b, &self.ed.core.doc, cx)))
+             .child(record_bounds(b.id, self.bounds.clone()))
+             .children(handle)
+             .children(self.fold_button(b, env, cx))
+@@ -1828,10 +1872,11 @@
                  )
              })
              // A table draws its own selection (tinted bars and cells).
@@ -3454,7 +3470,7 @@
                  d.child(if self.flat == Some(b.id) { hl.rounded_t(px(r)) } else { hl.rounded(px(r)) })
              })
              .into_any_element()
-@@ -1948,7 +1991,7 @@
+@@ -1948,7 +1993,7 @@
                          MouseButton::Left,
                          cx.listener(move |e, _, window, cx| {
                              cx.stop_propagation();
@@ -3616,7 +3632,15 @@
                      .child(edges.absolute().top_0().left_0().size_full()),
 --- a/src/editor/text.rs
 +++ b/src/editor/text.rs
-@@ -981,7 +981,7 @@
+@@ -733,6 +733,7 @@
+         } else {
+             let hl = self.highlight.as_ref().map(|f| f(&self.text.text));
+             let mut runs = build_runs(&self.text, &self.spec, self.marked.as_ref(), hl.as_ref());
++            crate::ios::voice::decorate(self.id, &self.text, &mut runs);
+             let mut text = self.text.text.clone();
+             for (r, m) in self.text.spans() {
+                 let Some(obj) = m.inline.as_ref() else { continue };
+@@ -981,7 +982,7 @@
          let o = point(bounds.left() + dx, bounds.top());
          for (hi, (_, line)) in layout.lines.iter().enumerate() {
              let tops: Vec<Pixels> = layout.rows.iter().filter(|r| r.hard == hi).map(|r| r.y + r.base_dy).collect();
@@ -3625,7 +3649,7 @@
          }
          if let Some(sel) = &self.selection {
              let rects = if self.text.is_empty() {
-@@ -1031,7 +1031,7 @@
+@@ -1031,7 +1032,7 @@
          }
          for (hi, (_, line)) in layout.lines.iter().enumerate() {
              let tops: Vec<Pixels> = layout.rows.iter().filter(|r| r.hard == hi).map(|r| r.y + r.base_dy).collect();
@@ -3634,7 +3658,7 @@
          }
          for eq in prepaint.iter() {
              let o = eq.origin;
-@@ -1048,13 +1048,13 @@
+@@ -1048,13 +1049,13 @@
                  EqBody::Reminder { .. } => self.paint_reminder(eq, window, cx),
                  EqBody::Text { line, at, icon } => {
                      let top = o.y + px(at[1]) - line.ascent;
@@ -3650,7 +3674,7 @@
                              theme::c(0xff9200),
                              cx,
                          );
-@@ -1122,7 +1122,7 @@
+@@ -1122,7 +1123,7 @@
          let shadows = if lifted { crate::editor::button::shadow_s4() } else { crate::editor::button::shadow_s1() };
          // Content stays crisp: buttons in the text round at 5.
          let radius = px(5.);
@@ -3659,7 +3683,7 @@
          window.paint_quad(fill(v, bg).corner_radii(radius));
          // A done to-do: `.todo-line-through .docx-button-component` draws
          // a 1.6px `--icon-n2` line at 55% behind the label; `opacity: .7`.
-@@ -1135,7 +1135,7 @@
+@@ -1135,7 +1136,7 @@
          let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
          let clip = Bounds::new(point(v.left() + px(*pad), v.top()), size((v.size.width - px(pad * 2.)).max(px(0.)), v.size.height));
          window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
@@ -3668,7 +3692,7 @@
          });
      }
  
-@@ -1154,7 +1154,7 @@
+@@ -1154,7 +1155,7 @@
          let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
          let clip = Bounds::new(point(o.x + px(*text_x), v.top()), size((v.size.width - px(text_x + 2.)).max(px(0.)), v.size.height));
          window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
@@ -3677,7 +3701,7 @@
          });
      }
  
-@@ -1173,12 +1173,12 @@
+@@ -1173,12 +1174,12 @@
          let ib = Bounds::new(point(o.x + px(icon[0]), o.y + px(icon[1])), size(px(icon[2]), px(icon[2])));
          match emoji {
              Some(e) => {
@@ -3693,7 +3717,7 @@
              }
          }
          let color = if *deleted { Theme::text_disabled() } else if hovered { Theme::link_hover() } else { Theme::link() };
-@@ -1186,7 +1186,7 @@
+@@ -1186,7 +1187,7 @@
          let line = window.text_system().shape_line(line.text.clone(), line.font_size, &[run], None);
          let clip = Bounds::new(point(o.x + px(*text_x), v.top()), size((v.size.width - px(text_x + 2.)).max(px(0.)), v.size.height));
          window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
@@ -3702,7 +3726,7 @@
          });
      }
  
-@@ -1200,9 +1200,9 @@
+@@ -1200,9 +1201,9 @@
          let o = eq.origin;
          let ib = Bounds::new(point(o.x + px(icon[0]), o.y + px(icon[1])), size(px(icon[2]), px(icon[2])));
          let path = if *filled { "editor-icons/reminder-filled.svg" } else { "editor-icons/reminder.svg" };

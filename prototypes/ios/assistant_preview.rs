@@ -93,8 +93,16 @@ fn watch(epoch: u64, cx: &mut Context<Workspace>) {
     }).detach();
 }
 
-/// 开始播放，返回总长（秒）。播放类别：静音开关打开时也有声音，这是用户自己点的试听。
+/// 开始播放，返回总长（秒）。
 fn play(bytes: &[u8]) -> Option<f32> {
+    let player = open(bytes)?;
+    PLAYER.with(|p| p.set(player));
+    let length: f64 = unsafe { msg_send![player, duration] };
+    Some(length.max(0.1) as f32)
+}
+
+/// 开一个播放器放这段音频，交给调用方（停的时候 `stop` 再 `release`）。播放类别：静音开关打开时也有声音，是用户自己点的。
+pub(crate) fn open(bytes: &[u8]) -> Option<*mut AnyObject> {
     unsafe {
         let session: *mut AnyObject = msg_send![class!(AVAudioSession), sharedInstance];
         let _: bool = msg_send![session, setCategory: AVAudioSessionCategoryPlayback, error: null_mut::<*mut AnyObject>()];
@@ -106,9 +114,7 @@ fn play(bytes: &[u8]) -> Option<f32> {
         let _: bool = msg_send![player, prepareToPlay];
         let started: bool = msg_send![player, play];
         if !started { let _: () = msg_send![player, release]; return None; }
-        PLAYER.with(|p| p.set(player));
-        let length: f64 = msg_send![player, duration];
-        Some(length.max(0.1) as f32)
+        Some(player)
     }
 }
 

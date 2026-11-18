@@ -2404,6 +2404,39 @@ impl Core {
         }
     }
 
+    /// 给选中的文字配音：带上 `clip`。代码块和标题不算；什么都没选中时返回假。
+    pub fn set_voice(&mut self, clip: &str) -> bool {
+        let us = self.units();
+        let targets: Vec<(BlockId, Range<usize>)> = us
+            .iter()
+            .filter(|u| u.text && u.id != TITLE && !self.is_code(u.id))
+            .filter_map(|u| self.range_in(u.id, &us).map(|r| (u.id, r)))
+            .filter(|(_, r)| !r.is_empty())
+            .collect();
+        if targets.is_empty() {
+            return false;
+        }
+        self.checkpoint(EditKind::Other);
+        for (id, r) in targets {
+            self.text_mut(id).unwrap().update_marks(r, |m| m.voice = Some(clip.to_string()));
+        }
+        true
+    }
+
+    /// 去掉一段配音（文字留着）。
+    pub fn clear_voice(&mut self, clip: &str) {
+        let parts = self.doc.voiced(clip);
+        if parts.is_empty() {
+            return;
+        }
+        self.checkpoint(EditKind::Other);
+        for (id, r) in parts {
+            if let Some(t) = self.text_mut(id) {
+                t.update_marks(r, |m| if m.voice.as_deref() == Some(clip) { m.voice = None });
+            }
+        }
+    }
+
     /// Apply to whole blocks (block menu → 颜色).
     pub fn apply_marks_to_blocks(&mut self, ids: &[BlockId], f: impl Fn(&mut Marks) + Copy) {
         self.checkpoint(EditKind::Other);

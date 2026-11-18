@@ -818,6 +818,7 @@ impl Editor {
             "edit-all" => Box::new(k::SelectAll),
             // 「格式」换成原有的选区工具栏。
             "edit-format" => { self.touch_menu = false; self.toolbar_hidden = false; return cx.notify(); }
+            _ if id.starts_with(crate::ios::voice::PICK) => { self.touch_menu = false; return crate::ios::voice::start(self, id, window, cx); }
             // 系统收起了菜单。全选之后菜单要留着（换成带剪切、复制的那一条），那一次收起不算。
             _ => { if !self.touch_keep.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(600)) { self.touch_menu = false; cx.notify(); } return; }
         };
@@ -867,10 +868,11 @@ impl Editor {
             let (left, right) = if sp.y == ep.y { (sp.x, ep.x.max(sp.x + px(2.))) } else { (view.left() + px(20.), view.right() - px(20.)) };
             let rect = Bounds::from_corners(point(left, sp.y), point(right, ep.y + elh.max(slh)));
             let mut items: Vec<crate::ios::editmenu::Item> = vec![];
-            if edit && !collapsed { items.push(("edit-cut", tr("剪切", "Cut").into())); }
-            if !collapsed { items.push(("edit-copy", tr("复制", "Copy").into())); }
-            if edit { items.push(("edit-paste", tr("粘贴", "Paste").into())); }
-            items.push(("edit-all", tr("全选", "Select All").into()));
+            if edit && !collapsed { items.push(("edit-cut", tr("剪切", "Cut").into(), vec![])); }
+            if !collapsed { items.push(("edit-copy", tr("复制", "Copy").into(), vec![])); }
+            if edit { items.push(("edit-paste", tr("粘贴", "Paste").into(), vec![])); }
+            items.push(("edit-all", tr("全选", "Select All").into(), vec![]));
+            if edit && !collapsed && let Some(item) = crate::ios::voice::menu_item() { items.push(item); }
             crate::ios::editmenu::present(rect, items, window);
             return None;
         }
