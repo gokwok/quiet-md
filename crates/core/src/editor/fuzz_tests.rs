@@ -124,7 +124,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
     }
     let us = c.units();
     let any = |rng: &mut Rng| rng.pick(&us).id;
-    match rng.below(24) {
+    match rng.below(25) {
         0..=2 => {
             let s = *rng.pick(TEXTS);
             c.insert_text(s);
@@ -220,6 +220,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
         20 => table_step(c, rng),
         21 => object_step(c, rng),
         22 => page_step(c, rng),
+        24 => format!("remove_empty_paragraphs({})", c.remove_empty_paragraphs()),
         _ => {
             c.trailing_line();
             "trailing_line".into()

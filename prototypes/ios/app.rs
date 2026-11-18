@@ -599,9 +599,26 @@ pub fn doc_menu_items(w: &Workspace) -> Vec<menu::Item> {
     ];
     if crate::printing::SUPPORTED { items.push(Item::new("doc-print", text("打印"), "printer", 4)); }
     items.push(Item::new("doc-info", text("文档信息"), "info.circle", 5));
-    items.push(Item::new("", text("更多"), "ellipsis.circle", 6).kids(vec![Item::new("doc-refs", text("显示引用列表"), "", 0).checked(refs_shown)]));
+    let mut more = vec![Item::new("doc-refs", text("显示引用列表"), "", 0).checked(refs_shown)];
+    if !w.reading() { more.push(Item::new("doc-clean-empty", crate::settings::tr("清理空段落", "Remove empty paragraphs"), "eraser", 1)); }
+    items.push(Item::new("", text("更多"), "ellipsis.circle", 6).kids(more));
     items.push(Item::new("doc-delete", text("删除"), "trash", 6).danger());
     items
+}
+
+pub fn clean_empty_paragraphs(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if let Some(editor) = w.editor.clone().filter(|e| !e.read(cx).read_only) {
+        let n = editor.update(cx, |ed, cx| {
+            let n = ed.core.remove_empty_paragraphs();
+            if n > 0 { ed.changed(window, cx); }
+            n
+        });
+        if n == 0 { w.show_toast(crate::settings::tr("没有可清理的空段落", "No empty paragraphs to remove"), cx); }
+        else {
+            w.show_toast(&crate::localized_format!("已清理 {} 个空段落", "Removed {} empty paragraphs", n), cx);
+            if toast::native() { w.toast_link(crate::settings::tr("撤销", "Undo"), "toast-undo", cx); }
+        }
+    }
 }
 
 /// 长按卡片、行出的系统上下文菜单：项、顺序和文案照桌面右键菜单（`render_row_menu`、`folder_row_menu`）。
@@ -786,6 +803,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 "doc-pdf" => w.export_pdf(&cur, window, cx),
                 "doc-md" => w.open_export_md(&cur, cx),
                 "doc-print" => w.print_doc(&cur, window, cx),
+                "doc-clean-empty" => clean_empty_paragraphs(w, window, cx),
                 "doc-info" => w.open_doc_info(window, cx),
                 "doc-refs" => { let shown = !w.entries.iter().find(|e| e.id == cur).is_some_and(|e| e.meta.refs_hidden); w.ask_refs(!shown, cx); }
                 "doc-delete" => w.ask_delete(&cur, cx),

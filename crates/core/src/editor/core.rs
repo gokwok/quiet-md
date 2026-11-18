@@ -1282,6 +1282,50 @@ impl Core {
         self.parent_of(id).is_some_and(|p| p.kind.has_text())
     }
 
+    /// Remove blank paragraph leaves on this page as one undoable edit.
+    pub fn remove_empty_paragraphs(&mut self) -> usize {
+        fn blank(b: &Block) -> bool {
+            matches!(b.kind, BlockKind::Text) && b.children.is_empty() && b.text.text.trim().is_empty()
+        }
+        fn collect(list: &[Block], keep_one: bool, ids: &mut HashSet<BlockId>) {
+            let keep_first = keep_one && list.iter().all(blank);
+            for (i, b) in list.iter().enumerate() {
+                if blank(b) && !(keep_first && i == 0) { ids.insert(b.id); }
+                if b.kind.is_page() { continue; }
+                let needs_child = matches!(b.kind, BlockKind::Quote | BlockKind::Callout { .. } | BlockKind::Column { .. })
+                    || matches!(b.kind, BlockKind::Text) && b.text.text.trim().is_empty();
+                collect(&b.children, needs_child, ids);
+                if let BlockKind::Table(t) = &b.kind {
+                    for cell in t.rows.iter().flatten() { collect(&cell.blocks, true, ids); }
+                }
+            }
+        }
+        fn remove(list: &mut Vec<Block>, ids: &HashSet<BlockId>) {
+            list.retain(|b| !ids.contains(&b.id));
+            for b in list {
+                if b.kind.is_page() { continue; }
+                remove(&mut b.children, ids);
+                if let BlockKind::Table(t) = &mut b.kind {
+                    for cell in t.rows.iter_mut().flatten() { remove(&mut cell.blocks, ids); }
+                }
+            }
+        }
+        let mut ids = HashSet::default();
+        collect(&self.doc.blocks, true, &mut ids);
+        if ids.is_empty() { return 0; }
+        self.checkpoint(EditKind::Other);
+        remove(&mut self.doc.blocks, &ids);
+        // A deleted endpoint must not turn a text range into a cross-cell selection.
+        if ids.contains(&self.sel.anchor.block) {
+            self.sel = Selection::caret(self.sel.head);
+        } else if ids.contains(&self.sel.head.block) {
+            self.sel = Selection::caret(self.sel.anchor);
+        }
+        self.clear_block_sel();
+        self.fix_selection();
+        ids.len()
+    }
+
     /// Backspace.
     pub fn backspace(&mut self) {
         if !self.sel.is_collapsed() {
@@ -3761,6 +3805,26 @@ mod tests {
         c.backspace();
         c.delete_selected_blocks();
         assert_eq!(xml(&c).matches("<table>").count(), 1, "{}", xml(&c));
+    }
+
+    #[test]
+    fn clean_blank_paragraphs_preserves_structure_and_undo() {
+        let mut c = doc("<p>one</p><p></p><p>  </p><p>two</p><blockquote><p></p></blockquote><table><tr><td><p></p><p></p></td></tr></table><pre><code>a\n\nb</code></pre><page>sub<p></p><p>keep</p></page>");
+        let before = xml(&c);
+        let removed = c.doc.blocks[1].id;
+        c.sel = Selection::caret(Pos::new(removed, 0));
+        assert_eq!(c.remove_empty_paragraphs(), 3);
+        assert_ne!(c.sel.head.block, removed);
+        let after = xml(&c);
+        assert_eq!(c.remove_empty_paragraphs(), 0);
+        assert!(c.undo());
+        assert_eq!(xml(&c), before);
+        assert_eq!(c.sel.head.block, removed);
+        assert!(c.redo());
+        assert_eq!(xml(&c), after);
+        let mut empty = doc("<p></p><p></p>");
+        assert_eq!(empty.remove_empty_paragraphs(), 1);
+        assert_eq!(empty.doc.blocks.len(), 1);
     }
 
     #[test]

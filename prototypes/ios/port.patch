@@ -823,7 +823,18 @@
                      .id("dm-more-menu")
                      .occlude()
                      .w(px(210.))
-@@ -308,7 +310,7 @@
+@@ -302,13 +304,18 @@
+                                 w.ask_refs(!refs_shown, cx);
+                             })),
+                     )
++                    .when(!self.reading(), |d| d.child(sub_item("dm-clean-empty", crate::settings::tr("清理空段落", "Remove empty paragraphs"))
++                        .on_click(cx.listener(|w, _, window, cx| {
++                            w.close_doc_menu(cx);
++                            crate::ios::clean_empty_paragraphs(w, window, cx);
++                        }))))
+                     .into_any_element(),
+             )),
+             None => None,
          };
          if let Some((top, el)) = sub_el {
              out.push(
