@@ -250,9 +250,12 @@ pub fn set_settings_detail(on: bool) {
 }
 
 pub fn settings_back(w: &mut Workspace, cx: &mut Context<Workspace>) {
-    if assistant::roles::is_detail(w.settings_page) {
+    // 离开语音的几页时，试听跟着停；文本页的测试对话也停下。
+    assistant::preview::stop();
+    if w.settings_page == crate::settings::Page::AssistantText { assistant::text::stop(); }
+    if let Some(page) = assistant::parent(w.settings_page) {
         shot::capture_page();
-        w.open_settings(crate::settings::Page::AssistantSpeech, cx);
+        w.open_settings(page, cx);
     } else { set_settings_detail(false); cx.notify(); }
 }
 
@@ -1091,7 +1094,7 @@ pub fn long_press_layer() -> impl IntoElement {
 thread_local! { static DOC_FROM: std::cell::Cell<View> = const { std::cell::Cell::new(View::Home) }; }
 /// 文档里打开了几层页面（页面 / 卡片，没打开是 0）：往里一层从右边滑入，回外面一层往右滑走。
 pub fn sub_depth(w: &Workspace, cx: &App) -> i32 {
-    if w.view == View::Settings { return (settings_detail() && assistant::roles::is_detail(w.settings_page)) as i32; }
+    if w.view == View::Settings { return (settings_detail() && assistant::parent(w.settings_page).is_some()) as i32; }
     w.editor.as_ref().map_or(0, |e| e.read(cx).outer.len() as i32)
 }
 /// 打开着的那一页（页面 / 卡片）在外面那一层里的块。

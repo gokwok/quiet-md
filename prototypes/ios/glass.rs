@@ -60,6 +60,14 @@ pub fn pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Op
     canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
+/// 同 `pane`，但放在会滚动的页面内容里：滚进顶上的返回钮那一条、或出了屏幕底就藏起，免得压在顶栏的玻璃上。
+pub fn page_pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
+    canvas(move |bounds, window, _| {
+        if bounds.origin.y < px(super::chrome_top()) || bounds.bottom() > window.viewport_size().height { return; }
+        place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark() }, window)
+    }, |_, _, _, _| {}).absolute().inset_0()
+}
+
 /// 圆角矩形的一块玻璃：自己拼的弹出菜单的底。首页的菜单已改用系统菜单（`menu.rs`），这两个留给系统菜单放不下的内容。
 #[allow(dead_code)]
 pub fn panel(key: &'static str, radius: f32) -> impl IntoElement {

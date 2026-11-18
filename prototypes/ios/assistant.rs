@@ -1,66 +1,110 @@
 //! 设置 › 助手设置 › 语音。模型是应用偏好，API Key 只在设备钥匙串里保存。
 use std::{cell::Cell, ffi::{CStr, CString}, ptr::null_mut};
 
-use gpui::*;
+use gpui::{prelude::FluentBuilder, *};
 use objc2::{class, msg_send, runtime::AnyObject};
 
-use crate::{app::Workspace, settings::{prefs, row_ink, tr}, theme::Theme, ui};
+use crate::{app::Workspace, settings::{Page, prefs, row_ink, tr}, theme::Theme, ui};
 use super::{general, menu};
 
 #[path = "assistant_roles.rs"]
 pub mod roles;
+#[path = "assistant_preview.rs"]
+pub mod preview;
+#[path = "assistant_text.rs"]
+pub mod text;
+#[path = "assistant_llm.rs"]
+pub mod llm;
 
 pub const DEFAULT_MODEL: &str = "eleven_v4";
 const MODEL_ACTION: &str = "speech-model-";
-const MODELS: &[(&str, &str, &str)] = &[
-    ("speech-model-v4", DEFAULT_MODEL, "Eleven v4"),
-    ("speech-model-v4-turbo", "eleven_v4_turbo", "Eleven v4 Turbo"),
-    ("speech-model-v3", "eleven_v3", "Eleven v3"),
-    ("speech-model-v3-conversational", "eleven_v3_conversational", "Eleven v3 Conversational"),
-    ("speech-model-multilingual-v2", "eleven_multilingual_v2", "Eleven Multilingual v2"),
-    ("speech-model-flash-v2-5", "eleven_flash_v2_5", "Eleven Flash v2.5"),
-    ("speech-model-turbo-v2-5", "eleven_turbo_v2_5", "Eleven Turbo v2.5"),
-    ("speech-model-flash-v2", "eleven_flash_v2", "Eleven Flash v2"),
-    ("speech-model-turbo-v2", "eleven_turbo_v2", "Eleven Turbo v2"),
+/// (菜单项, model_id, 名称, 版本, 一句话, 标签)。前两条的说法照 ElevenLabs 应用里的模型卡片。
+#[allow(clippy::type_complexity)]
+const MODELS: &[(&str, &str, &str, &str, (&str, &str), (&str, &str))] = &[
+    ("speech-model-v4", DEFAULT_MODEL, "Eleven v4", "v4", ("情感幅度与保真度最高", "Maximum emotional range and fidelity"), ("最高质量", "Highest quality")),
+    ("speech-model-v4-turbo", "eleven_v4_turbo", "Eleven v4 Turbo", "v4", ("v4 的低延迟版本", "Lower-latency v4"), ("快速", "Fast")),
+    ("speech-model-v3", "eleven_v3", "Eleven v3", "v3", ("富有表现力", "Expressive model"), ("高质量", "High quality")),
+    ("speech-model-v3-conversational", "eleven_v3_conversational", "Eleven v3 Conversational", "v3", ("为实时对话调校", "Tuned for live conversation"), ("对话", "Conversational")),
+    ("speech-model-multilingual-v2", "eleven_multilingual_v2", "Eleven Multilingual v2", "v2", ("自然稳定的多语种朗读", "Lifelike, stable multilingual speech"), ("高质量", "High quality")),
+    ("speech-model-flash-v2-5", "eleven_flash_v2_5", "Eleven Flash v2.5", "v2.5", ("超低延迟，多语种", "Ultra-low latency, multilingual"), ("最快", "Fastest")),
+    ("speech-model-turbo-v2-5", "eleven_turbo_v2_5", "Eleven Turbo v2.5", "v2.5", ("质量与速度兼顾，多语种", "Balanced quality and speed"), ("快速", "Fast")),
+    ("speech-model-flash-v2", "eleven_flash_v2", "Eleven Flash v2", "v2", ("超低延迟，仅英语", "Ultra-low latency, English only"), ("仅英语", "English")),
+    ("speech-model-turbo-v2", "eleven_turbo_v2", "Eleven Turbo v2", "v2", ("质量与速度兼顾，仅英语", "Balanced, English only"), ("仅英语", "English")),
 ];
 
 thread_local! { static KEY_SAVED: Cell<Option<bool>> = const { Cell::new(None) }; }
 
+/// 第二级页面回到哪一页：语音的音色列表、角色设置回语音，选头像回角色设置；模型列表、服务商回文本。
+pub fn parent(page: Page) -> Option<Page> {
+    match page { Page::AssistantVoices | Page::AssistantRole => Some(Page::AssistantSpeech), Page::AssistantAvatar => Some(Page::AssistantRole), Page::AssistantModels | Page::AssistantProvider => Some(Page::AssistantText), _ => None }
+}
+
+/// 打开助手设置的某一页时：重新看一眼钥匙串，文本页顺便取模型列表。
+pub fn opened(page: Page, cx: &mut Context<Workspace>) {
+    match page { Page::AssistantSpeech => refresh_key_status(), Page::AssistantText | Page::AssistantModels | Page::AssistantProvider => text::opened(page, cx), _ => {} }
+}
+
 pub fn voice(cx: &mut Context<Workspace>) -> AnyElement {
-    let saved = KEY_SAVED.with(Cell::get);
-    let status = match saved {
-        Some(true) => tr("API Key 已保存", "API Key saved"),
-        Some(false) => tr("API Key 未配置", "API Key not configured"),
+    // 照系统设置的一行：左边服务商，右边灰字写现在的状态，点开是 API Key 的对话框。
+    let status = match KEY_SAVED.with(Cell::get) {
+        Some(true) => tr("已连接", "Connected"),
+        Some(false) => tr("添加 API Key", "Add API Key"),
         None => tr("钥匙串暂不可用", "Keychain unavailable"),
     };
-    let action = if saved == Some(true) { tr("管理", "Manage") } else { tr("添加", "Add") };
-    let provider = div().id("elevenlabs-provider").w_full().min_h(px(68.)).px(px(18.)).py(px(12.)).flex().items_center().gap(px(12.))
+    let provider = div().id("elevenlabs-provider").w_full().h(px(54.)).px(px(18.)).flex().items_center().gap(px(10.))
         .active(|d| d.bg(Theme::fill_pressed()))
-        .child(div().size(px(30.)).flex_none().rounded(px(8.)).bg(Theme::bg_body()).flex().items_center().justify_center()
-            .child(svg().path("editor-icons/volume-2.svg").size(px(17.)).text_color(Theme::text())))
-        .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
-            .child(div().text_size(px(17.)).line_height(px(22.)).text_color(row_ink()).child("ElevenLabs"))
-            .child(div().text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(status)))
-        .child(div().flex_none().text_size(px(15.)).text_color(Theme::primary()).child(action))
-        .on_click(cx.listener(|w, _, _, cx| {
-            super::glass::haptic();
-            refresh_key_status();
-            if !edit_key() { w.show_toast_kind(ui::ToastKind::Error, tr("无法打开 API Key 设置", "Could not open API key settings"), cx); }
-            cx.notify();
-        })).into_any_element();
+        .child(div().flex_1().min_w_0().text_size(px(17.)).text_color(row_ink()).child("ElevenLabs"))
+        .child(div().flex_none().text_size(px(17.)).text_color(Theme::text_caption()).child(status))
+        .child(ui::icon("chevron-right", 14., crate::settings::row_chevron()))
+        .on_click(cx.listener(|w, _, _, cx| open_key(w, cx))).into_any_element();
     let p = prefs();
-    let (_, current, label) = MODELS.iter().find(|(_, id, _)| *id == p.speech_model).copied().unwrap_or(MODELS[0]);
-    let items = MODELS.iter().map(|&(action, id, label)| menu::Item::new(action, label, "", 0).checked(id == current)).collect();
+    let current = MODELS.iter().find(|m| m.1 == p.speech_model).map_or(DEFAULT_MODEL, |m| m.1);
     div().w_full().pt(px(18.)).flex().flex_col().gap(px(32.))
         .child(general::titled(Some(tr("服务商连接", "Provider Connection")), vec![provider]))
-        .child(general::titled(Some(tr("语音模型", "Speech Model")), vec![general::choice("speech-model", tr("默认模型", "Default Model"), label, items)]))
+        .child(models(current, cx))
         .child(roles::section(&p.speech_roles, cx))
         .into_any_element()
 }
 
+fn open_key(w: &mut Workspace, cx: &mut Context<Workspace>) {
+    super::glass::haptic();
+    refresh_key_status();
+    if !edit_key() { w.show_toast_kind(ui::ToastKind::Error, tr("无法打开 API Key 设置", "Could not open API key settings"), cx); }
+    cx.notify();
+}
+
+/// 语音模型（照 ElevenLabs 应用的模型卡片）：一排横着滑的卡片，左上角版本号，下面名称、一句话和标签；选中的描一圈并打勾。
+fn models(current: &str, cx: &mut Context<Workspace>) -> AnyElement {
+    const W: f32 = 172.;
+    const GAP: f32 = 10.;
+    let chip = |text: &'static str, on: bool| div().px(px(9.)).h(px(24.)).rounded_full().flex().items_center()
+        .bg(if on { crate::theme::ca(crate::theme::craft::N1000, 0.07) } else { Theme::bg_body() })
+        .text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(text);
+    let cards = MODELS.iter().map(|&(action, id, label, version, line, tag)| {
+        let on = id == current;
+        div().id(action).w(px(W)).h(px(172.)).flex_none().p(px(14.)).rounded(px(20.)).bg(general::card_bg())
+            .border_2().border_color(if on { Theme::text() } else { gpui::transparent_black() })
+            .flex().flex_col().active(|d| d.bg(Theme::fill_pressed()))
+            .child(div().flex().items_center().justify_between().child(chip(version, false))
+                .when(on, |d| d.child(div().size(px(22.)).rounded_full().bg(Theme::text()).flex().items_center().justify_center()
+                    .child(ui::icon("check", 13., Theme::bg_body())))))
+            .child(div().mt(px(14.)).text_size(px(16.)).line_height(px(21.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(label))
+            .child(div().mt(px(4.)).flex_1().text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(tr(line.0, line.1)))
+            .child(div().flex().child(chip(tr(tag.0, tag.1), false)))
+            .on_click(cx.listener(move |w, _, _, cx| if prefs().speech_model != id { super::glass::haptic(); w.set_pref(|p| p.speech_model = id.into(), cx); }))
+    });
+    let width = 32. + MODELS.len() as f32 * (W + GAP);
+    div().w_full().flex().flex_col()
+        .child(roles::header(tr("语音模型", "Speech Model")))
+        .child(div().id("speech-models").w_full().overflow_x_scroll().restrict_scroll_to_axis()
+            .child(div().w(px(width)).flex_none().px(px(10.)).flex().gap(px(GAP)).children(cards)))
+        .into_any_element()
+}
+
 pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
+    if action.starts_with("text-") { return text::menu_action(action, w, cx); }
     if !action.starts_with(MODEL_ACTION) { return false; }
-    if let Some(&(_, id, _)) = MODELS.iter().find(|(pick, _, _)| *pick == action) && prefs().speech_model != id {
+    if let Some(&(_, id, ..)) = MODELS.iter().find(|m| m.0 == action) && prefs().speech_model != id {
         w.set_pref(|p| p.speech_model = id.into(), cx);
     }
     true
@@ -82,27 +126,37 @@ unsafe extern "C" {
     fn SecItemDelete(query: *const AnyObject) -> i32;
 }
 
-const ITEM_NOT_FOUND: i32 = -25300;
+pub(super) const ITEM_NOT_FOUND: i32 = -25300;
 
-unsafe fn key_query() -> *mut AnyObject {
+/// 钥匙串里的一项：服务名和账户名。
+#[derive(Clone, Copy)]
+pub(super) struct Secret<'a> { pub service: &'a str, pub account: &'a str }
+const ELEVENLABS: Secret = Secret { service: "com.s1dashu.quietmd.elevenlabs", account: "api-key" };
+
+unsafe fn key_query(item: Secret) -> *mut AnyObject {
     unsafe {
         let query: *mut AnyObject = msg_send![class!(NSMutableDictionary), dictionary];
         let _: () = msg_send![query, setObject: kSecClassGenericPassword, forKey: kSecClass];
-        let _: () = msg_send![query, setObject: ns_string("com.s1dashu.quietmd.elevenlabs"), forKey: kSecAttrService];
-        let _: () = msg_send![query, setObject: ns_string("api-key"), forKey: kSecAttrAccount];
+        let _: () = msg_send![query, setObject: ns_string(item.service), forKey: kSecAttrService];
+        let _: () = msg_send![query, setObject: ns_string(item.account), forKey: kSecAttrAccount];
         query
     }
 }
 
-pub fn refresh_key_status() {
-    let status = unsafe { SecItemCopyMatching(key_query(), null_mut()) };
-    if !matches!(status, 0 | ITEM_NOT_FOUND) { log::warn!("ElevenLabs Keychain lookup returned {status}"); }
-    KEY_SAVED.with(|saved| saved.set(match status { 0 => Some(true), ITEM_NOT_FOUND => Some(false), _ => None }));
+/// 存没存着：`None` 是钥匙串这会儿查不了。
+pub(super) fn key_saved(item: Secret) -> Option<bool> {
+    let status = unsafe { SecItemCopyMatching(key_query(item), null_mut()) };
+    if !matches!(status, 0 | ITEM_NOT_FOUND) { log::warn!("Keychain lookup for {} returned {status}", item.service); }
+    match status { 0 => Some(true), ITEM_NOT_FOUND => Some(false), _ => None }
 }
 
-fn read_key() -> Option<String> {
+pub fn refresh_key_status() { KEY_SAVED.with(|saved| saved.set(key_saved(ELEVENLABS))); }
+
+fn read_key() -> Option<String> { read_secret(ELEVENLABS) }
+
+pub(super) fn read_secret(item: Secret) -> Option<String> {
     unsafe {
-        let query = key_query();
+        let query = key_query(item);
         let yes: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: true];
         let _: () = msg_send![query, setObject: yes, forKey: kSecReturnData];
         let mut result = std::ptr::null();
@@ -115,9 +169,10 @@ fn read_key() -> Option<String> {
     }
 }
 
-fn save_key(key: &str) -> i32 {
+/// 存一项（已有就改），返回 `OSStatus`。
+pub(super) fn save_secret(item: Secret, key: &str) -> i32 {
     unsafe {
-        let query = key_query();
+        let query = key_query(item);
         let data: *mut AnyObject = msg_send![class!(NSData), dataWithBytes: key.as_ptr().cast::<std::ffi::c_void>(), length: key.len()];
         let changes: *mut AnyObject = msg_send![class!(NSDictionary), dictionaryWithObject: data, forKey: kSecValueData];
         let status = SecItemUpdate(query, changes);
@@ -127,6 +182,8 @@ fn save_key(key: &str) -> i32 {
         SecItemAdd(query, null_mut())
     }
 }
+
+pub(super) fn delete_secret(item: Secret) -> i32 { unsafe { SecItemDelete(key_query(item)) } }
 
 fn key_result(status: i32, saved: bool) {
     let ok = status == 0 || !saved && status == ITEM_NOT_FOUND;
@@ -143,14 +200,20 @@ fn key_result(status: i32, saved: bool) {
 fn edit_key() -> bool {
     let body = tr("API Key 仅保存在此设备的钥匙串中。", "The API Key is stored in this device’s Keychain.");
     let remove = (KEY_SAVED.with(Cell::get) == Some(true)).then(|| tr("移除 API Key", "Remove API Key"));
-    prompt("ElevenLabs API Key", Some(body), "API Key", "", true, remove, |value| match value {
-        Some(key) if key.is_empty() || !key.bytes().all(|b| b.is_ascii_graphic()) => menu::dispatch(|w, _, cx| w.show_toast_kind(ui::ToastKind::Error, tr("请输入有效的 API Key", "Enter a valid API Key"), cx)),
-        Some(key) => key_result(save_key(&key), true),
-        None => key_result(unsafe { SecItemDelete(key_query()) }, false),
+    prompt("ElevenLabs API Key", Some(body), "API Key", "", Field::Secret, remove, |value| match value {
+        Some(key) if !valid_key(&key) => menu::dispatch(|w, _, cx| w.show_toast_kind(ui::ToastKind::Error, tr("请输入有效的 API Key", "Enter a valid API Key"), cx)),
+        Some(key) => key_result(save_secret(ELEVENLABS, &key), true),
+        None => key_result(delete_secret(ELEVENLABS), false),
     })
 }
 
-fn prompt(title: &str, body: Option<&str>, placeholder: &str, value: &str, secure: bool, remove: Option<&str>, complete: impl Fn(Option<String>) + 'static) -> bool {
+pub(super) fn valid_key(key: &str) -> bool { !key.is_empty() && key.bytes().all(|b| b.is_ascii_graphic()) }
+
+/// 对话框里输入框的种类：密钥（圆点遮住）、网址（网址键盘），都不自动大写、不自动更正；或者普通的一行字。
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Field { Text, Secret, Url }
+
+pub(super) fn prompt(title: &str, body: Option<&str>, placeholder: &str, value: &str, field: Field, remove: Option<&str>, complete: impl Fn(Option<String>) + 'static) -> bool {
     unsafe {
         let controller = super::files::root_controller();
         if controller.is_null() { return false; }
@@ -159,10 +222,20 @@ fn prompt(title: &str, body: Option<&str>, placeholder: &str, value: &str, secur
 
         let message = body.map_or(null_mut(), |s| ns_string(s));
         let alert: *mut AnyObject = msg_send![class!(UIAlertController), alertControllerWithTitle: ns_string(title), message: message, preferredStyle: 1isize];
-        let configure = block2::RcBlock::new(|field: *mut AnyObject| {
+        let kind = field;
+        let configure = block2::RcBlock::new(move |field: *mut AnyObject| {
             let _: () = msg_send![field, setPlaceholder: ns_string(placeholder)];
             let _: () = msg_send![field, setText: ns_string(value)];
-            let _: () = msg_send![field, setSecureTextEntry: secure];
+            let _: () = msg_send![field, setSecureTextEntry: kind == Field::Secret];
+            if kind != Field::Text {
+                // UIKeyboardTypeURL = 3；不自动大写、不自动更正、不查拼写。这几个输入特性在输入框上是转发实现的，
+                // objc2 调试构建的方法检查找不到，直接走 objc_msgSend。
+                let set: unsafe extern "C" fn(*mut AnyObject, objc2::runtime::Sel, isize) = std::mem::transmute(objc2::ffi::objc_msgSend as *const ());
+                if kind == Field::Url { set(field, objc2::sel!(setKeyboardType:), 3); }
+                set(field, objc2::sel!(setAutocapitalizationType:), 0);
+                set(field, objc2::sel!(setAutocorrectionType:), 1);
+                set(field, objc2::sel!(setSpellCheckingType:), 1);
+            }
         });
         let _: () = msg_send![alert, addTextFieldWithConfigurationHandler: &*configure];
         let fields: *mut AnyObject = msg_send![alert, textFields];

@@ -40,6 +40,11 @@ base64 = "0.22"
 minisign-verify = "0.3.0"
 log = "0.4"
 sys-locale = "0.3.2"
+async-openai = { version = "0.43", default-features = false, features = ["native-tls", "chat-completion", "model", "byot"] }
+reqwest = { version = "0.13", default-features = false }
+secrecy = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+futures = "0.3"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("devtools"))'] }

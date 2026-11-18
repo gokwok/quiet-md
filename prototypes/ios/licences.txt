@@ -11,12 +11,16 @@ arrayvec	0.7.8	MIT OR Apache-2.0
 as-slice	0.2.1	MIT OR Apache-2.0
 async-channel	2.5.0	Apache-2.0 OR MIT
 async-lock	3.5.0	Apache-2.0 OR MIT
+async-openai	0.43.0	MIT
+async-openai-macros	0.3.0	MIT
 async-task	4.7.1	Apache-2.0 OR MIT
+atomic-waker	1.1.2	Apache-2.0 OR MIT
 av-scenechange	0.14.1	MIT
 av1-grain	0.2.5	BSD-2-Clause
 avif-serialize	0.8.9	BSD-3-Clause
 backtrace	0.3.77	MIT OR Apache-2.0
 base64	0.22.1	MIT OR Apache-2.0
+base64	0.23.1	MIT OR Apache-2.0
 bit_field	0.10.3	Apache-2.0/MIT
 bitflags	1.3.2	MIT/Apache-2.0
 bitflags	2.13.2	MIT OR Apache-2.0
@@ -45,10 +49,16 @@ crc32fast	1.5.5	MIT OR Apache-2.0
 crossbeam-deque	0.8.8	MIT OR Apache-2.0
 crossbeam-epoch	0.9.21	MIT OR Apache-2.0
 crossbeam-utils	0.8.23	MIT OR Apache-2.0
+darling	0.20.11	MIT
 darling	0.24.1	MIT
+darling_core	0.20.11	MIT
 darling_core	0.24.1	MIT
+darling_macro	0.20.11	MIT
 darling_macro	0.24.1	MIT
 data-url	0.3.2	MIT OR Apache-2.0
+derive_builder	0.20.2	MIT OR Apache-2.0
+derive_builder_core	0.20.2	MIT OR Apache-2.0
+derive_builder_macro	0.20.2	MIT OR Apache-2.0
 derive_more	2.1.1	MIT
 derive_more-impl	2.1.1	MIT
 dirs	5.0.1	MIT OR Apache-2.0
@@ -67,6 +77,7 @@ etagere	0.2.15	MIT/Apache-2.0
 euclid	0.22.14	MIT OR Apache-2.0
 event-listener	5.4.2	Apache-2.0 OR MIT
 event-listener-strategy	0.5.4	Apache-2.0 OR MIT
+eventsource-stream	0.2.3	MIT OR Apache-2.0
 exr	1.74.3	BSD-3-Clause
 fastrand	2.5.0	Apache-2.0 OR MIT
 fax	0.2.7	MIT
@@ -76,6 +87,7 @@ float-cmp	0.9.0	MIT
 float-ord	0.3.2	MIT / Apache-2.0
 float_next_after	1.0.0	MIT
 flume	0.12.0	Apache-2.0/MIT
+fnv	1.0.7	Apache-2.0 / MIT
 foldhash	0.2.0	Zlib
 fontconfig-parser	0.5.8	MIT
 fontdb	0.23.0	MIT
@@ -120,6 +132,11 @@ heck	0.5.0	MIT OR Apache-2.0
 html5ever	0.27.0	MIT OR Apache-2.0
 http	1.5.0	MIT OR Apache-2.0
 http-body	1.1.0	MIT
+http-body-util	0.1.5	MIT
+httparse	1.10.1	MIT OR Apache-2.0
+hyper	1.12.0	MIT
+hyper-tls	0.6.0	MIT/Apache-2.0
+hyper-util	0.1.21	MIT
 iana-time-zone	0.1.65	MIT OR Apache-2.0
 icu_collections	2.4.0	Unicode-3.0
 icu_locale_core	2.4.0	Unicode-3.0
@@ -141,6 +158,7 @@ imagesize	0.14.0	MIT
 imgref	1.12.3	CC0-1.0 OR Apache-2.0
 indexmap	2.14.2	Apache-2.0 OR MIT
 inventory	0.3.25	MIT OR Apache-2.0
+ipnet	2.12.2	MIT OR Apache-2.0
 itertools	0.14.0	MIT OR Apache-2.0
 itoa	1.0.19	MIT OR Apache-2.0
 katex-rs	0.3.0	MIT
@@ -165,12 +183,18 @@ markup5ever_rcdom	0.3.0	MIT OR Apache-2.0
 maybe-rayon	0.1.1	MIT
 memchr	2.8.3	Unlicense OR MIT
 memmap2	0.9.12	MIT OR Apache-2.0
+mime	0.3.18	MIT OR Apache-2.0
+mime_guess	2.0.5	MIT
+minimal-lexical	0.2.1	MIT/Apache-2.0
 minisign-verify	0.3.0	MIT
 miniz_oxide	0.8.9	MIT OR Zlib OR Apache-2.0
 miniz_oxide	0.9.1	MIT OR Zlib OR Apache-2.0
+mio	1.2.5	MIT
 moxcms	0.8.1	BSD-3-Clause OR Apache-2.0
+native-tls	0.2.18	MIT OR Apache-2.0
 new_debug_unreachable	1.0.6	MIT
 no_std_io2	0.9.4	Apache-2.0 OR MIT
+nom	7.1.3	MIT
 nom	8.0.0	MIT
 noop_proc_macro	0.3.0	MIT
 num-bigint	0.4.8	MIT OR Apache-2.0
@@ -243,12 +267,14 @@ ref-cast-impl	1.0.27	MIT OR Apache-2.0
 regex	1.13.1	MIT OR Apache-2.0
 regex-automata	0.4.18	MIT OR Apache-2.0
 regex-syntax	0.8.11	MIT OR Apache-2.0
+reqwest	0.13.5	MIT OR Apache-2.0
 resvg	0.46.0	Apache-2.0 OR MIT
 rgb	0.8.53	MIT
 roxmltree	0.20.0	MIT OR Apache-2.0
 roxmltree	0.21.2	MIT OR Apache-2.0
 rustc-demangle	0.1.28	MIT/Apache-2.0
 rustc-hash	2.1.3	Apache-2.0 OR MIT
+rustls-pki-types	1.16.0	MIT OR Apache-2.0
 rustversion	1.0.23	MIT OR Apache-2.0
 rustybuzz	0.20.1	MIT
 ryu	1.0.23	Apache-2.0 OR BSL-1.0
@@ -257,6 +283,9 @@ schemars	1.2.3	MIT
 schemars_derive	1.2.3	MIT
 scopeguard	1.2.0	MIT OR Apache-2.0
 seahash	4.1.0	MIT
+secrecy	0.10.3	Apache-2.0 OR MIT
+security-framework	3.7.0	MIT OR Apache-2.0
+security-framework-sys	2.17.0	MIT OR Apache-2.0
 serde	1.0.229	MIT OR Apache-2.0
 serde_core	1.0.229	MIT OR Apache-2.0
 serde_derive	1.0.229	MIT OR Apache-2.0
@@ -272,6 +301,7 @@ slab	0.4.12	MIT
 slotmap	1.1.1	Zlib
 smallvec	1.16.5	MIT OR Apache-2.0
 smol_str	0.3.7	MIT OR Apache-2.0
+socket2	0.6.5	MIT OR Apache-2.0
 spin	0.10.1	MIT
 spin	0.9.9	MIT
 stable_deref_trait	1.2.1	MIT OR Apache-2.0
@@ -284,6 +314,7 @@ svg_fmt	0.4.5	MIT/Apache-2.0
 svgtypes	0.16.2	Apache-2.0 OR MIT
 syn	2.0.119	MIT OR Apache-2.0
 syn	3.0.10	MIT OR Apache-2.0
+sync_wrapper	1.0.2	Apache-2.0
 synstructure	0.14.0	MIT
 sys-locale	0.3.2	MIT OR Apache-2.0
 taffy	0.15.1	MIT
@@ -295,13 +326,24 @@ tiny-skia	0.11.4	BSD-3-Clause
 tiny-skia-path	0.11.4	BSD-3-Clause
 tinystr	0.8.5	Unicode-3.0
 tinyvec	1.13.3	Zlib OR Apache-2.0 OR MIT
+tokio	1.54.1	MIT
+tokio-macros	2.7.2	MIT
+tokio-native-tls	0.3.1	MIT
+tokio-stream	0.1.19	MIT
+tokio-util	0.7.20	MIT
 toml_datetime	1.1.3+spec-1.1.0	MIT OR Apache-2.0
 toml_edit	0.25.19+spec-1.1.0	MIT OR Apache-2.0
 toml_parser	1.1.5+spec-1.1.0	MIT OR Apache-2.0
+tower	0.5.3	MIT
+tower-http	0.6.11	MIT
+tower-layer	0.3.3	MIT
+tower-service	0.3.3	MIT
 tracing	0.1.44	MIT
 tracing-attributes	0.1.31	MIT
 tracing-core	0.1.36	MIT
+try-lock	0.2.5	MIT
 ttf-parser	0.25.1	MIT OR Apache-2.0
+unicase	2.10.0	MIT OR Apache-2.0
 unicode-bidi	0.3.18	MIT OR Apache-2.0
 unicode-bidi-mirroring	0.4.0	MIT/Apache-2.0
 unicode-ccc	0.4.0	MIT/Apache-2.0
@@ -320,6 +362,7 @@ uuid	1.29.2	Apache-2.0 OR MIT
 v_frame	0.3.9	BSD-2-Clause
 waker-fn	1.2.0	Apache-2.0 OR MIT
 walkdir	2.5.0	Unlicense/MIT
+want	0.3.2	MIT
 wasm-bindgen	0.2.130	MIT OR Apache-2.0
 wasm-bindgen-macro	0.2.130	MIT OR Apache-2.0
 wasm-bindgen-macro-support	0.2.130	MIT OR Apache-2.0
@@ -338,6 +381,8 @@ zerocopy	0.8.63	BSD-2-Clause OR Apache-2.0 OR MIT
 zerocopy-derive	0.8.63	BSD-2-Clause OR Apache-2.0 OR MIT
 zerofrom	0.1.8	Unicode-3.0
 zerofrom-derive	0.1.8	Unicode-3.0
+zeroize	1.9.1	Apache-2.0 OR MIT
+zeroize_derive	1.5.0	Apache-2.0 OR MIT
 zerotrie	0.2.5	Unicode-3.0
 zerovec	0.11.9	Unicode-3.0
 zerovec-derive	0.11.7	Unicode-3.0

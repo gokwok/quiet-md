@@ -12,7 +12,7 @@ use crate::theme::{self, craft, Theme};
 
 use super::lock::{self, Kind};
 
-fn card_bg() -> Hsla { theme::ca(craft::N1000, 0.03) }
+pub(super) fn card_bg() -> Hsla { theme::ca(craft::N1000, 0.03) }
 
 /// 一张卡片：行之间一道细线，从字的左边开始。
 pub fn card(rows: Vec<AnyElement>) -> Div {
