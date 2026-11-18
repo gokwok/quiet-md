@@ -306,6 +306,7 @@ unicode-bidi	0.3.18	MIT OR Apache-2.0
 unicode-bidi-mirroring	0.4.0	MIT/Apache-2.0
 unicode-ccc	0.4.0	MIT/Apache-2.0
 unicode-ident	1.0.27	(MIT OR Apache-2.0) AND Unicode-3.0
+unicode-normalization	0.1.26	(MIT OR Apache-2.0) AND Unicode-3.0
 unicode-properties	0.1.5	(MIT OR Apache-2.0) AND Unicode-3.0
 unicode-script	0.5.9	MIT OR Apache-2.0
 unicode-segmentation	1.13.3	MIT OR Apache-2.0

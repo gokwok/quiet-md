@@ -10,6 +10,7 @@ pub mod alert;
 pub mod appicon;
 pub mod card;
 pub mod editmenu;
+pub mod editor_surface;
 pub mod files;
 pub mod pick;
 pub mod general;
@@ -581,14 +582,15 @@ pub fn doc_menu_items(w: &Workspace) -> Vec<menu::Item> {
     if crate::printing::SUPPORTED { download.push(Item::new("doc-pdf", "PDF", "", 0)); }
     download.push(Item::new("doc-md", "Markdown", "", 0));
     let mut items = vec![
+        Item::new("doc-style", crate::settings::tr("样式", "Style"), "paintpalette", 0),
+        Item::new("doc-text-size", crate::settings::tr("文字大小", "Text size"), "textformat.size", 0),
         Item::new("", text("页宽设置"), "arrow.left.and.right", 0).kids(vec![
             Item::new("doc-width-standard", text("默认"), "", 0).checked(width == PageWidth::Standard),
             Item::new("doc-width-wide", text("较宽"), "", 0).checked(width == PageWidth::Wide),
             Item::new("doc-width-full", text("全宽"), "", 0).checked(width == PageWidth::Full),
         ]),
-        Item::new("doc-find", text("查找和替换"), "magnifyingglass", 1),
-        Item::new("doc-style", crate::settings::tr("样式", "Style"), "paintpalette", 1),
-        Item::new("doc-text-size", crate::settings::tr("文字大小", "Text size"), "textformat.size", 1),
+        Item::new("doc-find", crate::settings::tr("在页面中查找","Find in page"), "magnifyingglass", 1),
+        Item::new("doc-outline",text("目录"),"list.bullet",1),
         Item::new("doc-move", text("移动到"), "folder", 2),
         Item::new("doc-pin", if pinned { text("从“置顶”移除") } else { text("添加到“置顶”") }, if pinned { "pin.slash" } else { "pin" }, 2),
         Item::new("doc-star", if starred { text("取消收藏") } else { text("添加到收藏") }, if starred { "star.slash" } else { "star" }, 2),
@@ -773,6 +775,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 "doc-width-standard" => w.set_page_width(PageWidth::Standard, cx),
                 "doc-width-wide" => w.set_page_width(PageWidth::Wide, cx),
                 "doc-width-full" => w.set_page_width(PageWidth::Full, cx),
+                "doc-outline" => if let Some(ed) = w.editor.clone() { ed.update(cx,|e,cx| { e.cat_pinned = false; e.toggle_catalogue(cx); }); },
                 "doc-find" => w.find_in_doc(false, window, cx),
                 "doc-text-size" => { style::set_sizing(true); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
                 "doc-style" => { format::close(); stylepanel::open(); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }

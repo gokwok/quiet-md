@@ -595,7 +595,9 @@ impl Editor {
         let Some((table, r, c)) = self.caret_cell() else { return };
         (self.menu, self.slash, self.touch_menu, self.toolbar_hidden) = (None, None, false, false);
         self.core.sel = super::core::Selection::caret(self.core.sel.head);
+        self.table_page = 0; self.table_panel_target.set(None);
         self.core.select_cells(CellSel { table, anchor: (r, c), head: (r, c), kind: CellSelKind::Range });
+        if crate::ios::editor_surface::enabled() { crate::ios::editor_surface::hide_keyboard(); }
         cx.notify();
     }
 
