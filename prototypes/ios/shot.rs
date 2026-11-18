@@ -96,6 +96,13 @@ fn presents_class(base: &'static AnyClass) -> Option<&'static AnyClass> {
     })
 }
 fn presents_watched() -> bool { REQUESTED.load(std::sync::atomic::Ordering::Relaxed) > 0 }
+/// 在绘制期间调用：这一帧的画布在绘制结束后才会取出。
+pub(super) fn next_drawable_number() -> u64 { REQUESTED.load(std::sync::atomic::Ordering::Relaxed) + 1 }
+pub(super) fn waiting_for_presentation(frame: u64) -> bool {
+    let requested = REQUESTED.load(std::sync::atomic::Ordering::Relaxed);
+    // 模拟器没有回调。真机的画布轮着用，再取出三块就不用继续等这块了。
+    requested > 0 && PRESENTED.load(std::sync::atomic::Ordering::Relaxed) < frame && requested < frame + 3
+}
 // 拍快照以后：这一帧要等哪一块画布上屏（下面那页第一次连图片都画好的那一帧），和已经画了几帧（钩子装不上时按帧数等）。
 thread_local! { static TARGET: Cell<(Option<u64>, u32)> = const { Cell::new((None, 0)) }; }
 /// 下面那页（连图片）已经真的在屏幕上了，可以挪开快照。每帧（`below_drawn`）调一次。等太久就不等了。
@@ -105,10 +112,8 @@ fn below_on_screen() -> bool {
     let (target, frames) = TARGET.with(|t| t.get());
     if !presents_watched() { TARGET.with(|t| t.set((target, frames + 1))); return pics && frames + 1 >= 2; }
     match target {
-        // 这一帧的画布在 prepaint 之后才要：它的序号是现在的下一个。
-        None => { if pics { TARGET.with(|t| t.set((Some(REQUESTED.load(std::sync::atomic::Ordering::Relaxed) + 1), frames))); } false }
-        // 回调万一没来：Metal 一共三块画布轮着用，又要了三块，那一块肯定已经上过屏、还回来了。
-        Some(t) => PRESENTED.load(std::sync::atomic::Ordering::Relaxed) >= t || REQUESTED.load(std::sync::atomic::Ordering::Relaxed) >= t + 3,
+        None => { if pics { TARGET.with(|t| t.set((Some(next_drawable_number()), frames))); } false }
+        Some(t) => !waiting_for_presentation(t),
     }
 }
 thread_local! { static FRAME: Cell<Instant> = Cell::new(Instant::now()); }

@@ -3,9 +3,11 @@
 //! 做法是在 GPUI 元素的位置盖一个透明的原生 `UIButton`，把菜单挂在它上面。和 `glass.rs` 的玻璃不同，
 //! 这个按钮自己接触摸（系统要靠它弹菜单），那一小块的点击不经过 GPUI；菜单项被点后再回到 GPUI 里处理。
 use std::cell::{Cell, RefCell};
+use std::time::{Duration, Instant};
 
 use gpui::*;
 use objc2::{ClassType, define_class, msg_send};
+use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObject};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -202,11 +204,16 @@ thread_local! { static CONTEXT: Cell<*mut AnyObject> = const { Cell::new(std::pt
 thread_local! { static CONTEXT_OPEN: Cell<bool> = const { Cell::new(false) }; }
 thread_local! { static CONTEXT_PICK: Cell<Option<&'static str>> = const { Cell::new(None) }; }
 thread_local! { static CONTEXT_FOR: RefCell<Option<(SharedString, Bounds<Pixels>, f32)>> = const { RefCell::new(None) }; }
-// 长按那一刻拍下的那一块：浮起和落回都用它（不在落回时重拍——那时它已经藏起来了，样子也可能变了），
-// 和一张一样的，落回后盖在原处，等 GPUI 把它画回来（`context_hidden`）。
-thread_local! { static CONTEXT_SNAP: RefCell<Option<(objc2::rc::Retained<AnyObject>, objc2::rc::Retained<AnyObject>)>> = const { RefCell::new(None) }; }
+// 长按时拍两张：一张交给 UIKit 浮起和落回，另一张在原位置接住预览，等 GPUI 画回内容。
+thread_local! { static CONTEXT_SNAP: RefCell<Option<(Retained<AnyObject>, Retained<AnyObject>)>> = const { RefCell::new(None) }; }
 // 菜单开着时，长按的那一块在 GPUI 里画成空的：浮起来的那张就是它，原处不再留一份（照 Craft，不叠影、不闪）。
 thread_local! { static CONTEXT_HIDE: Cell<bool> = const { Cell::new(false) }; }
+struct ContextCover { view: Retained<AnyObject>, target: SharedString, bounds: Bounds<Pixels>, frame: Option<u64>, since: Instant }
+thread_local! { static CONTEXT_COVER: RefCell<Option<ContextCover>> = const { RefCell::new(None) }; }
+
+impl Drop for ContextCover {
+    fn drop(&mut self) { unsafe { let _: () = msg_send![&*self.view, removeFromSuperview]; } }
+}
 
 /// 放在卡片或行里的占位：长按这一块弹出系统的上下文菜单（卡片浮起、其余压暗），菜单项被点后
 /// `ios::menu_action` 用 `context_target` 知道是对谁。每帧（prepaint）报一次位置，被滚到可见范围外的部分不算。
@@ -293,32 +300,55 @@ define_class!(
     }
 );
 
-/// 菜单收完了：那一块让 GPUI 画回来；系统拿走浮着的那张以后到 GPUI 真画出来之间，先用备好的那张盖着，再淡掉。
+/// 菜单收完了：系统拿走浮着的那张，先用原处的快照接住，等 GPUI 把内容画回来。
 fn settle_context() {
-    let cover = CONTEXT_SNAP.with(|c| c.borrow_mut().take()).map(|(_, cover)| cover);
-    let was_hidden = CONTEXT_HIDE.with(|h| h.replace(false));
-    if !was_hidden { return; }
-    if let (Some(cover), Some(container)) = (cover, super::shot::container()) {
-        unsafe {
-            let _: () = msg_send![container, addSubview: &*cover];
-            let keep = cover.clone();
-            let fade = block2::RcBlock::new(move |_timer: *mut AnyObject| {
-                let keep = keep.clone();
-                let body = block2::RcBlock::new({ let k = keep.clone(); move || { let _: () = msg_send![&*k, setAlpha: 0f64]; } });
-                let done = block2::RcBlock::new(move |_: objc2::runtime::Bool| { let _: () = msg_send![&*keep, removeFromSuperview]; });
-                let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.12f64, animations: &*body, completion: &*done];
-            });
-            // GPUI 画回来要一两帧：等 0.1 秒再淡。
-            let _: *mut AnyObject = msg_send![AnyClass::get(c"NSTimer").unwrap(), scheduledTimerWithTimeInterval: 0.1f64, repeats: false, block: &*fade];
-        }
+    let cover = take_preview_cover();
+    if !CONTEXT_HIDE.with(|h| h.replace(false)) { return; }
+    let source = CONTEXT_FOR.with(|c| c.borrow().clone());
+    if let (Some(view), Some(container), Some((target, bounds, _))) = (cover, super::shot::container(), source) {
+        unsafe { let _: () = msg_send![container, addSubview: &*view]; }
+        CONTEXT_COVER.with(|c| *c.borrow_mut() = Some(ContextCover { view, target, bounds, frame: None, since: Instant::now() }));
     }
     dispatch(|_, _, cx| cx.notify());
+}
+
+fn take_preview_cover() -> Option<Retained<AnyObject>> {
+    let (preview, cover) = CONTEXT_SNAP.with(|c| c.borrow_mut().take())?;
+    // 系统仍可能持有这个预览视图。藏起它的内容，避免它在自己的动画里盖住已滚动的页面。
+    unsafe { let _: () = msg_send![&*preview, setHidden: true]; }
+    Some(cover)
+}
+
+/// UIKit 可以在收菜单的动画回调之前交还滚动。让真实卡片参与滚动的第一帧，尽早撤走仍钉在原地的预览。
+pub(super) fn before_scroll(window: &mut Window) {
+    CONTEXT_COVER.with(|c| c.borrow_mut().take());
+    if CONTEXT_HIDE.with(|h| h.replace(false)) {
+        take_preview_cover();
+        window.refresh();
+    }
+}
+
+/// 页面已完成 prepaint，能拿到卡片或行在这一帧的可见位置。滚动或换页时，在新画面提交之前就拿掉旧位置的快照。
+pub(super) fn finish_frame(window: &Window) {
+    CONTEXT_COVER.with(|c| {
+        let mut cover = c.borrow_mut();
+        let Some(current) = cover.as_mut() else { return; };
+        let in_place = REGIONS.with(|r| r.borrow().iter().any(|g| g.target == current.target && g.bounds == current.bounds));
+        // 原位置没变时，等恢复卡片的画布上屏。回调若没到，最多保留 100ms。
+        if !in_place || current.since.elapsed() >= Duration::from_millis(100)
+            || current.frame.is_some_and(|frame| !super::shot::waiting_for_presentation(frame)) {
+            cover.take();
+        } else {
+            current.frame.get_or_insert_with(super::shot::next_drawable_number);
+            window.request_animation_frame();
+        }
+    });
 }
 
 /// 浮起来的那张：长按那一刻拍下的那一块，按它的圆角剪，放回原处（系统负责浮起和落回的动画）。
 fn preview() -> *mut AnyObject {
     let Some((_, bounds, radius)) = CONTEXT_FOR.with(|c| c.borrow().clone()) else { return std::ptr::null_mut(); };
-    let Some(clip) = CONTEXT_SNAP.with(|c| c.borrow().as_ref().map(|(p, _)| p.clone())).or_else(|| super::shot::snapshot(bounds)) else { return std::ptr::null_mut(); };
+    let Some(clip) = CONTEXT_SNAP.with(|c| c.borrow().as_ref().map(|(p, _)| p.clone())) else { return std::ptr::null_mut(); };
     let Some(container) = super::shot::container() else { return std::ptr::null_mut(); };
     unsafe {
         let size = CGSize::new(f64::from(bounds.size.width), f64::from(bounds.size.height));

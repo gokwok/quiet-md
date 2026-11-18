@@ -203,7 +203,10 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>, sub_dep
     if shot::page_pending() && !matches!(motion, Motion::Follow | Motion::Return(_)) { shot::drop_page(); }
     let page = div().flex_1().min_w_0().h_full().flex().relative().child(main)
         // 旧页滑走的这段时间里一直出帧：只属于这一页的玻璃要等它走完才露面。
-        .child(canvas(|_, window, _| { shot::below_drawn(); let parked = shot::parked_tick(); if parked || shot::sliding() { window.request_animation_frame() } }, |_, _, _, _| {}).absolute().size_0());
+        .child(canvas(
+            |_, window, _| { shot::below_drawn(); let parked = shot::parked_tick(); if parked || shot::sliding() { window.request_animation_frame() } },
+            |_, _, window, _| menu::finish_frame(window),
+        ).absolute().size_0());
     if !is_compact() || epoch == 0 { return page.into_any_element(); }
     let w = f32::from(LAYOUT.with(|l| l.get().2.width));
     let off = move |p: f32| px(-shot::PARALLAX * w * (1. - p));
@@ -1038,6 +1041,9 @@ pub fn take_long_press() { LONG_PRESS_TAKEN.with(|t| t.set(true)); }
 /// 长按当右键：侧栏的行、主页的卡片和回收站的行，菜单原本都挂在右键上。
 pub fn long_press_layer() -> impl IntoElement {
     canvas(|_, _, _| {}, |_, _, window, _| {
+        window.on_mouse_event(|ev: &ScrollEvent, phase, window, _| {
+            if phase == DispatchPhase::Capture && ev.delta.pixel_delta(px(1.)) != Point::default() { menu::before_scroll(window); }
+        });
         // 手指抬起后没有「悬停」：把指针移出窗口，免得刚点过的行一直亮着。
         window.on_mouse_event(|ev: &MouseUpEvent, phase, window, cx| {
             if phase != DispatchPhase::Bubble || ev.button != MouseButton::Left { return; }
