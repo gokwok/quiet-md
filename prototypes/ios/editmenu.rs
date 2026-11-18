@@ -13,6 +13,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub type Item = (&'static str, SharedString);
 
 thread_local! { static INTERACTION: Cell<*mut AnyObject> = const { Cell::new(std::ptr::null_mut()) }; }
+thread_local! { static CONFIG: Cell<*mut AnyObject> = const { Cell::new(std::ptr::null_mut()) }; }
 thread_local! { static SHOWN: RefCell<Option<(Bounds<Pixels>, Vec<Item>)>> = const { RefCell::new(None) }; }
 
 pub fn supported() -> bool { AnyClass::get(c"UIEditMenuInteraction").is_some() }
@@ -33,9 +34,12 @@ define_class!(
         }
 
         #[unsafe(method(editMenuInteraction:willDismissMenuForConfiguration:animator:))]
-        fn dismissed(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, _animator: *mut AnyObject) {
+        fn dismissed(&self, _interaction: *mut AnyObject, configuration: *mut AnyObject, _animator: *mut AnyObject) {
             // 系统自己收起的（点了别处，或点了某一项）：告诉编辑器，免得下一帧又把它弹出来。
-            if SHOWN.with(|s| s.borrow_mut().take()).is_some() { super::menu::chosen("edit-dismissed"); }
+            if CONFIG.with(|c| c.get()==configuration) {
+                CONFIG.with(|c|c.set(std::ptr::null_mut()));
+                if SHOWN.with(|s| s.borrow_mut().take()).is_some() { super::menu::chosen("edit-dismissed"); }
+            }
         }
     }
 );
@@ -72,10 +76,12 @@ pub fn present(rect: Bounds<Pixels>, items: Vec<Item>, window: &Window) {
             INTERACTION.with(|i| i.set(interaction));
         }
         // 换了位置或内容：先收起旧的。这一次收起是自己发起的，不用告诉编辑器。
+        CONFIG.with(|c|c.set(std::ptr::null_mut()));
         if SHOWN.with(|s| s.borrow_mut().take()).is_some() { let _: () = msg_send![interaction, dismissMenu]; }
         SHOWN.with(|s| *s.borrow_mut() = Some((rect, items)));
         let at = CGPoint::new(f64::from(rect.center().x), f64::from(rect.origin.y));
         let configuration: *mut AnyObject = msg_send![AnyClass::get(c"UIEditMenuConfiguration").unwrap(), configurationWithIdentifier: std::ptr::null_mut::<AnyObject>(), sourcePoint: at];
+        CONFIG.with(|c|c.set(configuration));
         let _: () = msg_send![interaction, presentEditMenuWithConfiguration: configuration];
     }
 }
@@ -103,6 +109,7 @@ pub fn responder_actions(window: &Window) {
 
 /// 不该再显示了（选区没了、开了别的菜单）。
 pub fn dismiss() {
+    CONFIG.with(|c|c.set(std::ptr::null_mut()));
     if SHOWN.with(|s| s.borrow_mut().take()).is_none() { return; }
     let interaction = INTERACTION.with(|i| i.get());
     if !interaction.is_null() { unsafe { let _: () = msg_send![interaction, dismissMenu]; } }

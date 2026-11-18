@@ -49,7 +49,7 @@ pub fn begin(allowed: bool, window: &Window, cx: &mut Context<Workspace>) {
     follow_appearance(window);
     follow_accent(window);
     super::editmenu::responder_actions(window);
-    TARGET.with(|t| if t.borrow().is_none() { *t.borrow_mut() = Some((cx.to_async(), window.window_handle(), cx.weak_entity())); });
+    TARGET.with(|t| if t.borrow().as_ref().is_none_or(|(_,_,w)| *w != cx.weak_entity()) { *t.borrow_mut() = Some((cx.to_async(), window.window_handle(), cx.weak_entity())); });
     BUTTONS.with(|b| for button in b.borrow_mut().iter_mut() { button.seen = false; if !allowed { button.set_shown(false); } });
     window.on_next_frame(|_, _| BUTTONS.with(|b| for button in b.borrow_mut().iter_mut() { if !button.seen { button.set_shown(false); } }));
 }
