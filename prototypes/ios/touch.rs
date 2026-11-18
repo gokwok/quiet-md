@@ -38,6 +38,12 @@ const BOUNCE_V: f32 = 2000.;
 fn rubber(raw: f32, dim: f32) -> f32 { raw.signum() * (1. - 1. / (raw.abs() * BOUNCE_C / dim + 1.)) * dim }
 fn unrubber(x: f32, dim: f32) -> f32 { x.signum() * (dim / BOUNCE_C) * (1. / (1. - x.abs().min(dim * 0.9) / dim) - 1.) }
 
+/// 右侧选择区拖动开始时的选区；每次移动从这个基准重算，折返即可缩短范围。
+pub(super) struct PickDrag {
+    base: Vec<BlockId>, anchor: BlockId, end: Option<BlockId>,
+    moved: bool, y: Pixels, tick: std::time::Instant,
+}
+
 /// 在块上横着滑的一次手势：哪一行、手指横向走了多远；松手后记下时刻和当时挪开的距离，弹回原位。
 pub struct Swipe { id: BlockId, dx: f32, released: Option<(std::time::Instant, f32)> }
 /// 行最多跟着手指挪这么远；滑过 `SWIPE_COMMIT` 松手才算数；弹回用时。
@@ -49,6 +55,113 @@ const SWIPE_BACK: f32 = 0.24;
 /// 编辑时光标所在的块右侧有一个拖动标记，点它选中整块（并升起块动作栏），按住拖动就排序；
 /// 长按一个块直接把它提起来拖（照 Craft，编辑时也是：选词用双击，或在光标上再点一下出编辑菜单）。
 impl Editor {
+    // 在正文与浮层之间放命中区域。窗口级监听也必须遵守上层控件的遮挡。
+    pub(super) fn phone_gesture_layer(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let editor = cx.entity();
+        canvas(|b, w, _| w.insert_hitbox(b, HitboxBehavior::Normal), move |_, body, window, cx| {
+            if editor.read(cx).phone_panel_open() || crate::ios::overlay() {
+                editor.read(cx).body_pan.set(false);
+                return;
+            }
+            let ed = editor.clone();
+            let hit = body.clone();
+            window.on_mouse_event(move |ev: &LongPressEvent, phase, w, cx| {
+                if phase == DispatchPhase::Bubble && (ev.phase != TouchPhase::Started || hit.is_hovered_at(ev.start_position,w)) {
+                    ed.update(cx, |ed,cx| ed.touch_selection(ev,w,cx));
+                }
+            });
+            let ed = editor.clone();
+            let hit = body.clone();
+            window.on_mouse_event(move |ev: &ScrollEvent, phase, w, cx| {
+                if ev.source != ScrollSource::Touch { return; }
+                let owner = &ed.read(cx).body_pan;
+                if phase == DispatchPhase::Capture && ev.touch_phase == TouchPhase::Started {
+                    owner.set(hit.is_hovered_at(ev.position,w));
+                }
+                if !owner.get() { return; }
+                if phase == DispatchPhase::Capture && ed.update(cx, |ed,cx| ed.bounce_scroll(ev,cx)) {
+                    cx.stop_propagation();
+                }
+                if phase == DispatchPhase::Bubble { ed.update(cx, |ed,cx| ed.swipe_scroll(ev,w,cx)); }
+            });
+            let ed = editor.clone();
+            window.on_mouse_event(move |ev: &TouchDragEvent, phase, w, cx| {
+                if phase == DispatchPhase::Bubble && (ev.phase != TouchPhase::Started || body.is_hovered_at(ev.start_position,w)) {
+                    ed.update(cx, |ed,cx| { if !ed.pick_touch(ev,w,cx) { ed.grip_touch(ev,w,cx); } });
+                }
+            });
+        }).absolute().inset_0()
+    }
+
+    fn pick_row_at(&self, y: Pixels) -> Option<BlockId> {
+        let rows = self.row_ids();
+        self.block_bounds.borrow().iter().filter(|(id,_)| rows.contains(id))
+            .min_by_key(|(_,b)| if y < b.top() { b.top()-y } else { (y-b.bottom()).max(px(0.)) })
+            .map(|(id,_)| *id)
+    }
+
+    fn pick_touch(&mut self, ev: &TouchDragEvent, w: &mut Window, cx: &mut Context<Self>) -> bool {
+        if ev.phase == TouchPhase::Started {
+            self.pick_drag = None;
+            let view = self.list.viewport_bounds();
+            if !self.block_bar_on() || !view.contains(&ev.start_position) || ev.start_position.x < view.right()-px(44.) { return false; }
+            let Some(id) = self.pick_row_at(ev.position.y) else { return false };
+            let Some(bounds) = self.block_rect(id) else { return false };
+            if ev.position.y < bounds.top()-px(4.) || ev.position.y > bounds.bottom()+px(4.) { return false; }
+            self.pick_drag = Some(PickDrag { base:self.core.block_sel_ids(), anchor:id,end:None,moved:false,y:ev.position.y,tick:std::time::Instant::now() });
+            w.prevent_default();
+            return true;
+        }
+        let Some(drag) = self.pick_drag.as_mut() else { return false };
+        drag.y = ev.position.y;
+        drag.moved |= (drag.y-ev.start_position.y).abs() >= px(6.);
+        if ev.phase == TouchPhase::Cancelled {
+            let drag = self.pick_drag.take().unwrap();
+            if drag.moved { self.core.extend_block_picks(&drag.base,None); }
+        } else if drag.moved {
+            self.update_pick_span();
+            if ev.phase == TouchPhase::Ended { self.pick_drag = None; }
+        } else if ev.phase == TouchPhase::Ended {
+            let id = self.pick_drag.take().unwrap().anchor;
+            self.toggle_block(id,w,cx);
+        }
+        cx.notify();
+        true
+    }
+
+    fn pick_edges(&self) -> (Pixels,Pixels) {
+        let view = self.list.viewport_bounds();
+        (view.top()+px(crate::ios::chrome_top()), view.bottom().min(crate::ios::sheet_point().y-px(70.)))
+    }
+
+    fn update_pick_span(&mut self) {
+        let Some(drag) = self.pick_drag.as_ref() else { return };
+        let (top,bottom) = self.pick_edges();
+        let Some(id) = self.pick_row_at(drag.y.max(top).min(bottom)) else { return };
+        let drag = self.pick_drag.as_mut().unwrap();
+        if drag.end != Some(id) {
+            drag.end = Some(id);
+            self.core.extend_block_picks(&drag.base,Some((drag.anchor,id)));
+        }
+    }
+
+    pub(super) fn pick_autoscroll(&mut self, window: &mut Window) {
+        if !self.block_bar_on() || self.phone_panel_open() || crate::ios::overlay() { self.pick_drag = None; return; }
+        let (top,bottom) = self.pick_edges();
+        let Some(drag) = self.pick_drag.as_mut().filter(|d| d.moved) else { return };
+        let now = std::time::Instant::now();
+        let dt = (now-drag.tick).as_secs_f32().min(0.05);
+        drag.tick = now;
+        let height = f32::from(bottom-top);
+        if height <= 0. { return; }
+        let band = (height * 0.15).min(96.);
+        let depth = |distance: Pixels| (1. - f32::from(distance)/band).clamp(0.,1.);
+        let edge = depth(bottom-drag.y) - depth(drag.y-top);
+        if edge == 0. { return; }
+        let speed = edge.signum() * (180. + height * 3.5 * edge.abs().powf(1.5));
+        self.list.scroll_by(px(speed*dt)); self.update_pick_span(); window.request_animation_frame();
+    }
+
     pub(super) fn phone_panel_open(&self) -> bool {
         self.compact() && (self.menu.is_some() || self.slash.is_some() || self.expanded_panel() || self.core.cell_sel.is_some())
     }
@@ -301,7 +414,7 @@ impl Editor {
 /// 块选中。桌面靠手柄菜单和 Shift 点击；手机上选中整块后底部升起一条矮的动作栏，改类型再点「格式」展开块菜单，
 /// 选中块右边有一颗圆点，点它取消选择，左右横滑切换选择（照 Craft，可以隔着选：`Core::toggle_pick`）。
 impl Editor {
-    fn block_bar_on(&self) -> bool {
+    pub(super) fn block_bar_on(&self) -> bool {
         self.compact() && self.core.in_block_mode() && self.slash.is_none() && !self.block_drag.as_ref().is_some_and(|d| d.started) && !crate::ios::format::is_open()
     }
 
@@ -335,40 +448,55 @@ impl Editor {
             e.changed(window, cx);
             crate::ios::blocks_removed(n, copy);
         });
+        let kind = one.and_then(|id| self.core.kind_of(id));
+        let crop = one.filter(|&id| self.can_phone_crop(id));
         let bar = div().when(!glass, |d| d.bg(crate::theme::raised(Theme::bg_body())).shadow(crate::theme::shadow_menu())).rounded(px(24.)).relative().when(glass, |d| d.child(crate::ios::glass::panel("block-bar-glass", 24.))).id("block-bar").occlude().w(crate::ios::menu_w(0.)).p(px(6.)).flex().items_center().gap(px(4.))
             .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); })
-            .when(one.is_some(), |d| d
+            .when_some(crop, |d,id| d.child(
+                item("bb-crop","crop",tr("裁剪","Crop"),Theme::text()).on_click(cx.listener(move |ed: &mut Editor,_,w,cx| {
+                    ed.start_crop(id,w,cx); if ed.cropping() { ed.core.clear_block_sel(); ed.set_caret(super::core::Pos::new(id,0),false); }
+                }))))
+            .when_some(one.filter(|_| matches!(kind, Some(BlockKind::Code { .. }))), |d,id| d.child(
+                item("bb-code","code",tr("编辑代码","Edit code"),Theme::text()).on_click(cx.listener(move |ed: &mut Editor,_,w,cx| {
+                    ed.core.clear_block_sel(); ed.set_caret(super::core::Pos::new(id,0),false); ed.open_lang_menu(id,w,cx);
+                }))))
+            .when_some(one.filter(|_| matches!(kind, Some(BlockKind::Table(_)))), |d,id| d.child(
+                item("bb-table","table",tr("编辑表格","Edit table"),Theme::text()).on_click(cx.listener(move |ed: &mut Editor,_,_,cx| {
+                    ed.core.select_cells(CellSel { table:id, anchor:(0,0), head:(0,0), kind:CellSelKind::Range });
+                    ed.table_page=0; ed.table_panel_target.set(None); cx.notify();
+                }))))
+            .when(one.is_some() && crop.is_none() && !matches!(kind,Some(BlockKind::Table(_) | BlockKind::Code { .. })), |d| d
                 // 「格式」：和键盘上方的「格式」是同一块面板（`crate::ios::format`）。
-                .child(item("bb-format", "type", tr("格式", "Format"), Theme::text()).on_click(|_, _, _| crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open(w, window, cx))))
-                .child(item("bb-add", "square-plus", tr("添加", "Add"), Theme::text()).on_click(open(Some(BlockSub::Add(usize::MAX))))))
+                .child(item("bb-format", "type", tr("格式", "Format"), Theme::text()).on_click(|_, _, _| crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open(w, window, cx)))))
+            .when(one.is_some(), |d| d.child(item("bb-add", "square-plus", tr("添加", "Add"), Theme::text()).on_click(open(Some(BlockSub::Add(usize::MAX))))))
             .child(item("bb-cut", "scissors", tr("剪切", "Cut"), Theme::text()).on_click(act(true, true)))
             .child(item("bb-copy", "copy", tr("复制", "Copy"), Theme::text()).on_click(act(false, true)))
             .child(item("bb-del", "trash-2", tr("删除", "Delete"), Theme::danger()).on_click(act(true, false)));
         Some(rise_at("sheet-block-bar", self.rel(crate::ios::sheet_point()), bar))
     }
 
-    /// 只在选中块右侧显示实心主色圆点；未选中块不画标记、不占点击区域。
+    /// 多选时每行右侧都有选择圈；实心表示已选，空心表示可以加选。
     pub(super) fn block_circles(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if !self.block_bar_on() || self.menu.is_some() { return vec![]; }
         let picked: std::collections::HashSet<BlockId> = self.core.block_sel_ids().into_iter().collect();
         // 选中的容器里的块也算选中（圈是实心的）。
         let on = |id: BlockId| { let mut up = Some(id); while let Some(b) = up { if picked.contains(&b) { return true; } up = self.core.parent_of(b).map(|p| p.id); } false };
-        let vis = self.core.block_order(true);
+        let rows = self.row_ids();
+        let vis: Vec<_> = self.block_bounds.borrow().keys().copied().filter(|id| rows.contains(id)).collect();
         let view = self.list.viewport_bounds();
         let mut out = vec![];
         // 圈在右边那条道里，对着块的竖直中间（`mark_y`）：表格格子里的块不给圈（选格子走表格自己的选择），
         // 和已有的圈挤在一起的也不给（引用、高亮块里的段落和容器自己的那一个，留容器的）。
         let mut ys = vec![];
         for id in vis.iter().copied() {
-            if !on(id) { continue; }
-            if matches!(self.core.kind_of(id), None | Some(BlockKind::Grid | BlockKind::Column { .. })) || self.core.cell_of(id).is_some() { continue; }
             let Some(y) = self.mark_y(id) else { continue };
+            let selected = on(id);
             // 横着滑的那一行的圈跟着它一起挪。
             let origin = point(view.right() - px(MARK_X) + px(self.swipe_offset(id).unwrap_or(0.)), y);
             if ys.iter().any(|o: &Pixels| (*o - y).abs() < px(22.)) { continue; }
             ys.push(y);
-            let dot = div().size(px(14.)).rounded_full().bg(Theme::primary());
-            let hit = div().id(("block-circle", id.0)).occlude().w(px(44.)).h(px(44.)).flex().items_center().justify_center().child(dot)
+            let dot = div().size(px(14.)).rounded_full().map(|d| if selected { d.bg(Theme::primary()) } else { d.border_1().border_color(Theme::text_disabled().opacity(0.55)) });
+            let hit = div().id(("block-circle", id.0)).w(px(44.)).h(px(44.)).flex().items_center().justify_center().child(dot)
                 .on_mouse_down(MouseButton::Left, cx.listener(move |ed: &mut Editor, _: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     window.prevent_default();

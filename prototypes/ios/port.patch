@@ -443,7 +443,7 @@
 +        let selecting = phone && self.editor.as_ref().is_some_and(|e| e.read(cx).core.in_block_mode());
 +        // 手机上有 Liquid Glass：没有实心的顶栏，返回、目录和「…」是悬浮的玻璃圆钮，正文从下面滚过。
 +        if crate::ios::floating() {
-+            return div().id("top-bar").absolute().top(crate::ios::insets().top).left_0().right_0().h(px(HEADER_H)).px(px(16.)).flex().items_center().gap(px(10.))
++            return div().id("top-bar").occlude().absolute().top(crate::ios::insets().top).left_0().right_0().h(px(HEADER_H)).px(px(16.)).flex().items_center().gap(px(10.))
 +                .child(crate::ios::glass_button("doc-back", "editor-icons/chevron-left", 22.).on_click(cx.listener(|w, _, window, cx| crate::ios::doc_back(w, window, cx))))
 +                .child(div().flex_1().min_w_0().px(px(4.)).children(save_error.is_none().then(|| self.scrolled_title(cx)).flatten()).children(save_error.map(|error| div().text_size(px(12.)).line_height(px(18.))
 +                    .text_color(theme::c(craft::R400)).overflow_hidden().whitespace_nowrap().text_ellipsis().child(error))))
@@ -1599,7 +1599,20 @@
          let generation = Arc::downgrade(&generation);
          let queued = generation.clone();
          let fut = <ImgResourceLoader as Asset>::load(r.clone(), cx);
-@@ -593,7 +620,7 @@
+@@ -568,9 +595,10 @@
+         };
+         // `.img:after`: drawn inside the image — a 2pt accent ring when
+         // selected, the quiet hairline under the pointer.
+-        let outline = (ok && !cropping && (active || hovered)).then(|| {
++        let picked = ed.compact() && self.selected.contains(&id);
++        let outline = (!cropping && (picked || ok && (active || hovered))).then(|| {
+             let d = div().absolute().inset_0().rounded(px(radius));
+-            if active { d.border_2().border_color(Theme::primary()) } else { d.border_1().border_color(ring) }
++            if picked { d.border_1().border_color(Theme::primary()) } else if active { d.border_2().border_color(Theme::primary()) } else { d.border_1().border_color(ring) }
+         });
+         // Resize handles: white dots with a soft drop, the accent rim once selected.
+         let handles = (ok && !self.ghost && !cropping && !ed.read_only && (active || hovered)).then(|| {
+@@ -593,7 +621,7 @@
                              .bg(gpui::white())
                              .border_1()
                              .border_color(if active { Theme::primary() } else { theme::ca(craft::N1000, 0.24) })
@@ -1608,7 +1621,41 @@
                      )
                      .on_mouse_down(
                          MouseButton::Left,
-@@ -854,7 +881,7 @@
+@@ -764,6 +792,33 @@
+             .child(grab(7, 0, -1, false, CursorStyle::ResizeUpDown).top_0().left(px(w / 2. - 12.)).size(px(s)))
+             .child(grab(8, 0, 1, false, CursorStyle::ResizeUpDown).bottom_0().left(px(w / 2. - 12.)).size(px(s)))
+             .child(grab(9, 0, 0, true, CursorStyle::OpenHand).left(px(12.)).top(px(12.)).w(px((w - 24.).max(0.))).h(px((h - 24.).max(0.))));
++        if self.ed.compact() {
++            let editor = cx.entity();
++            area = area.child(canvas(|b,w,_| w.insert_hitbox(b,HitboxBehavior::Normal), move |_,hit,w,_| {
++                let editor = editor.clone();
++                w.on_mouse_event(move |ev: &TouchDragEvent,phase,w,cx| {
++                    if phase != DispatchPhase::Bubble { return; }
++                    if ev.phase == TouchPhase::Started {
++                        if !hit.is_hovered_at(ev.start_position,w) { return; }
++                        let edge = |at: Pixels,lo: Pixels,hi: Pixels| {
++                            let band = px(18.).min((hi-lo)/3.);
++                            if at < lo+band { -1 } else if at > hi-band { 1 } else { 0 }
++                        };
++                        let p = ev.start_position;
++                        let hx = edge(p.x,hit.left(),hit.right());
++                        let hy = edge(p.y,hit.top(),hit.bottom());
++                        w.prevent_default();
++                        editor.update(cx,|ed,cx| ed.start_crop_drag(hx,hy,hx==0 && hy==0,CursorStyle::OpenHand,p,cx));
++                    } else if editor.read(cx).crop_dragging() {
++                        editor.update(cx,|ed,cx| {
++                            if ev.phase != TouchPhase::Cancelled { ed.crop_drag_to(ev.position,false,cx); }
++                            if ev.phase != TouchPhase::Moved { ed.end_crop_drag(cx); }
++                        });
++                    } else { return; }
++                    cx.stop_propagation();
++                });
++            }).absolute().inset_0());
++        }
+         div()
+             .absolute()
+             .inset_0()
+@@ -854,7 +909,7 @@
      fn start_resize(&mut self, id: BlockId, left: bool, cursor: CursorStyle, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
          let Some((g, container)) = self.image_geo(id) else { return };
          let center = self.core.block(id).is_some_and(|b| b.align == Align::Center);
@@ -1617,7 +1664,21 @@
          self.menu = None;
          self.slash = None;
          self.core.clear_block_sel();
-@@ -951,7 +978,7 @@
+@@ -917,7 +972,12 @@
+         self.img.crop.is_some()
+     }
+ 
+-    fn start_crop(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
++    pub(super) fn can_phone_crop(&self, id: BlockId) -> bool {
++        matches!(self.core.kind_of(id), Some(BlockKind::Image { src, .. }) if self.img.local(src).is_some())
++            && self.image_geo(id).is_some_and(|(g,_)| g.w >= MIN && g.h >= MIN)
++    }
++
++    pub(super) fn start_crop(&mut self, id: BlockId, window: &mut Window, cx: &mut Context<Self>) {
+         if self.img.crop.as_ref().is_some_and(|c| c.id != id) {
+             self.save_crop(false, window, cx);
+         }
+@@ -951,7 +1011,7 @@
              cx.emit(EditorEvent::Changed);
          }
          if reselect {
@@ -1626,7 +1687,7 @@
              self.core.clear_block_sel();
              self.core.cell_sel = None;
              self.core.sel = Selection::caret(Pos::new(c.id, 0));
-@@ -1240,7 +1267,7 @@
+@@ -1240,7 +1300,7 @@
                  window.prevent_default();
              })
              .child(bar);
@@ -1635,7 +1696,7 @@
      }
  
      /// 添加描述 / 编辑描述: shows the description and puts the caret in it.
-@@ -1257,7 +1284,7 @@
+@@ -1257,7 +1317,7 @@
          }
          self.img.caption_focus = Some(id);
          if let Some(f) = self.caption_field(id) {
@@ -1644,7 +1705,7 @@
          }
          cx.notify();
      }
-@@ -1306,7 +1333,7 @@
+@@ -1306,7 +1366,7 @@
              moved: false,
              rotated: None,
          });
@@ -1653,7 +1714,7 @@
          cx.notify();
      }
  
-@@ -1314,7 +1341,7 @@
+@@ -1314,7 +1374,7 @@
          let Some(lb) = &mut self.img.lightbox else { return };
          if lb.closing.is_none() {
              lb.closing = Some(Instant::now());
@@ -1662,7 +1723,7 @@
              cx.notify();
          }
      }
-@@ -1449,10 +1476,11 @@
+@@ -1449,10 +1509,11 @@
          let fmt = image::ImageReader::open(&path).ok().and_then(|r| r.with_guessed_format().ok()).and_then(|r| r.format());
          let ext = fmt.and_then(|f| f.extensions_str().first().copied()).unwrap_or("png");
          let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_default();
@@ -1675,7 +1736,7 @@
              bg.spawn(async move {
                  if crop == FULL {
                      let _ = std::fs::copy(&path, &dest);
-@@ -1464,6 +1492,7 @@
+@@ -1464,6 +1525,7 @@
                  }
              })
              .await;
@@ -1683,7 +1744,7 @@
          })
          .detach();
      }
-@@ -1542,7 +1571,7 @@
+@@ -1542,7 +1604,7 @@
                  && lb.closing.is_none()
              {
                  lb.closing = Some(Instant::now());
@@ -1692,7 +1753,7 @@
              }
              window.request_animation_frame();
              return;
-@@ -1556,6 +1585,9 @@
+@@ -1556,6 +1618,9 @@
          }
      }
  
@@ -1702,7 +1763,7 @@
      pub(super) fn lightbox_el(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
          let lb = self.img.lightbox.as_ref()?;
          let id = *lb.ids.get(lb.ix)?;
-@@ -1706,7 +1738,7 @@
+@@ -1706,7 +1771,7 @@
              .h(px(vh))
              .bg(theme::rgbaf(0, 0, 0, 0.8))
              .opacity(fade)
@@ -1711,7 +1772,7 @@
              .on_action(cx.listener(|e, _: &LbClose, window, cx| e.close_lightbox(window, cx)))
              .on_action(cx.listener(|e, _: &LbPrev, _, cx| e.lb_go(-1, cx)))
              .on_action(cx.listener(|e, _: &LbNext, _, cx| e.lb_go(1, cx)))
-@@ -1762,7 +1794,7 @@
+@@ -1762,7 +1827,7 @@
                      cx.notify();
                  }),
              )
@@ -1720,7 +1781,7 @@
                  let (dx, dy, lines) = match ev.delta {
                      ScrollDelta::Pixels(p) => (f32::from(p.x), f32::from(p.y), false),
                      ScrollDelta::Lines(l) => (l.x, l.y, true),
-@@ -1875,7 +1907,7 @@
+@@ -1875,7 +1940,7 @@
          self.core.clear_block_sel();
          self.core.cell_sel = None;
          self.core.sel = Selection::caret(Pos::new(last, 0));
@@ -3170,8 +3231,12 @@
              BlockKind::Divider => div()
                  .h(px(20.))
                  .w_full()
-@@ -510,7 +519,8 @@
-             .when(selected && !matches!(b.kind, BlockKind::Table(_) | BlockKind::File(_)), |d| {
+@@ -507,10 +516,11 @@
+                 )
+             })
+             // A table draws its own selection (tinted bars and cells).
+-            .when(selected && !matches!(b.kind, BlockKind::Table(_) | BlockKind::File(_)), |d| {
++            .when(selected && !matches!(b.kind, BlockKind::Table(_) | BlockKind::File(_)) && !(self.ed.compact() && matches!(b.kind, BlockKind::Code { .. } | BlockKind::Image { .. } | BlockKind::Page { card:true })), |d| {
                  // Rows of a flattened subtree continue the highlight below.
                  let (tint, r) = self.ed.block_tint();
 -                let hl = div().absolute().top_0().left(px(-2.)).right(px(-2.)).bottom_0().bg(tint);
@@ -3293,7 +3358,7 @@
          let caret_rect = |p: Pos| {
              self.cache.borrow().get(&p.block).map(|l| Bounds::new(l.position_for(p.offset), size(px(2.), l.line_height)))
          };
-@@ -1299,6 +1331,7 @@
+@@ -1299,10 +1331,12 @@
      }
  
      fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3301,42 +3366,12 @@
          self.sync_crop(window, cx);
          self.tick_image_ui(window, cx);
          // Overlays are positioned from last frame's layout, so build them
-@@ -1387,6 +1420,34 @@
-                 if !read_only {
-                     window.handle_input(&focus, ElementInputHandler::new(bounds, entity.clone()), cx);
-                 }
-+                // 阅读模式也能长按选词（为了复制）。
-+                #[cfg(target_os = "ios")]
-+                if !entity.read(cx).phone_panel_open() && !crate::ios::overlay() {
-+                    let editor = entity.clone();
-+                    window.on_mouse_event(move |ev: &LongPressEvent, phase, window, cx| {
-+                        if phase == DispatchPhase::Bubble {
-+                            editor.update(cx, |ed, cx| ed.touch_selection(ev, window, cx));
-+                        }
-+                    });
-+                    // 在块上横着滑：选中 / 取消选中这一块。
-+                    let editor = entity.clone();
-+                    window.on_mouse_event(move |ev: &ScrollEvent, phase, window, cx| {
-+                        // 到头还往外拖的部分是回弹，不让列表再收到。
-+                        if phase == DispatchPhase::Capture && editor.update(cx, |ed, cx| ed.bounce_scroll(ev, cx)) {
-+                            cx.stop_propagation();
-+                        }
-+                        if phase == DispatchPhase::Bubble {
-+                            editor.update(cx, |ed, cx| ed.swipe_scroll(ev, window, cx));
-+                        }
-+                    });
-+                    // 块右侧的拖动标记：手指一落在它上面就归它，不再滚动正文。
-+                    let editor = entity.clone();
-+                    window.on_mouse_event(move |ev: &TouchDragEvent, phase, window, cx| {
-+                        if phase == DispatchPhase::Bubble {
-+                            editor.update(cx, |ed, cx| ed.grip_touch(ev, window, cx));
-+                        }
-+                    });
-+                }
-                 // Links point (`cursor: pointer`).
-                 for h in &link_hitboxes {
-                     window.set_cursor_style(CursorStyle::PointingHand, h);
-@@ -1404,7 +1465,7 @@
+         // before the caches are reset for this frame.
++        self.pick_autoscroll(window);
+         let overlays = self.render_overlays(window, cx);
+         let lightbox = self.lightbox_el(window, cx);
+         let toast = self.toast_el(window);
+@@ -1404,7 +1438,7 @@
                      }
                  }
                  if pointer_hidden {
@@ -3345,13 +3380,14 @@
                      let e = entity.clone();
                      window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
                          if phase == DispatchPhase::Bubble {
-@@ -1577,9 +1638,12 @@
+@@ -1577,9 +1611,13 @@
                      .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                      .on_drag_move(cx.listener(Self::file_drag_move))
                      .on_drop(cx.listener(Self::drop_files))
 -                    .child(list(self.list.clone(), cx.processor(Self::render_item)).size_full()),
 +                    .child(list(self.list.clone(), cx.processor(Self::render_item)).size_full().relative().top(px(self.bounce_offset()))),
              )
++            .child(self.phone_gesture_layer(cx))
              .child(self.page_scrollbar())
 +            .when(self.phone_panel_open(), |d| d.child(div().id("editor-panel-backdrop").absolute().inset_0().occlude()
 +                .on_mouse_down(MouseButton::Left, |_, w, cx| { w.prevent_default(); cx.stop_propagation(); })
@@ -3359,7 +3395,7 @@
              .children(file_line)
              .children(catalogue)
              .children(overlays)
-@@ -1612,6 +1676,8 @@
+@@ -1612,6 +1650,8 @@
  impl Editor {
      /// "N 字" chip at the bottom right while text is selected (§2).
      fn word_counter(&self) -> Option<AnyElement> {
@@ -3368,7 +3404,7 @@
          let n = if self.core.in_block_mode() {
              let index = core::block_index(&self.core.doc);
              self.core
-@@ -1671,6 +1737,7 @@
+@@ -1671,6 +1711,7 @@
              spec.color = Theme::todo_done();
              spec.strike_all = true;
          }
@@ -3376,7 +3412,7 @@
          spec
      }
  }
-@@ -1746,6 +1813,7 @@
+@@ -1746,6 +1787,7 @@
                      .child(div().flex_1().min_w_0().ml(px(8.)).child(self.blocks(&b.children, Env { color: tc, in_callout: true, width: env.width - 66., ..env }, cx)))
                      .into_any_element()
              }
@@ -3384,8 +3420,12 @@
              BlockKind::Divider => div()
                  .h(px(25.))
                  .flex()
-@@ -1831,7 +1899,8 @@
-             .when(selected && !matches!(b.kind, BlockKind::Table(_) | BlockKind::File(_)), |d| {
+@@ -1828,10 +1870,11 @@
+                 )
+             })
+             // A table draws its own selection (tinted bars and cells).
+-            .when(selected && !matches!(b.kind, BlockKind::Table(_) | BlockKind::File(_)), |d| {
++            .when(selected && !matches!(b.kind, BlockKind::Table(_) | BlockKind::File(_)) && !(self.ed.compact() && matches!(b.kind, BlockKind::Code { .. } | BlockKind::Image { .. } | BlockKind::Page { card:true })), |d| {
                  // Rows of a flattened subtree continue the highlight below.
                  let (tint, r) = self.ed.block_tint();
 -                let hl = div().absolute().top_0().left(px(-2.)).right(px(-2.)).bottom_0().bg(tint);
@@ -3394,7 +3434,7 @@
                  d.child(if self.flat == Some(b.id) { hl.rounded_t(px(r)) } else { hl.rounded(px(r)) })
              })
              .into_any_element()
-@@ -1948,7 +2017,7 @@
+@@ -1948,7 +1991,7 @@
                          MouseButton::Left,
                          cx.listener(move |e, _, window, cx| {
                              cx.stop_propagation();
@@ -3483,8 +3523,17 @@
          self.changed(window, cx);
      }
  }
-@@ -504,7 +504,8 @@
+@@ -498,13 +498,16 @@
+         // The whole table selected as a block (or inside a text range).
+         let whole = self.selected.contains(&id)
+             || (!ed.core.in_block_mode() && !ed.core.sel.is_collapsed() && ed.core.atomic_selected(id, &self.units));
+-        let active = !ed.read_only && (whole || (self.focused && caret_in) || sel.is_some() || busy || insert.is_some() || (ed.hover == Some(id) && !ed.dragging));
++        let phone_block = ed.compact() && ed.core.in_block_mode();
++        let active = !phone_block && !ed.read_only && (whole || (self.focused && caret_in) || sel.is_some() || busy || insert.is_some() || (ed.hover == Some(id) && !ed.dragging));
+         let key = |kind: u64, i: usize| id.0.wrapping_mul(8192).wrapping_add(kind * 2048 + i as u64);
+         let x_of = |c: usize| widths[..c].iter().sum::<f32>();
  
++        let table_r = if crate::settings::feishu() { 0. } else { theme::style().num("table.radius") };
          let mut cols_tpl = vec![BAR];
          cols_tpl.extend(&widths);
 -        let mut grid = div().relative().grid().grid_col_widths(cols_tpl).w(px(BAR + total));
@@ -3493,7 +3542,15 @@
  
          // A header row whose cells all end in it stays in view while the
          // table scrolls under it; painted after the body so it covers it.
-@@ -559,7 +560,12 @@
+@@ -527,7 +530,6 @@
+             } else {
+                 cell.bg.as_ref().and_then(|x| theme::block_bg(&x.0)).or(header.then(Theme::table_header))
+             };
+-            let table_r = if crate::settings::feishu() { 0. } else { theme::style().num("table.radius") };
+             let el = div()
+                     .relative()
+                     // (`row_span` / `col_span` would reset the start line.)
+@@ -559,7 +561,12 @@
                      .when_some(bg, |d, c| d.bg(c))
                      .when(selected && moving.is_some(), |d| d.opacity(0.8))
                      .child(self.blocks(&cell.blocks, Env { width: w - if crate::settings::feishu() { 17. } else { 21. }, ..env }, cx))
@@ -3507,7 +3564,24 @@
              if sticky && r == 0 {
                  head.push(pin_el(el.into_any_element(), head.is_empty()));
              } else {
-@@ -811,6 +817,8 @@
+@@ -713,7 +720,7 @@
+         }
+ 
+         if whole {
+-            grid = grid.child(div().absolute().left(px(BAR)).top(px(BAR)).right_0().bottom_0().bg(Theme::block_hover()));
++            grid = grid.child(div().absolute().left(px(BAR)).top(px(BAR)).right_0().bottom_0().map(|d| if phone_block { d.rounded(px(table_r)).border_1().border_color(Theme::primary()) } else { d.bg(Theme::block_hover()) }));
+         }
+ 
+         // Column resizers: 10px hot zones whose right edge is 3px past each border.
+@@ -722,6 +729,7 @@
+             _ => None,
+         };
+         for c in 0..n {
++            if phone_block { break; }
+             let bx = BAR + x_of(c + 1);
+             let group = SharedString::from(format!("tres-{}", key(5, c)));
+             let w0 = widths[c];
+@@ -811,6 +819,8 @@
                              .pr(px(reach_r - br))
                              .pb(px(12.))
                              .overflow_x_scroll()
@@ -3627,7 +3701,7 @@
  }
  
  /// An opened 页面 / 卡片: the document (or page) around it, waiting under
-@@ -169,6 +171,19 @@
+@@ -169,6 +171,21 @@
      pub menu_hovered: bool,
      /// Toolbar suppressed after typing / Esc until the selection changes.
      pub toolbar_hidden: bool,
@@ -3642,12 +3716,14 @@
 +    pub(super) swipe: Option<super::touch::Swipe>,
 +    /// 手机：正文拉过头的回弹，见 `touch.rs`。
 +    pub(super) bounce: super::touch::Bounce,
++    pub(super) body_pan: Cell<bool>,
++    pub(super) pick_drag: Option<super::touch::PickDrag>,
 +    /// 手机：刚在系统的编辑菜单里点了「全选」，菜单要接着显示。
 +    pub(super) touch_keep: Option<std::time::Instant>,
      /// Typing hides the mouse pointer until it moves, as browsers do, so the
      /// I-beam left where the user clicked doesn't sit on top of the new text.
      pub pointer_hidden: bool,
-@@ -196,6 +211,11 @@
+@@ -196,6 +213,11 @@
      pub(super) layout: super::catalogue::PageLayout,
      /// 文档目录 pinned open (per document).
      pub cat_pinned: bool,
@@ -3659,7 +3735,7 @@
      /// Child pages of the open document (kept current by the workspace).
      pub sub_pages: Vec<SubPage>,
      /// Open 页面 / 卡片, outermost first: `core` is the innermost page's, the
-@@ -403,6 +423,13 @@
+@@ -403,6 +425,15 @@
              menu: None,
              menu_hovered: false,
              toolbar_hidden: false,
@@ -3669,11 +3745,13 @@
 +            touch_lift: None,
 +            swipe: None,
 +            bounce: Default::default(),
++            body_pan: Cell::new(false),
++            pick_drag: None,
 +            touch_keep: None,
              pointer_hidden: false,
              autoscroll: false,
              last_color: (None, Some(ColorName("light-yellow".into()))),
-@@ -423,6 +450,8 @@
+@@ -423,6 +454,8 @@
              page_width,
              layout: Default::default(),
              cat_pinned: false,
@@ -3682,7 +3760,7 @@
              sub_pages: vec![],
              outer: vec![],
              cat_entries: Rc::default(),
-@@ -465,9 +494,7 @@
+@@ -465,9 +498,7 @@
          e
      }
  
@@ -3693,7 +3771,7 @@
  
      // ---- bookkeeping
  
-@@ -523,6 +550,7 @@
+@@ -523,6 +554,7 @@
          if self.core.dirty {
              self.graft_pages();
              self.core.dirty = false;
@@ -3701,7 +3779,7 @@
              self.typing = true;
              self.hide_link_card(cx);
              cx.emit(EditorEvent::Changed);
-@@ -582,7 +610,8 @@
+@@ -582,7 +614,8 @@
              let next = us[i + 1..].iter().find(|u| u.text && u.scope == us[i].scope).map_or(o.page, |u| u.id);
              self.core.sel = Selection::caret(Pos::new(next, if next == o.page { self.core.len_of(next) } else { 0 }));
          }
@@ -3711,7 +3789,7 @@
          self.reveal = Some((super::render::Reveal::Block(o.page), 0));
      }
  
-@@ -639,7 +668,9 @@
+@@ -639,7 +672,9 @@
          self.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) });
          self.refresh_find(false, cx);
          if focus {
@@ -3722,7 +3800,7 @@
          }
          self.restart_blink(window, cx);
          cx.emit(EditorEvent::Page);
-@@ -702,7 +733,7 @@
+@@ -702,7 +737,7 @@
      pub fn close_menu_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          self.menu = None;
          self.menu_hovered = false;
@@ -3731,7 +3809,7 @@
          cx.notify();
      }
  
-@@ -732,7 +763,10 @@
+@@ -732,7 +767,10 @@
      pub fn slash_query(&self) -> String {
          let Some(s) = &self.slash else { return String::new() };
          let text = self.core.text_of(s.block).map(|t| t.text.as_str()).unwrap_or("");
@@ -3743,7 +3821,7 @@
      }
  
      /// Matching items in display order: grouped under their group title,
-@@ -791,6 +825,8 @@
+@@ -791,6 +829,8 @@
          let before = &text[..trigger];
          if before.is_empty() || before.ends_with(char::is_whitespace) {
              self.slash = Some(Slash { block: h.block, trigger, start: h.offset, selected: 0 });
@@ -3752,7 +3830,7 @@
              self.slash_scroll.set_offset(Point::default());
          }
      }
-@@ -808,6 +844,8 @@
+@@ -808,6 +848,8 @@
                  }
              };
          }
@@ -3761,7 +3839,7 @@
          let add = matches!(self.menu, Some(Menu::Add { .. }));
          if self.slash.is_none() && !add {
              return false;
-@@ -948,6 +986,8 @@
+@@ -948,6 +990,8 @@
              self.core.checkpoint(core::EditKind::Other);
              self.core.insert_after(block, b);
              self.menu = Some(Menu::Add { block: id, selected: 0 });
@@ -3770,7 +3848,7 @@
          }
          if let Some(Menu::Add { block, .. }) = self.menu {
              self.core.clear_block_sel();
-@@ -1055,12 +1095,13 @@
+@@ -1055,12 +1099,13 @@
      }
  
      fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3786,7 +3864,7 @@
          });
          cx.spawn_in(window, async move |this, cx| {
              if let Ok(Ok(Some(paths))) = rx.await
-@@ -1103,17 +1144,17 @@
+@@ -1103,17 +1148,17 @@
          self.dragging = false;
          self.menu = Some(Menu::Equation { block: p.block, offset: p.offset });
          let fh = self.eq_field.read(cx).focus_handle(cx);
@@ -3807,7 +3885,7 @@
          self.restart_blink(window, cx);
          cx.notify();
      }
-@@ -1128,7 +1169,7 @@
+@@ -1128,7 +1173,7 @@
                      let f = if text { &self.link_field } else { &self.link_text_field };
                      let fh = f.read(cx).focus_handle(cx);
                      f.update(cx, |f, cx| f.select_all_text(cx));
@@ -3816,7 +3894,7 @@
                  }
                  cx.notify();
              }
-@@ -1144,7 +1185,7 @@
+@@ -1144,7 +1189,7 @@
              *l = lang.to_string();
          }
          self.last_lang = lang.to_string();
@@ -3825,7 +3903,7 @@
          self.changed(window, cx);
      }
  
-@@ -1152,7 +1193,7 @@
+@@ -1152,7 +1197,7 @@
          self.lang_field.update(cx, |f, cx| f.set_text("", cx));
          self.menu = Some(Menu::Lang { block, selected: 0 });
          let fh = self.lang_field.read(cx).focus_handle(cx);
@@ -3834,7 +3912,7 @@
          cx.notify();
      }
  
-@@ -1663,6 +1704,8 @@
+@@ -1663,6 +1708,8 @@
  
      fn on_backspace(&mut self, _: &k::Backspace, window: &mut Window, cx: &mut Context<Self>) {
          self.pointer_hidden = true;
@@ -3843,7 +3921,7 @@
          if !self.guard(window, cx) {
              return;
          }
-@@ -1875,7 +1918,7 @@
+@@ -1875,7 +1922,7 @@
          self.changed(window, cx);
      }
  
@@ -3852,7 +3930,7 @@
          let cells = self.core.cell_sel.is_some();
          let blocks = if cells { self.core.selected_cells_content() } else { self.core.selected_blocks_content() };
          let text = if self.core.in_block_mode() || cells {
-@@ -1923,7 +1966,7 @@
+@@ -1923,7 +1970,7 @@
          self.paste(true, window, cx);
      }
  
@@ -3861,7 +3939,7 @@
          if !self.guard(window, cx) {
              return;
          }
-@@ -2323,7 +2366,16 @@
+@@ -2323,7 +2370,16 @@
      }
  
      pub fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3879,7 +3957,7 @@
          self.reminder_blur(window, cx);
          self.menu = None;
          self.menu_hovered = false;
-@@ -2348,6 +2400,9 @@
+@@ -2348,6 +2404,9 @@
              return cx.notify();
          }
          let Some(pos) = self.pos_at(ev.position) else { return };
@@ -3889,7 +3967,7 @@
          let eq = self.cache.borrow().get(&pos.block).and_then(|l| l.equation_at(ev.position));
          if let Some(ix) = eq
              && !ev.modifiers.shift
-@@ -2378,6 +2433,7 @@
+@@ -2378,6 +2437,7 @@
              self.set_caret(pos, false);
          }
          self.dragging = ev.click_count == 1;
@@ -3897,7 +3975,7 @@
          self.restart_blink(window, cx);
          cx.notify();
      }
-@@ -2394,6 +2450,34 @@
+@@ -2394,6 +2454,34 @@
          }
      }
  
@@ -3932,7 +4010,7 @@
      /// Mouse-up (or a move without the button) ends a text drag. Events can
      /// arrive before the frame that registers the window-level drag listeners,
      /// so the element-level handlers call this too.
-@@ -2405,6 +2489,7 @@
+@@ -2405,6 +2493,7 @@
              }
              self.link_ui.click = None;
              self.dragging = false;
@@ -3940,7 +4018,7 @@
              cx.notify();
          }
      }
-@@ -2484,7 +2569,9 @@
+@@ -2484,7 +2573,9 @@
  
      /// Click in the empty area below the content: focus a trailing empty paragraph.
      pub fn on_click_below(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -3951,7 +4029,7 @@
          if self.read_only {
              return;
          }
-@@ -2499,7 +2586,14 @@
+@@ -2499,7 +2590,14 @@
  
      /// Handle (⋮⋮) click: select the block and open its menu; "+" opens the add panel.
      pub fn open_block_menu(&mut self, block: BlockId, add: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -3967,7 +4045,7 @@
          self.slash = None;
          self.menu_hovered = false;
          if add {
-@@ -2521,6 +2615,8 @@
+@@ -2521,6 +2619,8 @@
          if !matches!(act, BlockAct::HeaderRow | BlockAct::HeaderCol) {
              self.menu = None;
          }
@@ -3976,7 +4054,7 @@
          match act {
              BlockAct::Cut => {
                  self.core.select_block(block);
-@@ -2573,7 +2669,7 @@
+@@ -2573,7 +2673,7 @@
              BlockAct::HeaderCol => self.core.table_toggle_header_col(block),
              BlockAct::DistributeCols => self.core.table_distribute(block),
          }
@@ -3985,7 +4063,7 @@
          self.changed(window, cx);
      }
  
-@@ -2670,7 +2766,36 @@
+@@ -2670,7 +2770,36 @@
      DistributeCols,
  }
  
@@ -4022,7 +4100,7 @@
      fn text_for_range(
          &mut self,
          range: Range<usize>,
-@@ -2679,6 +2804,11 @@
+@@ -2679,6 +2808,11 @@
          _: &mut Context<Self>,
      ) -> Option<String> {
          let t = self.head_text()?;
@@ -4034,7 +4112,7 @@
          let r = from16(&t, range.start)..from16(&t, range.end);
          actual.replace(to16(&t, r.start)..to16(&t, r.end));
          Some(t[r].to_string())
-@@ -2686,6 +2816,7 @@
+@@ -2686,6 +2820,7 @@
  
      fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
          let t = self.head_text()?;
@@ -4042,7 +4120,7 @@
          let (r, reversed) = self.reported_range(&t);
          Some(UTF16Selection { range: to16(&t, r.start)..to16(&t, r.end), reversed })
      }
-@@ -2699,12 +2830,22 @@
+@@ -2699,12 +2834,22 @@
          Some(to16(&t.text, r.start)..to16(&t.text, r.end))
      }
  
@@ -4067,7 +4145,7 @@
          if self.core.in_block_mode() {
              return;
          }
-@@ -2720,7 +2861,8 @@
+@@ -2720,7 +2865,8 @@
                  self.core.sel = Selection { anchor: Pos::new(head, r.start), head: Pos::new(head, r.end) };
              }
          }
@@ -4077,7 +4155,7 @@
      }
  
      fn replace_and_mark_text_in_range(
-@@ -2760,7 +2902,8 @@
+@@ -2760,7 +2906,8 @@
              let b = from16(&t2, base + ns.end);
              self.core.sel = Selection { anchor: Pos::new(head, a), head: Pos::new(head, b) };
          }
