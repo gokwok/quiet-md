@@ -283,6 +283,24 @@ impl Core {
         self.edit_cells(|c| c.bg = bg.clone());
     }
 
+    /// Apply a band to alternate body rows using the existing cell fill format.
+    pub fn table_band_rows(&mut self, table: BlockId, color: Option<ColorName>) {
+        self.edit_table(table, |t| {
+            for row in t.rows.iter_mut().skip(t.header_rows).step_by(2) {
+                for cell in row.iter_mut().filter(|c| !c.is_covered()) { cell.bg.clone_from(&color); }
+            }
+        });
+    }
+
+    pub fn table_clear_style(&mut self) {
+        fn clear(b: &mut Block) {
+            b.font = None; b.bg = None; b.align = Align::Left;
+            b.text.update_marks(0..b.text.len(), |m| *m = Marks { inline: m.inline.clone(), link: m.link.clone(), ..Marks::default() });
+            for b in &mut b.children { clear(b); }
+        }
+        self.edit_cells(|c| { c.valign = None; c.bg = None; for b in &mut c.blocks { clear(b); } });
+    }
+
     /// "middle" / "bottom"; top is the default (None).
     pub fn table_set_valign(&mut self, v: Option<&str>) {
         self.edit_cells(|c| c.valign = v.map(str::to_string));
@@ -302,6 +320,23 @@ impl Core {
             return false;
         }
         self.edit_table(table, |t| t.col_widths[col] = w)
+    }
+
+    /// 按当前列稳定排序。保留标题行和跨列单元格；跨行合并不能拆开排序。
+    pub fn table_sort_rows(&mut self, table: BlockId, col: usize, descending: bool) -> bool {
+        let Some(t) = self.table(table) else { return false };
+        if col >= t.ncols() || t.rows.len().saturating_sub(t.header_rows) < 2 || t.cells().any(|(_,_,c)| c.rowspan > 1) { return false; }
+        let head = self.sel.head.block;
+        self.edit_table(table, |t| {
+            let key = |row: &Vec<TableCell>| {
+                let origin = (0..=col).rev().find(|i| !row[*i].is_covered()).unwrap_or(col);
+                row[origin].blocks.iter().map(|b| b.text.plain_text()).collect::<Vec<_>>().join(" ").to_lowercase()
+            };
+            let rows = &mut t.rows[t.header_rows..];
+            if descending { rows.sort_by_cached_key(|r|std::cmp::Reverse(key(r))); } else { rows.sort_by_cached_key(key); }
+        });
+        if let Some((_,r,c)) = self.cell_of(head) { self.select_cells(CellSel { table,anchor:(r,c),head:(r,c),kind:CellSelKind::Range }); }
+        true
     }
 
     /// 均分列宽: every column gets the average width.
@@ -402,6 +437,20 @@ mod tests {
         c.table_delete_selected();
         assert!(c.table(id).is_none());
         assert_eq!(c.text_of(c.sel.head.block).unwrap().text, "after");
+    }
+
+    #[test]
+    fn sort_preserves_headers_and_tracks_cell_content() {
+        let (mut c,id) = core_with(3,2);
+        c.table_mut(id).unwrap().header_rows = 1;
+        c.select_cells(CellSel { table:id,anchor:(1,1),head:(1,1),kind:CellSelKind::Range });
+        let before = c.doc.clone();
+        assert!(c.table_sort_rows(id,1,true));
+        assert_eq!((text(&c,id,0,0),text(&c,id,1,0)),("00".into(),"20".into()));
+        assert_eq!(c.cell_of(c.sel.head.block),Some((id,2,1)));
+        assert!(c.undo()); assert_eq!(c.doc,before);
+        c.select_cells(CellSel { table:id,anchor:(0,0),head:(1,0),kind:CellSelKind::Range });
+        c.table_merge(); assert!(!c.table_sort_rows(id,1,false));
     }
 
     #[test]

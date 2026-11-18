@@ -302,7 +302,7 @@ fn table_step(c: &mut Core, rng: &mut Rng) -> String {
     let kind = *rng.pick(&[CellSelKind::Range, CellSelKind::Rows, CellSelKind::Cols]);
     let s = CellSel { table, anchor: slot(rng), head: slot(rng), kind };
     c.select_cells(s);
-    let what = match rng.below(6) {
+    let what = match rng.below(7) {
         0 => {
             c.table_merge();
             "merge"
@@ -324,6 +324,7 @@ fn table_step(c: &mut Core, rng: &mut Rng) -> String {
             c.table_move_selected(rng.below(nr.max(nc) + 1));
             "move_selected"
         }
+        5 => { c.table_sort_rows(table,s.head.1,rng.chance(50)); "sort_rows" }
         _ => {
             c.table_clear_cells();
             "clear_cells"
