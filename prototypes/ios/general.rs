@@ -58,7 +58,7 @@ pub fn choice(key: &'static str, label: &'static str, value: impl Into<SharedStr
 }
 
 /// 卡片里一行动作：整行可点，字是强调色（危险的是红色）。
-fn action(id: &'static str, label: &'static str, danger: bool, on: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> AnyElement {
+pub(super) fn action(id: &'static str, label: &'static str, danger: bool, on: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> AnyElement {
     div().id(id).w_full().h(px(52.)).px(px(18.)).flex().items_center().active(|d| d.bg(Theme::fill_pressed()))
         .text_size(px(17.)).text_color(if danger { Theme::danger() } else { Theme::primary() }).child(label)
         .on_click(cx.listener(move |w, _, _, cx| { super::glass::haptic(); on(w, cx); })).into_any_element()

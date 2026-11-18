@@ -8,6 +8,7 @@ use crate::theme::Theme;
 pub mod about;
 pub mod alert;
 pub mod appicon;
+pub mod assistant;
 pub mod card;
 pub mod editmenu;
 pub mod editor_surface;
@@ -177,8 +178,8 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>, sub_dep
         View::Doc => PageKey { stack: 0, depth: 100 + sub_depth, folder: 0 },
         View::Folder => PageKey { stack: 0, depth: 2 + folder.map_or(0, |f| f.1) as i32, folder: folder.map_or(0, |f| { use std::hash::{Hash, Hasher}; let mut h = std::hash::DefaultHasher::new(); f.0.hash(&mut h); h.finish() }) },
         View::Home => PageKey { stack: 0, depth: (home_page() != HomePage::Hub) as i32, folder: 0 },
-        // 设置也是从首页（左上角的空间头像）点进去的一页，第二级再往里一层。
-        View::Settings => PageKey { stack: 0, depth: 1 + settings_detail() as i32, folder: 2 },
+        // 设置从首页进去，分类下的语音角色还有一层。
+        View::Settings => PageKey { stack: 0, depth: 1 + settings_detail() as i32 + sub_depth, folder: 2 },
         // 首页「最近删除」点进去的一页：和「所有文档」同一层，用 `folder` 分开。
         View::Trash => PageKey { stack: 0, depth: 1, folder: 1 },
     };
@@ -243,6 +244,13 @@ pub fn settings_detail() -> bool { SETTINGS_DETAIL.with(|d| d.get()) }
 pub fn set_settings_detail(on: bool) {
     if settings_detail() && !on { shot::capture_page(); }
     SETTINGS_DETAIL.with(|d| d.set(on));
+}
+
+pub fn settings_back(w: &mut Workspace, cx: &mut Context<Workspace>) {
+    if assistant::roles::is_detail(w.settings_page) {
+        shot::capture_page();
+        w.open_settings(crate::settings::Page::AssistantSpeech, cx);
+    } else { set_settings_detail(false); cx.notify(); }
 }
 
 thread_local! { static KEYBOARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -798,6 +806,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         _ if keybar::menu_action(id, w, window, cx) => {}
         // 设置子页的选项行（`general::choice`）。
         "pref-lang-zh" | "pref-lang-en" => { let en = id == "pref-lang-en"; if crate::settings::prefs().english != en { w.set_pref(|p| p.english = en, cx); } }
+        _ if assistant::menu_action(id, w, cx) => {}
         _ if id.starts_with("theme-pick-") => {
             let picked = id["theme-pick-".len()..].parse::<usize>().ok().and_then(|i| crate::themes::themes().get(i).map(|t| t.id.clone()));
             if let Some(theme) = picked { crate::settings::apply_theme(w, theme, cx); }
@@ -1076,6 +1085,7 @@ pub fn long_press_layer() -> impl IntoElement {
 thread_local! { static DOC_FROM: std::cell::Cell<View> = const { std::cell::Cell::new(View::Home) }; }
 /// 文档里打开了几层页面（页面 / 卡片，没打开是 0）：往里一层从右边滑入，回外面一层往右滑走。
 pub fn sub_depth(w: &Workspace, cx: &App) -> i32 {
+    if w.view == View::Settings { return (settings_detail() && assistant::roles::is_detail(w.settings_page)) as i32; }
     w.editor.as_ref().map_or(0, |e| e.read(cx).outer.len() as i32)
 }
 /// 打开着的那一页（页面 / 卡片）在外面那一层里的块。
@@ -1101,7 +1111,7 @@ pub fn doc_back(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspa
 
 /// 跟手返回取消后要回到哪一页。
 #[derive(Clone)]
-enum Restore { Doc(Option<fdl_core::model::BlockId>), Folder(String), Home(HomePage), Settings, SettingsRoot, Trash }
+enum Restore { Doc(Option<fdl_core::model::BlockId>), Folder(String), Home(HomePage), Settings(crate::settings::Page), SettingsRoot, Trash }
 thread_local! { static RESTORE: std::cell::RefCell<Option<Restore>> = const { std::cell::RefCell::new(None) }; }
 
 /// 左缘右滑：文档回进来的那一页，文件夹、回收站和设置回主页，设置的第二级回第一级，主页拉出抽屉。文档、文件夹、主页的子页、回收站和设置
@@ -1124,7 +1134,7 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
                 View::Doc => Restore::Doc(open_page(w, cx)),
                 View::Folder => match w.folder_current.clone() { Some(id) => Restore::Folder(id), None => return },
                 View::Home if home_page() != HomePage::Hub => Restore::Home(home_page()),
-                View::Settings if settings_detail() => Restore::Settings,
+                View::Settings if settings_detail() => Restore::Settings(w.settings_page),
                 // 设置第一级和「最近删除」都是从首页点进去的，同样跟手回首页。
                 View::Settings => Restore::SettingsRoot,
                 View::Trash => Restore::Trash,
@@ -1166,7 +1176,7 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
         View::Doc => doc_back(w, window, cx),
         View::Folder | View::Trash => w.show_view(View::Home, cx),
         View::Home if home_page() != HomePage::Hub => { set_home_page(HomePage::Hub); cx.notify(); }
-        View::Settings if settings_detail() => { set_settings_detail(false); cx.notify(); }
+        View::Settings if settings_detail() => settings_back(w, cx),
         View::Settings => w.show_view(View::Home, cx),
         // 有标签栏时主页不拉抽屉。
         View::Home => { w.drawer = compact(window) && !floating(); cx.notify(); }
@@ -1180,7 +1190,7 @@ fn pop(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
             None => w.show_view(View::Home, cx),
         },
         View::Home => { set_home_page(HomePage::Hub); cx.notify(); }
-        View::Settings if settings_detail() => { set_settings_detail(false); cx.notify(); }
+        View::Settings if settings_detail() => settings_back(w, cx),
         View::Doc => doc_back(w, window, cx),
         _ => w.show_view(View::Home, cx),
     }
@@ -1197,7 +1207,7 @@ fn restore(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) 
         Restore::Doc(None) => w.show_view(View::Doc, cx),
         Restore::Folder(id) => { w.open(&id, window, cx); }
         Restore::Home(page) => { set_home_page(page); cx.notify(); }
-        Restore::Settings => { set_settings_detail(true); cx.notify(); }
+        Restore::Settings(page) => { set_settings_detail(true); if w.settings_page != page { w.open_settings(page, cx); } else { cx.notify(); } }
         Restore::SettingsRoot => { set_settings_detail(false); w.show_view(View::Settings, cx); }
         Restore::Trash => w.show_view(View::Trash, cx),
     }
