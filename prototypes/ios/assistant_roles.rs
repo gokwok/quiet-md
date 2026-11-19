@@ -24,7 +24,7 @@ pub struct Role {
     /// 配音前用快速模型给台词加上语气标签（`[叹气]` 这类，只有 v3、v4 认）。
     #[serde(default)]
     pub tags: bool,
-    /// 配音时把台词译成哪种语言：空是原文，`en`、`ja`。
+    /// 配音时把台词译成哪种语言：空是原文，`zh`、`en`、`ja`。
     #[serde(default)]
     pub lang: String,
 }
@@ -37,7 +37,7 @@ impl Role {
 }
 
 /// 台词语言：(菜单项, 代码, 名称)。
-pub const LANGS: [(&str, &str, &str); 3] = [("speech-role-lang-0", "", "原文"), ("speech-role-lang-1", "en", "English"), ("speech-role-lang-2", "ja", "日本語")];
+pub const LANGS: [(&str, &str, &str); 4] = [("speech-role-lang-0", "", "原文"), ("speech-role-lang-3", "zh", "中文"), ("speech-role-lang-1", "en", "English"), ("speech-role-lang-2", "ja", "日本語")];
 pub fn lang_name(code: &str) -> SharedString {
     match LANGS.iter().find(|l| l.1 == code) { Some(&(_, "", _)) | None => tr("原文", "Original").into(), Some(l) => l.2.into() }
 }
@@ -183,10 +183,41 @@ pub(super) fn header(title: &'static str) -> Div {
     div().px(px(26.)).pb(px(12.)).text_size(px(18.)).line_height(px(24.)).font_weight(FontWeight::BOLD).text_color(Theme::text()).child(title)
 }
 
-/// 语音页的「语音角色」（照 ElevenLabs 的 My voices）：一排可以横着滑的圆头像，名字在下面；最前面是「添加」。
+/// 「语音角色」那一排：格子宽、间距、两头留白。第一格是「添加」，角色从第二格起。
+const CELL: f32 = 76.;
+const GAP: f32 = 12.;
+const PAD: f32 = 16.;
+const STEP: f32 = CELL + GAP;
+/// 提起时头像抬高 6pt：这一排上面为它留的空。
+const LIFT: f32 = 16.;
+fn slot(i: usize) -> f32 { PAD + (i + 1) as f32 * STEP }
+
+/// 长按一个角色拖着排序（照主屏幕的图标）：提起的那个跟着手指走，别的让开位置，松手按新顺序存下；拖到两头这一排自己往那边滚。
+/// 这个顺序就是配音菜单里角色的顺序（上次用的提到最前）。`grab` 是手指离这格左边多远，`x` 是手指在窗口里的横坐标。
+#[derive(Clone)]
+struct Reorder { id: String, from: usize, grab: f32, x: f32, at: usize }
+thread_local! {
+    static REORDER: RefCell<Option<Reorder>> = const { RefCell::new(None) };
+    /// 各格现在画在离自己位置多远：让位、落下时缓过去。
+    static SHIFT: RefCell<Vec<(String, f32)>> = const { RefCell::new(Vec::new()) };
+    static ROW: ScrollHandle = ScrollHandle::new();
+    /// 刚松手的时候：手势识别补的那次点按不算点开角色。
+    static DROPPED: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+fn row_handle() -> ScrollHandle { ROW.with(|h| h.clone()) }
+fn shift_of(id: &str) -> f32 { SHIFT.with(|s| s.borrow().iter().find(|(k, _)| k == id).map_or(0., |(_, v)| *v)) }
+fn set_shift(id: &str, v: f32) {
+    SHIFT.with(|s| { let mut s = s.borrow_mut(); match s.iter_mut().find(|(k, _)| k == id) { Some(e) => e.1 = v, None => s.push((id.to_owned(), v)) } });
+}
+/// 提起的那格现在该落在第几个。
+fn drop_index(d: &Reorder, n: usize) -> usize {
+    let h = row_handle();
+    let left = d.x - f32::from(h.bounds().left() + h.offset().x) - d.grab;
+    ((left - PAD) / STEP - 1.).round().clamp(0., n.saturating_sub(1) as f32) as usize
+}
+
+/// 语音页的「语音角色」（照 ElevenLabs 的 My voices）：一排可以横着滑的圆头像，名字在下面；最前面是「添加」。长按拖动排序（`Reorder`）。
 pub(super) fn section(roles: &[Role], cx: &mut Context<Workspace>) -> AnyElement {
-    const CELL: f32 = 76.;
-    const GAP: f32 = 12.;
     let available = super::KEY_SAVED.with(Cell::get) == Some(true);
     let caption = |text: SharedString| div().w(px(CELL)).text_center().text_size(px(13.)).line_height(px(17.)).line_clamp(2).text_color(Theme::text()).child(text);
     let add = div().id("speech-add-role").w(px(CELL)).flex_none().flex().flex_col().items_center().gap(px(8.))
@@ -195,19 +226,117 @@ pub(super) fn section(roles: &[Role], cx: &mut Context<Workspace>) -> AnyElement
         .child(caption(tr("添加", "Add").into()))
         // 还没有 Key：先把 Key 配上。
         .on_click(cx.listener(move |w, _, _, cx| if available { open_catalog(w, cx) } else { super::open_key(w, cx) }));
-    let cells = roles.iter().map(|role| {
+    let drag = REORDER.with(|r| r.borrow().clone());
+    let to = drag.as_ref().map(|d| drop_index(d, roles.len()));
+    // 各格该在的位置：拖着的跟手指，夹在原位和落点之间的让一格；不拖时都回原位。别的格缓过去，还没到就接着出帧。
+    let mut moving = false;
+    let shifts: Vec<f32> = roles.iter().enumerate().map(|(i, role)| {
+        let want = match (&drag, to) {
+            (Some(d), Some(_)) if d.id == role.voice_id => { set_shift(&role.voice_id, 0.); return 0. }
+            (Some(d), Some(t)) => if d.from < i && i <= t { -STEP } else if t <= i && i < d.from { STEP } else { 0. },
+            _ => 0.,
+        };
+        let cur = shift_of(&role.voice_id);
+        let next = if (want - cur).abs() < 0.5 { want } else { moving = true; cur + (want - cur) * 0.3 };
+        set_shift(&role.voice_id, next);
+        next
+    }).collect();
+    let cell = |role: &Role, shift: f32, lifted: bool| {
         let open = role.voice_id.clone();
-        div().id(SharedString::from(format!("speech-role-{}", role.voice_id))).w(px(CELL)).flex_none().flex().flex_col().items_center().gap(px(8.))
-            .child(div().relative().child(avatar(role, 64.)).children(playing_veil(&role.voice_id, "speech-cell-veil", 64.)))
+        div().id(SharedString::from(format!("speech-role-{}", role.voice_id))).w(px(CELL)).flex_none().flex().flex_col().items_center().gap(px(8.)).relative().left(px(shift))
+            .child(div().relative().rounded_full().when(lifted, |d| d.shadow(theme::shadow_card())).child(avatar(role, 64.)).children(playing_veil(&role.voice_id, "speech-cell-veil", 64.)))
             .child(caption(role.name.clone().into()))
-            .on_click(cx.listener(move |w, _, _, cx| open_role(w, open.clone(), cx)))
-            .into_any_element()
-    });
-    let width = 32. + (roles.len() + 1) as f32 * (CELL + GAP) - GAP;
+            .on_click(cx.listener(move |w, _, _, cx| {
+                if REORDER.with(|r| r.borrow().is_some()) || DROPPED.with(Cell::get).is_some_and(|t| t.elapsed().as_millis() < 600) { return; }
+                open_role(w, open.clone(), cx)
+            }))
+    };
+    let mut cells: Vec<AnyElement> = vec![];
+    let mut lifted = None;
+    for (i, role) in roles.iter().enumerate() {
+        match &drag {
+            // 提起的那格离开原位（原位留空，别的格让位时补上），画在最上面。
+            Some(d) if d.id == role.voice_id => {
+                cells.push(div().w(px(CELL)).flex_none().into_any_element());
+                let left = d.x - f32::from(row_handle().bounds().left() + row_handle().offset().x) - d.grab;
+                lifted = Some(div().absolute().top(px(LIFT - 6.)).left(px(left)).child(cell(role, 0., true)).into_any_element());
+            }
+            _ => cells.push(cell(role, shifts[i], false).into_any_element()),
+        }
+    }
+    let ids: Vec<String> = roles.iter().map(|r| r.voice_id.clone()).collect();
+    let ws = cx.entity().downgrade();
+    let watch = canvas(|_, _, _| {}, move |_, _, window, _| {
+        let drag = REORDER.with(|r| r.borrow().clone());
+        if moving || drag.is_some() { window.request_animation_frame(); }
+        // 拖到这一排两头：往那边滚。
+        if let Some(d) = &drag {
+            let h = row_handle();
+            let b = h.bounds();
+            let v = if d.x < f32::from(b.left()) + 44. { 6. } else if d.x > f32::from(b.right()) - 44. { -6. } else { 0. };
+            if v != 0. { let o = h.offset(); h.set_offset(point((o.x + px(v)).clamp(-h.max_offset().x, px(0.)), o.y)); }
+        }
+        let (ws, ids) = (ws.clone(), ids.clone());
+        window.on_mouse_event(move |ev: &LongPressEvent, phase, window, cx| {
+            if phase != DispatchPhase::Bubble { return; }
+            let active = REORDER.with(|r| r.borrow().is_some());
+            match ev.phase {
+                TouchPhase::Started => {
+                    let h = row_handle();
+                    if active || !h.bounds().contains(&ev.start_position) { return; }
+                    let left = f32::from(ev.start_position.x - h.bounds().left() - h.offset().x);
+                    let k = ((left - PAD) / STEP).floor() as isize - 1;
+                    if k < 0 || k as usize >= ids.len() || left - slot(k as usize) > CELL { return; }
+                    let k = k as usize;
+                    window.prevent_default();
+                    crate::ios::take_long_press();
+                    REORDER.with(|r| *r.borrow_mut() = Some(Reorder { id: ids[k].clone(), from: k, grab: left - slot(k), x: f32::from(ev.start_position.x), at: k }));
+                }
+                _ if !active => return,
+                TouchPhase::Moved => {
+                    let changed = REORDER.with(|r| {
+                        let mut r = r.borrow_mut();
+                        let Some(d) = r.as_mut() else { return false };
+                        d.x = f32::from(ev.position.x);
+                        let t = drop_index(d, ids.len());
+                        std::mem::replace(&mut d.at, t) != t
+                    });
+                    if changed { crate::ios::glass::haptic(); }
+                }
+                TouchPhase::Ended => {
+                    let Some(d) = REORDER.with(|r| r.borrow_mut().take()) else { return };
+                    let t = drop_index(&d, ids.len());
+                    DROPPED.with(|x| x.set(Some(std::time::Instant::now())));
+                    // 落下：各格从现在画着的地方缓到新位置（提起的那格从手指下面）。
+                    let mut order = ids.clone();
+                    let id = order.remove(d.from);
+                    order.insert(t, id);
+                    let lifted_at = d.x - f32::from(row_handle().bounds().left() + row_handle().offset().x) - d.grab;
+                    for (k, id) in order.iter().enumerate() {
+                        let Some(i) = ids.iter().position(|x| x == id) else { continue };
+                        let visual = if i == d.from { lifted_at } else { slot(i) + shift_of(id) };
+                        set_shift(id, visual - slot(k));
+                    }
+                    if t != d.from {
+                        let _ = ws.update(cx, |w, cx| w.set_pref(|p| p.speech_roles.sort_by_key(|r| order.iter().position(|id| *id == r.voice_id).unwrap_or(usize::MAX)), cx));
+                    }
+                }
+                _ => { REORDER.with(|r| *r.borrow_mut() = None); }
+            }
+            let _ = ws.update(cx, |_, cx| cx.notify());
+        });
+        // 拖着的时候这一排和整页都不跟着手指滚。
+        window.on_mouse_event(|ev: &ScrollEvent, phase, _, cx| {
+            if phase == DispatchPhase::Capture && ev.source == ScrollSource::Touch && REORDER.with(|r| r.borrow().is_some()) { cx.stop_propagation(); }
+        });
+    }).absolute().size_0();
+    let width = 2. * PAD + (roles.len() + 1) as f32 * STEP - GAP;
     div().w_full().flex().flex_col()
         .child(header(tr("语音角色", "Voice Roles")))
-        .child(div().id("speech-roles").w_full().overflow_x_scroll().restrict_scroll_to_axis()
-            .child(div().w(px(width)).flex_none().px(px(16.)).flex().items_start().gap(px(GAP)).child(add).children(cells)))
+        // 这一排会裁掉超出的部分：上面多留 `LIFT` 给提起时抬高的头像和它的阴影，再整排提回去，不拖时版面不变。
+        .child(div().id("speech-roles").w_full().mt(px(-LIFT)).overflow_x_scroll().restrict_scroll_to_axis().track_scroll(&row_handle())
+            .child(div().w(px(width)).flex_none().px(px(PAD)).pt(px(LIFT)).relative().flex().items_start().gap(px(GAP)).child(add).children(cells).children(lifted)))
+        .child(watch)
         .into_any_element()
 }
 

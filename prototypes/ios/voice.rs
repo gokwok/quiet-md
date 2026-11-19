@@ -40,7 +40,7 @@ macro_rules! slots { ($p:literal) => { [concat!($p, "0"), concat!($p, "1"), conc
 const TAGS: [&str; 8] = slots!("voice-tags-");
 const SHOW: [&str; 8] = slots!("voice-show-");
 const LANG_MENU: [&str; 8] = slots!("voice-langs-");
-const LANG: [[&str; 8]; 3] = [slots!("voice-lang-0-"), slots!("voice-lang-1-"), slots!("voice-lang-2-")];
+const LANG: [[&str; 8]; 4] = [slots!("voice-lang-0-"), slots!("voice-lang-1-"), slots!("voice-lang-2-"), slots!("voice-lang-3-")];
 
 /// 认语气标签的模型（别的会把方括号里的字念出来）。
 fn tagged(model: &str) -> bool { let m = if model.is_empty() { assistant::DEFAULT_MODEL } else { model }; m.starts_with("eleven_v3") || m.starts_with("eleven_v4") }
@@ -465,7 +465,7 @@ Input:
 
 Step 1, read the scene. Before writing anything, work out from the narration what is happening at this exact moment and what it does to the speaker's voice: danger, combat, a chase, exhaustion, pain, fear, anger, grief, tenderness, a joke, a secret. Note their physical state (out of breath, mid-swing, wounded, shaking), their emotion and intent, who they are talking to, how loud, how fast, and the intensity from 1 (calm) to 5 (extreme). A line spoken in the middle of a fight is never delivered calmly, even if its words are plain. Write this reading in "direction" as one or two short English sentences.
 
-Step 2, translate (when "language" is not "original"). Translate each line as a voice actor in that language would say it in this scene: natural and spoken, not literal. Register follows the character and the situation: under threat or in combat people speak short, clipped and plain; formal politeness only when the relationship truly calls for it. Japanese: natural sentence endings, contractions and sentence-final particles that fit the character, non-Japanese names in katakana. English: contractions, natural rhythm.
+Step 2, translate (when "language" is not "original"). Translate each line as a voice actor in that language would say it in this scene: natural and spoken, not literal. Register follows the character and the situation: under threat or in combat people speak short, clipped and plain; formal politeness only when the relationship truly calls for it. Japanese: natural sentence endings, contractions and sentence-final particles that fit the character, non-Japanese names in katakana. Chinese: spoken Mandarin in Simplified characters, colloquial wording and modal particles (吧, 啊, 呢) that fit the character, full-width punctuation, foreign names in their usual Chinese form. English: contractions, natural rhythm.
 
 Step 3, perform (when "tags" is true). Audio tags are English words in square brackets that ElevenLabs acts out:
 - Start every line with a tag that sets its delivery, drawn from your reading in step 1. One bracket may combine a few descriptors, such as [tense, low, breathless], [shouting, furious] or [whispering, urgent]; free description is allowed.
@@ -510,7 +510,7 @@ fn request(doc: &Document, clip: &str, info: &Clip) -> (String, String, Vec<std:
     let head = |s: &str, n: usize| s.chars().take(n).collect::<String>();
     let role = prefs().speech_roles.into_iter().find(|r| r.voice_id() == info.voice_id);
     let voice = role.as_ref().map(|r| [r.voice_name(), r.traits()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).unwrap_or_default();
-    let language = match info.lang.as_str() { "en" => "English", "ja" => "Japanese", _ => "original" };
+    let language = match info.lang.as_str() { "en" => "English", "ja" => "Japanese", "zh" => "Simplified Chinese", _ => "original" };
     let lines: Vec<Value> = segs.iter().enumerate().map(|(i, r)| json!({ "n": i + 1, "text": &info.text[r.clone()] })).collect();
     // 只配对话时，引号留在了念的文字外面：前后文和旁白两头的引号去掉。
     let quote = |c: char| c.is_whitespace() || "「」『』“”\"".contains(c);
@@ -601,7 +601,7 @@ fn join(text: &str, segs: &[std::ops::Range<usize>], lines: &[String], lang: &st
     for (i, (r, line)) in segs.iter().zip(lines).enumerate() {
         if i > 0 {
             let gap = &text[segs[i - 1].end..r.start];
-            out.push_str(if gap.contains('\n') { "\n" } else { match lang { "en" => " ", "ja" => "", _ => gap } });
+            out.push_str(if gap.contains('\n') { "\n" } else { match lang { "en" => " ", "ja" | "zh" => "", _ => gap } });
         }
         out.push_str(line);
     }
@@ -664,14 +664,14 @@ pub fn rows(b: &Block, doc: &Document, cx: &mut Context<Editor>) -> Vec<AnyEleme
     clips.into_iter().map(|clip| {
         let row = row(clip.clone(), doc, cx);
         match clip_info(&clip).filter(|i| !i.script.is_empty() && SHOWN.with(|s| s.borrow().contains(&clip))) {
-            Some(info) => div().flex().flex_col().child(row).child(script(&clip, &info)).into_any_element(),
+            Some(info) => div().flex().flex_col().child(row).child(script(&clip, &info, cx)).into_any_element(),
             None => row,
         }
     }).collect()
 }
 
-/// 展开的台本：一句一行，标签淡一档，正在念的那句是正文色。
-fn script(clip: &str, info: &Clip) -> AnyElement {
+/// 展开的台本：一句一行，标签淡一档，正在念的那句是正文色。点台本收起来（和「…」里的「收起台本」一样）。
+fn script(clip: &str, info: &Clip, cx: &mut Context<Editor>) -> AnyElement {
     let now = PLAYING.with(|p| p.borrow().as_ref().filter(|p| p.clip == clip).and_then(|p| p.line));
     let mut lines = vec![];
     // 最上面一行小字：模型对这一刻的理解，配得不对时先看这里。
@@ -688,7 +688,13 @@ fn script(clip: &str, info: &Clip) -> AnyElement {
         lines.push(div().text_size(px(14.)).line_height(px(21.)).text_color(if now == Some(i) { Theme::text() } else { Theme::text_caption() })
             .child(StyledText::new(line.clone()).with_highlights(tags)));
     }
-    div().id(SharedString::from(format!("voice-script-{clip}"))).mt(px(2.)).mb(px(4.)).pl(px(28.)).flex().flex_col().gap(px(4.)).children(lines).into_any_element()
+    let fold = { let clip = clip.to_owned(); move |_: &mut Editor, _: &MouseDownEvent, _: &mut Window, cx: &mut Context<Editor>| {
+        cx.stop_propagation();
+        SHOWN.with(|s| s.borrow_mut().retain(|c| *c != clip));
+        cx.notify();
+    } };
+    div().id(SharedString::from(format!("voice-script-{clip}"))).mt(px(2.)).mb(px(4.)).pl(px(28.)).flex().flex_col().gap(px(4.)).cursor_pointer()
+        .on_mouse_down(MouseButton::Left, cx.listener(fold)).children(lines).into_any_element()
 }
 
 fn row(clip: String, doc: &Document, cx: &mut Context<Editor>) -> AnyElement {
@@ -766,7 +772,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
     }
     let at = |ids: &[&str; 8]| ids.iter().position(|k| *k == id);
     let (what, n) = if let Some(n) = at(&REDO) { ("redo", n) } else if let Some(n) = at(&DROP) { ("drop", n) } else if let Some(n) = at(&TAGS) { ("tags", n) }
-        else if let Some(n) = at(&SHOW) { ("show", n) } else if let Some((l, n)) = LANG.iter().enumerate().find_map(|(l, ids)| at(ids).map(|n| (l, n))) { (["lang-0", "lang-1", "lang-2"][l], n) }
+        else if let Some(n) = at(&SHOW) { ("show", n) } else if let Some((l, n)) = LANG.iter().enumerate().find_map(|(l, ids)| at(ids).map(|n| (l, n))) { (["lang-0", "lang-1", "lang-2", "lang-3"][l], n) }
         else { return false };
     let Some(clip) = SLOTS.with(|s| s.borrow().0.get(n).cloned()) else { return true };
     let Some(editor) = w.editor.clone() else { return true };
