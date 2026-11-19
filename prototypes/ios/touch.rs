@@ -280,7 +280,6 @@ impl Editor {
 /// 面板收起后的退场照旧由 `ios::shot` 做（从拖到的位置滑出屏幕）。同一时间只有一块在拖。
 #[derive(Clone, Copy)]
 struct Pull { key: &'static str, from: f32, dy: f32, back: Option<(std::time::Instant, f32)> }
-thread_local! { static DOUBLE_TAP: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) }; }
 thread_local! { static PULL: std::cell::Cell<Option<Pull>> = const { std::cell::Cell::new(None) }; }
 /// 面板上沿往下这么高的一条接这个手势（就是抓手让出的那一条，不压第一行）；拖过多远松手算收起；弹回用时。
 const PULL_ZONE: f32 = crate::ios::GRAB_ROOM;
@@ -830,11 +829,8 @@ impl Editor {
             // 「格式」换成原有的选区工具栏。
             "edit-format" => { self.touch_menu = false; self.toolbar_hidden = false; return cx.notify(); }
             _ if id.starts_with(crate::ios::voice::PICK) => { self.touch_menu = false; return crate::ios::voice::start(self, id, window, cx); }
-            // 双击选词后菜单出来了，第三下点击被系统拿去收菜单，到不了编辑器：收起得这么快就当第三下，选中整段。
-            _ if DOUBLE_TAP.take().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(500)) && !self.core.sel.is_collapsed() => {
-                self.select_paragraph();
-                return cx.notify();
-            }
+            // 双击期间收起的是之前的光标菜单。回调可能比选词晚，别把即将出现的选词菜单也收起。
+            "edit-dismissed" if self.touch_double_tap.is_some() => return,
             // 系统收起了菜单。全选之后菜单要留着（换成带剪切、复制的那一条），那一次收起不算。
             _ => { if !self.touch_keep.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(600)) { self.touch_menu = false; cx.notify(); } return; }
         };
@@ -862,11 +858,26 @@ impl Editor {
         self.touch_keep = Some(std::time::Instant::now());
     }
 
-    /// 双击选了词（`on_mouse_down`）：记下时间，见 `touch_menu_action`。
-    pub(super) fn touch_double_tap(&self) { DOUBLE_TAP.set(Some(std::time::Instant::now())); }
+    /// 选词和手柄立刻显示。菜单等连点间隔结束再弹，以免系统吞掉第三下。
+    pub(super) fn defer_word_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.core.sel.is_collapsed() { return; }
+        let at_time = std::time::Instant::now();
+        self.touch_double_tap = Some((at_time, at));
+        let timer = cx.background_executor().timer(GestureTuning::default().multi_tap_interval);
+        cx.spawn(async move |editor, cx| {
+            timer.await;
+            let _ = editor.update(cx, |e, cx| {
+                if e.touch_double_tap.is_some_and(|(time, _)| time == at_time) {
+                    e.touch_double_tap = None;
+                    cx.notify();
+                }
+            });
+        }).detach();
+    }
 
     /// 按下前的状态：松手时用来判断是不是「点在原来的光标上」。
     pub(super) fn touch_press(&mut self, window: &Window) {
+        self.touch_double_tap = None;
         let idle = self.focus.is_focused(window) && self.core.sel.is_collapsed() && self.menu.is_none() && self.slash.is_none();
         self.touch_before = idle.then_some((self.core.sel.head, self.touch_menu));
         self.touch_menu = false;
@@ -883,7 +894,7 @@ impl Editor {
 
     /// 编辑菜单：有系统的就交给系统（`ios::editmenu`），这里什么都不画；没有时才自己画一条。
     pub(super) fn touch_callout(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let shown = self.touch_menu && !self.dragging && self.menu.is_none() && self.slash.is_none() && self.focus.is_focused(window)
+        let shown = self.touch_menu && self.touch_double_tap.is_none() && !self.dragging && self.menu.is_none() && self.slash.is_none() && self.focus.is_focused(window)
             && !self.core.in_block_mode() && self.core.cell_sel.is_none() && self.block_drag.is_none();
         let native = crate::ios::editmenu::supported();
         if !shown { if native { crate::ios::editmenu::dismiss(); } return None; }

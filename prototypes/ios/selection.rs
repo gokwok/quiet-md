@@ -167,18 +167,27 @@ fn dot(item:Value, color:Option<Hsla>, on:bool) -> Value {
     item["swatch"] = color.map(Rgba::from).map_or_else(|| json!([]), |c| json!([c.r,c.g,c.b,c.a])); item
 }
 
-pub(super) struct RangeDrag { original: Selection, offset: Point<Pixels>, keep_keyboard: bool }
+pub(super) struct RangeDrag { original: Selection, offset: Point<Pixels>, keep_keyboard: bool, double_tap_at: Option<std::time::Instant> }
 
 impl Editor {
     pub(super) fn range_drag_move(&mut self, ev: &TouchDragEvent, w: &Window, cx: &mut Context<Self>) -> bool {
-        let Some(drag) = &self.range_drag else { return false };
+        let Some(drag) = &mut self.range_drag else { return false };
         // GPUI iOS 会在分发触摸前把向下拖动当作收键盘。手柄拖动期间保留原输入状态。
         if drag.keep_keyboard && self.focus.is_focused(w) { w.request_virtual_keyboard(); }
+        let tuning = GestureTuning::default();
+        if (ev.position - ev.start_position).magnitude() > f64::from(tuning.touch_slop) { drag.double_tap_at = None; }
+        if ev.phase == TouchPhase::Ended && drag.double_tap_at.is_some_and(|t| t.elapsed() <= tuning.multi_tap_interval) {
+            self.range_drag = None;
+            self.select_paragraph();
+            cx.notify();
+            return true;
+        }
         let before = self.core.sel;
         if ev.phase == TouchPhase::Cancelled {
             self.core.sel = drag.original;
         } else {
-            self.drag_text_endpoint(ev.position + drag.offset);
+            let endpoint = ev.position + drag.offset;
+            self.drag_text_endpoint(endpoint);
         }
         if ev.phase != TouchPhase::Moved {
             self.range_drag = None;
@@ -204,7 +213,11 @@ impl Editor {
                     editor.update(cx, |e,cx| {
                         if !e.selection_bar() || !e.focus.is_focused(w) { return; }
                         let offset = point(p.x, p.y + line/2.) - ev.start_position;
-                        e.range_drag = Some(RangeDrag { original:e.core.sel, offset, keep_keyboard:crate::ios::keyboard_up(w) });
+                        // 短词上的第三下可能落在手柄里。只有在连点范围内抬手，且没有拖动，才选中整段。
+                        let tuning = GestureTuning::default();
+                        let double_tap_at = e.touch_double_tap.take().filter(|(t, p)| t.elapsed() <= tuning.multi_tap_interval
+                            && (ev.start_position - *p).magnitude() <= f64::from(tuning.multi_tap_slop)).map(|(t, _)| t);
+                        e.range_drag = Some(RangeDrag { original:e.core.sel, offset, keep_keyboard:crate::ios::keyboard_up(w), double_tap_at });
                         e.core.sel = Selection { anchor:fixed, head:pos };
                         e.touch_menu = false;
                         w.prevent_default(); cx.stop_propagation(); cx.notify();

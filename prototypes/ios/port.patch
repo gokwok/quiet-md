@@ -3749,7 +3749,7 @@
  }
  
  /// An opened 页面 / 卡片: the document (or page) around it, waiting under
-@@ -169,6 +171,22 @@
+@@ -169,6 +171,24 @@
      pub menu_hovered: bool,
      /// Toolbar suppressed after typing / Esc until the selection changes.
      pub toolbar_hidden: bool,
@@ -3757,6 +3757,8 @@
 +    pub(super) touch_menu: bool,
 +    /// 按下前的（光标, 菜单是否显示），见 `touch.rs`。
 +    pub(super) touch_before: Option<(Pos, bool)>,
++    /// 双击选词后的连点时间和位置（见 touch.rs）。
++    pub(super) touch_double_tap: Option<(std::time::Instant, Point<Pixels>)>,
 +    /// 手机：这一帧块右侧拖动标记的位置和它管的块；正在拖块的那根手指是从哪来的。
 +    pub(super) touch_grip: std::cell::Cell<Option<(BlockId, Bounds<Pixels>)>>,
 +    pub(super) touch_lift: Option<super::touch::Lift>,
@@ -3772,7 +3774,7 @@
      /// Typing hides the mouse pointer until it moves, as browsers do, so the
      /// I-beam left where the user clicked doesn't sit on top of the new text.
      pub pointer_hidden: bool,
-@@ -196,6 +214,11 @@
+@@ -196,6 +216,11 @@
      pub(super) layout: super::catalogue::PageLayout,
      /// 文档目录 pinned open (per document).
      pub cat_pinned: bool,
@@ -3784,12 +3786,13 @@
      /// Child pages of the open document (kept current by the workspace).
      pub sub_pages: Vec<SubPage>,
      /// Open 页面 / 卡片, outermost first: `core` is the innermost page's, the
-@@ -403,6 +426,16 @@
+@@ -403,6 +428,17 @@
              menu: None,
              menu_hovered: false,
              toolbar_hidden: false,
 +            touch_menu: false,
 +            touch_before: None,
++            touch_double_tap: None,
 +            touch_grip: std::cell::Cell::new(None),
 +            touch_lift: None,
 +            swipe: None,
@@ -3801,7 +3804,7 @@
              pointer_hidden: false,
              autoscroll: false,
              last_color: (None, Some(ColorName("light-yellow".into()))),
-@@ -423,6 +456,8 @@
+@@ -423,6 +459,8 @@
              page_width,
              layout: Default::default(),
              cat_pinned: false,
@@ -3810,7 +3813,7 @@
              sub_pages: vec![],
              outer: vec![],
              cat_entries: Rc::default(),
-@@ -465,9 +500,7 @@
+@@ -465,9 +503,7 @@
          e
      }
  
@@ -3821,7 +3824,7 @@
  
      // ---- bookkeeping
  
-@@ -523,6 +556,7 @@
+@@ -523,6 +559,7 @@
          if self.core.dirty {
              self.graft_pages();
              self.core.dirty = false;
@@ -3829,7 +3832,7 @@
              self.typing = true;
              self.hide_link_card(cx);
              cx.emit(EditorEvent::Changed);
-@@ -582,7 +616,8 @@
+@@ -582,7 +619,8 @@
              let next = us[i + 1..].iter().find(|u| u.text && u.scope == us[i].scope).map_or(o.page, |u| u.id);
              self.core.sel = Selection::caret(Pos::new(next, if next == o.page { self.core.len_of(next) } else { 0 }));
          }
@@ -3839,7 +3842,7 @@
          self.reveal = Some((super::render::Reveal::Block(o.page), 0));
      }
  
-@@ -639,7 +674,9 @@
+@@ -639,7 +677,9 @@
          self.list.scroll_to(ListOffset { item_ix: 0, offset_in_item: px(0.) });
          self.refresh_find(false, cx);
          if focus {
@@ -3850,7 +3853,7 @@
          }
          self.restart_blink(window, cx);
          cx.emit(EditorEvent::Page);
-@@ -702,7 +739,7 @@
+@@ -702,7 +742,7 @@
      pub fn close_menu_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          self.menu = None;
          self.menu_hovered = false;
@@ -3859,7 +3862,7 @@
          cx.notify();
      }
  
-@@ -732,7 +769,10 @@
+@@ -732,7 +772,10 @@
      pub fn slash_query(&self) -> String {
          let Some(s) = &self.slash else { return String::new() };
          let text = self.core.text_of(s.block).map(|t| t.text.as_str()).unwrap_or("");
@@ -3871,7 +3874,7 @@
      }
  
      /// Matching items in display order: grouped under their group title,
-@@ -791,6 +831,8 @@
+@@ -791,6 +834,8 @@
          let before = &text[..trigger];
          if before.is_empty() || before.ends_with(char::is_whitespace) {
              self.slash = Some(Slash { block: h.block, trigger, start: h.offset, selected: 0 });
@@ -3880,7 +3883,7 @@
              self.slash_scroll.set_offset(Point::default());
          }
      }
-@@ -808,6 +850,8 @@
+@@ -808,6 +853,8 @@
                  }
              };
          }
@@ -3889,7 +3892,7 @@
          let add = matches!(self.menu, Some(Menu::Add { .. }));
          if self.slash.is_none() && !add {
              return false;
-@@ -948,6 +992,8 @@
+@@ -948,6 +995,8 @@
              self.core.checkpoint(core::EditKind::Other);
              self.core.insert_after(block, b);
              self.menu = Some(Menu::Add { block: id, selected: 0 });
@@ -3898,7 +3901,7 @@
          }
          if let Some(Menu::Add { block, .. }) = self.menu {
              self.core.clear_block_sel();
-@@ -1055,12 +1101,13 @@
+@@ -1055,12 +1104,13 @@
      }
  
      fn pick_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3914,7 +3917,7 @@
          });
          cx.spawn_in(window, async move |this, cx| {
              if let Ok(Ok(Some(paths))) = rx.await
-@@ -1103,17 +1150,17 @@
+@@ -1103,17 +1153,17 @@
          self.dragging = false;
          self.menu = Some(Menu::Equation { block: p.block, offset: p.offset });
          let fh = self.eq_field.read(cx).focus_handle(cx);
@@ -3935,7 +3938,7 @@
          self.restart_blink(window, cx);
          cx.notify();
      }
-@@ -1128,7 +1175,7 @@
+@@ -1128,7 +1178,7 @@
                      let f = if text { &self.link_field } else { &self.link_text_field };
                      let fh = f.read(cx).focus_handle(cx);
                      f.update(cx, |f, cx| f.select_all_text(cx));
@@ -3944,7 +3947,7 @@
                  }
                  cx.notify();
              }
-@@ -1144,7 +1191,7 @@
+@@ -1144,7 +1194,7 @@
              *l = lang.to_string();
          }
          self.last_lang = lang.to_string();
@@ -3953,7 +3956,7 @@
          self.changed(window, cx);
      }
  
-@@ -1152,7 +1199,7 @@
+@@ -1152,7 +1202,7 @@
          self.lang_field.update(cx, |f, cx| f.set_text("", cx));
          self.menu = Some(Menu::Lang { block, selected: 0 });
          let fh = self.lang_field.read(cx).focus_handle(cx);
@@ -3962,7 +3965,7 @@
          cx.notify();
      }
  
-@@ -1663,6 +1710,8 @@
+@@ -1663,6 +1713,8 @@
  
      fn on_backspace(&mut self, _: &k::Backspace, window: &mut Window, cx: &mut Context<Self>) {
          self.pointer_hidden = true;
@@ -3971,7 +3974,7 @@
          if !self.guard(window, cx) {
              return;
          }
-@@ -1875,7 +1924,7 @@
+@@ -1875,7 +1927,7 @@
          self.changed(window, cx);
      }
  
@@ -3980,7 +3983,7 @@
          let cells = self.core.cell_sel.is_some();
          let blocks = if cells { self.core.selected_cells_content() } else { self.core.selected_blocks_content() };
          let text = if self.core.in_block_mode() || cells {
-@@ -1923,7 +1972,7 @@
+@@ -1923,7 +1975,7 @@
          self.paste(true, window, cx);
      }
  
@@ -3989,7 +3992,7 @@
          if !self.guard(window, cx) {
              return;
          }
-@@ -2323,7 +2372,16 @@
+@@ -2323,7 +2375,16 @@
      }
  
      pub fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -4007,7 +4010,7 @@
          self.reminder_blur(window, cx);
          self.menu = None;
          self.menu_hovered = false;
-@@ -2348,6 +2406,9 @@
+@@ -2348,6 +2409,9 @@
              return cx.notify();
          }
          let Some(pos) = self.pos_at(ev.position) else { return };
@@ -4017,11 +4020,11 @@
          let eq = self.cache.borrow().get(&pos.block).and_then(|l| l.equation_at(ev.position));
          if let Some(ix) = eq
              && !ev.modifiers.shift
-@@ -2371,13 +2432,17 @@
+@@ -2371,13 +2435,17 @@
              let r = core::word_at(&text, pos.offset);
              self.set_caret(Pos::new(pos.block, r.start), false);
              self.core.sel.head = Pos::new(pos.block, r.end);
-+            self.touch_double_tap();
++            self.defer_word_menu(ev.position, cx);
          } else if ev.click_count >= 3 {
              self.set_caret(Pos::new(pos.block, 0), false);
              self.core.sel.head = Pos::new(pos.block, text.len());
@@ -4035,7 +4038,7 @@
          self.restart_blink(window, cx);
          cx.notify();
      }
-@@ -2394,6 +2459,43 @@
+@@ -2394,6 +2462,43 @@
          }
      }
  
@@ -4079,7 +4082,7 @@
      /// Mouse-up (or a move without the button) ends a text drag. Events can
      /// arrive before the frame that registers the window-level drag listeners,
      /// so the element-level handlers call this too.
-@@ -2405,6 +2507,7 @@
+@@ -2405,6 +2510,7 @@
              }
              self.link_ui.click = None;
              self.dragging = false;
@@ -4087,7 +4090,7 @@
              cx.notify();
          }
      }
-@@ -2484,7 +2587,9 @@
+@@ -2484,7 +2590,9 @@
  
      /// Click in the empty area below the content: focus a trailing empty paragraph.
      pub fn on_click_below(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -4098,7 +4101,7 @@
          if self.read_only {
              return;
          }
-@@ -2499,7 +2604,14 @@
+@@ -2499,7 +2607,14 @@
  
      /// Handle (⋮⋮) click: select the block and open its menu; "+" opens the add panel.
      pub fn open_block_menu(&mut self, block: BlockId, add: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -4114,7 +4117,7 @@
          self.slash = None;
          self.menu_hovered = false;
          if add {
-@@ -2521,6 +2633,8 @@
+@@ -2521,6 +2636,8 @@
          if !matches!(act, BlockAct::HeaderRow | BlockAct::HeaderCol) {
              self.menu = None;
          }
@@ -4123,7 +4126,7 @@
          match act {
              BlockAct::Cut => {
                  self.core.select_block(block);
-@@ -2573,7 +2687,7 @@
+@@ -2573,7 +2690,7 @@
              BlockAct::HeaderCol => self.core.table_toggle_header_col(block),
              BlockAct::DistributeCols => self.core.table_distribute(block),
          }
@@ -4132,7 +4135,7 @@
          self.changed(window, cx);
      }
  
-@@ -2670,7 +2784,36 @@
+@@ -2670,7 +2787,36 @@
      DistributeCols,
  }
  
@@ -4169,7 +4172,7 @@
      fn text_for_range(
          &mut self,
          range: Range<usize>,
-@@ -2679,6 +2822,11 @@
+@@ -2679,6 +2825,11 @@
          _: &mut Context<Self>,
      ) -> Option<String> {
          let t = self.head_text()?;
@@ -4181,7 +4184,7 @@
          let r = from16(&t, range.start)..from16(&t, range.end);
          actual.replace(to16(&t, r.start)..to16(&t, r.end));
          Some(t[r].to_string())
-@@ -2686,6 +2834,7 @@
+@@ -2686,6 +2837,7 @@
  
      fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
          let t = self.head_text()?;
@@ -4189,7 +4192,7 @@
          let (r, reversed) = self.reported_range(&t);
          Some(UTF16Selection { range: to16(&t, r.start)..to16(&t, r.end), reversed })
      }
-@@ -2699,12 +2848,22 @@
+@@ -2699,12 +2851,22 @@
          Some(to16(&t.text, r.start)..to16(&t.text, r.end))
      }
  
@@ -4214,7 +4217,7 @@
          if self.core.in_block_mode() {
              return;
          }
-@@ -2720,7 +2879,8 @@
+@@ -2720,7 +2882,8 @@
                  self.core.sel = Selection { anchor: Pos::new(head, r.start), head: Pos::new(head, r.end) };
              }
          }
@@ -4224,7 +4227,7 @@
      }
  
      fn replace_and_mark_text_in_range(
-@@ -2760,7 +2920,8 @@
+@@ -2760,7 +2923,8 @@
              let b = from16(&t2, base + ns.end);
              self.core.sel = Selection { anchor: Pos::new(head, a), head: Pos::new(head, b) };
          }
