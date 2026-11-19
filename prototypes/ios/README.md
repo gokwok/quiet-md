@@ -19,7 +19,7 @@ iOS 自己的代码在本目录，补丁里只留挂接点：
 | `veil.rs` | 首页与文档页共用的顶部 Liquid Glass，和滚动后出现的小字标题 |
 | `toast.rs` | 顶上的玻璃提示胶囊（删除后带「打开回收站」入口） |
 | `search.rs` | 手机上的整页搜索：输入框从页面上的搜索条滑上来，结果行带高亮、摘要和命中次数 |
-| `appicon.rs`、`icons/` | 应用图标「页边」的三种底色（墨 / 墨绿 / 朱）：母版 SVG、打进包的 PNG（`icons/build.sh` 重出），和设置 › 外观里换图标的那一行 |
+| `appicon.rs`、`icons/` | 应用图标「¶」的八种底色（朱 / 墨 / 墨绿 / 靛青 / 茄紫 / 赭石 / 雾蓝 / 宣纸，主屏名 Margin）：母版 SVG、打进包的 PNG 和设置里用的大图（`icons/build.sh` 重出），和设置 › 外观里换图标的那一行 |
 | `panel.rs` | 原生玻璃面板的控件：标题栏、分段、色点、行、缩略图、卡片 |
 | `stylepanel.rs` | 「样式」面板的各页和动作（照 Craft 的文档样式） |
 | `glass.rs` | 原生 Liquid Glass：把 `UIGlassEffect` 的视图盖在 GPUI 画面之上，和 GPUI 元素对位 |

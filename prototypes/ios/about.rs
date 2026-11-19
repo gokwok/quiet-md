@@ -1,4 +1,4 @@
-//! 设置 › 关于留白（手机）：iOS 版中文叫「留白」（Info.plist 的 `CFBundleDisplayName`），英文叫 Margin，源码是开源的 Quiet.md。照这台 iPhone 上的真实情况写——图标是「外观」里选的那一张，文档在本机或 iCloud 云盘，
+//! 设置 › 关于 Margin（手机）：iOS 版叫 Margin（Info.plist 的 `CFBundleDisplayName`，中英文一样），源码是开源的 Quiet.md。照这台 iPhone 上的真实情况写——图标就是主屏上那张，文档在本机或 iCloud 云盘，
 //! 没有账号也不收集数据；没有「软件更新」（App 由系统更新）。下一级「开源许可」：本体的 MIT 许可、素材、
 //! 以及 iOS 版真正编进去的开源组件（`licences.txt`，由 `licences.sh` 从 Cargo.lock 生成）。
 use gpui::{prelude::FluentBuilder, *};
@@ -8,14 +8,14 @@ use crate::settings::{tr, Page};
 use crate::theme::Theme;
 
 /// 桌面上的「Quiet.md」在手机上叫这个，和主屏幕上图标下的名字一样。
-pub fn name() -> &'static str { tr("留白", "Margin") }
+pub fn name() -> &'static str { "Margin" }
 const LICENSE: &str = include_str!("../../LICENSE");
 const CRATES: &str = include_str!("licences.txt");
 
 pub fn page(_w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let head = div().w_full().pt(px(12.)).pb(px(28.)).px(px(24.)).flex().flex_col().items_center()
         .child(div().relative().rounded(px(92. * 0.225)).shadow(crate::theme::shadow_button()).child(super::appicon::current_icon(92.))
-            // 深色模式下墨色的图标和黑底分不开：叠一圈细边。
+            // 深色模式下叠一圈细边，图标和黑底之间有个界。
             .when(crate::theme::dark(), |d| d.child(div().absolute().inset_0().rounded(px(92. * 0.225)).border_1().border_color(Theme::line_border()))))
         .child(div().mt(px(16.)).text_size(px(24.)).line_height(px(30.)).font_weight(FontWeight::BOLD).child(name()))
         .child(div().mt(px(2.)).text_size(px(15.)).line_height(px(20.)).text_color(Theme::text_caption()).child(format!("{} {}", tr("版本", "Version"), env!("CARGO_PKG_VERSION"))))
@@ -101,7 +101,7 @@ pub fn licences(_w: &Workspace, _cx: &mut Context<Workspace>) -> AnyElement {
     div().w_full().flex().flex_col().gap(px(28.)).pb(px(48.))
         .child(crate::settings::flat_group(Some(name()), vec![
             div().w_full().flex().flex_col().gap(px(8.)).pt(px(4.))
-                .child(para(tr("留白由开源项目 Quiet.md 构建，以 MIT 许可发布。", "Margin is built from the open-source Quiet.md project and released under the MIT License.")))
+                .child(para(tr("Margin 由开源项目 Quiet.md 构建，以 MIT 许可发布。", "Margin is built from the open-source Quiet.md project and released under the MIT License.")))
                 .child(div().px(px(16.)).text_size(px(15.)).line_height(px(20.)).child(format!("MIT License · {}", copyright())))
                 .children(body.split("\n\n").map(|p| para(p.split_whitespace().collect::<Vec<_>>().join(" "))))
                 .into_any_element()], 16.))

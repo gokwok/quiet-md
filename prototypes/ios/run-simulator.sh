@@ -15,7 +15,7 @@ cargo build --locked --manifest-path "$stage/prototypes/ios/Cargo.toml" --target
 mkdir -p "$app"
 cp "$CARGO_TARGET_DIR/$target/debug/quiet_md_ios" "$app/quiet_md_ios"
 cp "$here/Info.plist" "$app/Info.plist"
-cp "$here"/icons/*.png "$app/"
+cp "$here"/icons/AppIcon*.png "$here"/icons/Icon*.png "$app/"
 codesign --force --sign - "$app"
 printf '%s\n' "$app"
 

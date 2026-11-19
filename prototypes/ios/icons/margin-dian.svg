@@ -1,0 +1,6 @@
+<!-- 本项目绘制：Margin 应用图标「¶」——靛青底上一个纸色的段落符号（书页边上标段落的那个记号）。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<rect width="1024" height="1024" fill="#263553"/>
+<path d="M598 214 V826 M730 214 V826" stroke="#F3EEE4" stroke-width="92"/>
+<path d="M776 214 H452 A190 190 0 0 0 452 594 H644 V214 Z" fill="#F3EEE4"/>
+</svg>

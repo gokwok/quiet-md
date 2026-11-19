@@ -5466,7 +5466,7 @@
 -            Page::Library => tr("空间", "Space"),
 -            Page::About => tr("关于", "About"),
 +            Page::Library => if crate::ios::floating() { tr("空间设置", "Space Settings") } else { tr("空间", "Space") },
-+            Page::About => if crate::ios::floating() { tr("关于留白", "About Margin") } else { tr("关于", "About") },
++            Page::About => if crate::ios::floating() { tr("关于 Margin", "About Margin") } else { tr("关于", "About") },
 +            Page::Language => tr("语言", "Language"),
 +            Page::Advanced => tr("高级设置", "Advanced"),
 +            Page::Spaces => tr("我的空间", "My Spaces"),
@@ -5812,7 +5812,7 @@
          div().w_full().flex().flex_col().gap(px(28.))
              .child(div().w_full().flex().flex_col().gap(px(8.))
                  .child(group(None, vec![
-@@ -670,16 +848,9 @@
+@@ -670,16 +848,8 @@
                      row(tr("动画", "Animation"), Some(tr("克制：切换即时，只有拖拽带动画。丰富：展开收起、选中和悬停也带动画。", "Low: switching is instant, only dragging animates. High: folding, selection and hover animate too.").into()),
                          segmented("motion", &[tr("克制", "Low"), tr("丰富", "High")], usize::from(prefs().motion == "high"),
                              |w, i, cx| w.set_pref(|p| p.motion = ["", "high"][i].into(), cx), cx)).into_any_element(),
@@ -5826,13 +5826,12 @@
 -                            .child(button("theme-edit", tr("编辑 CSS", "Edit CSS")).on_click(cx.listener(move |w, _, _, cx| w.edit_theme(&edit_id, cx))))).into_any_element(),
 -                ]))
 -                .children(errors.into_iter().chain(warnings.into_iter().take(8).map(|w| format!("{}：{w}", tr("未生效", "Ignored")))).map(|e| div().px(px(4.)).text_size(px(12.)).line_height(px(18.)).text_color(Theme::danger()).child(e)))
-+                    row(tr("应用图标", "App icon"), None, crate::ios::appicon::picker(cx)).into_any_element(),
 +                ].into_iter().chain(theme_rows).collect()))
 +                .children(notes.into_iter().map(|e| div().px(px(4.)).text_size(px(12.)).line_height(px(18.)).text_color(Theme::danger()).child(e)))
                  )
              .into_any_element()
      }
-@@ -690,7 +861,8 @@
+@@ -690,7 +860,8 @@
              .child(div().text_size(px(20.)).line_height(px(26.)).font_weight(FontWeight::SEMIBOLD).child("Quiet.md"))
              .child(div().text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(format!("{} {}", tr("版本", "Version"), env!("CARGO_PKG_VERSION"))))
              .child(div().text_size(px(13.)).line_height(px(20.)).text_color(Theme::text_caption()).child(tr("本地优先的笔记应用：无需账号，文档就是你电脑上的文件。", "Local-first notes: no account, your documents are files on your Mac."))))
@@ -5842,7 +5841,7 @@
              .into_any_element()
      }
  }
-@@ -711,7 +883,7 @@
+@@ -711,7 +882,7 @@
      };
      let fill = if let State::Downloading(m) = &state { Some(crate::update::progress(m)) } else { None };
      let busy = matches!(state, State::Downloading(_) | State::Installing(_));
@@ -6602,7 +6601,7 @@
 +    pub(crate) fn export_selected_md(&mut self, ids: &[String], cx: &mut Context<Self>) {
 +        if ids.is_empty() { return; }
 +        let name = if ids.len() == 1 { self.entries.iter().find(|e| e.id == ids[0]).map(|e| display_title(&e.title).replace(['/', ':', '\\'], "_")) } else { None }
-+            .unwrap_or_else(|| crate::localized_format!("留白导出 {} 项", "Margin Export ({} items)", ids.len()));
++            .unwrap_or_else(|| crate::localized_format!("Margin 导出 {} 项", "Margin Export ({} items)", ids.len()));
 +        self.export_md_tree(&name, ids, cx);
 +    }
 +

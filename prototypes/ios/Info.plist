@@ -4,19 +4,24 @@
 <dict>
     <key>CFBundleExecutable</key><string>quiet_md_ios</string>
     <key>CFBundleIdentifier</key><string>com.s1dashu.quietmd.prototype</string>
-    <key>CFBundleDisplayName</key><string>留白</string>
+    <key>CFBundleDisplayName</key><string>Margin</string>
     <key>CFBundleName</key><string>Quiet.md Prototype</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
-    <key>NSFaceIDUsageDescription</key><string>用面容 ID 解锁留白。面容数据只由系统处理，留白不会读取或保存。</string>
+    <key>NSFaceIDUsageDescription</key><string>用面容 ID 解锁 Margin。面容数据只由系统处理，Margin 不会读取或保存。</string>
     <key>CFBundleIcons</key>
     <dict>
         <key>CFBundlePrimaryIcon</key><dict><key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array></dict>
         <key>CFBundleAlternateIcons</key>
         <dict>
+            <key>mo</key><dict><key>CFBundleIconFiles</key><array><string>IconMo</string></array></dict>
             <key>molv</key><dict><key>CFBundleIconFiles</key><array><string>IconMolv</string></array></dict>
-            <key>zhu</key><dict><key>CFBundleIconFiles</key><array><string>IconZhu</string></array></dict>
+            <key>dian</key><dict><key>CFBundleIconFiles</key><array><string>IconDian</string></array></dict>
+            <key>qie</key><dict><key>CFBundleIconFiles</key><array><string>IconQie</string></array></dict>
+            <key>zhe</key><dict><key>CFBundleIconFiles</key><array><string>IconZhe</string></array></dict>
+            <key>wu</key><dict><key>CFBundleIconFiles</key><array><string>IconWu</string></array></dict>
+            <key>xuan</key><dict><key>CFBundleIconFiles</key><array><string>IconXuan</string></array></dict>
         </dict>
     </dict>
     <!-- 生成配音切到后台也接着做（iOS 26 起的 BGContinuedProcessingTask）：标识是这个前缀加一个每次不同的后缀。 -->

@@ -1,8 +1,0 @@
-<!-- 本项目绘制：留白 应用图标「页边 · 墨」 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-<rect width="1024" height="1024" fill="#34322F"/>
-<rect x="248" y="248" width="900" height="900" rx="112" fill="#F4F1EA"/>
-<rect x="372" y="380" width="236" height="76" rx="38" fill="#262523"/>
-<rect x="372" y="508" width="372" height="52" rx="26" fill="#8E8A83"/>
-<rect x="372" y="600" width="232" height="52" rx="26" fill="#8E8A83"/>
-</svg>

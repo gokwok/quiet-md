@@ -178,16 +178,16 @@ pub fn language(_w: &Workspace, _cx: &mut Context<Workspace>) -> AnyElement {
     div().w_full().pt(px(8.)).child(card(vec![choice("language-choice", tr("界面语言", "Language"), if english { "English" } else { "简体中文" }, items)])).into_any_element()
 }
 
-/// 安全：用面容 ID 锁定留白。打开和关闭都先验证一次，免得别人拿到手机就把锁关了。
+/// 安全：用面容 ID 锁定 Margin。打开和关闭都先验证一次，免得别人拿到手机就把锁关了。
 pub fn security(_w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let k = lock::kind();
     let on = prefs().lock;
     let how = lock::method(k);
-    let title = crate::localized_format!("使用{}锁定留白", "Lock Margin with {}", how);
+    let title = crate::localized_format!("使用{}锁定 Margin", "Lock Margin with {}", how);
     let desc: SharedString = if k == Kind::Unavailable {
         tr("这台设备还没有设置面容 ID 或密码，请先在系统设置里设置。", "Set up Face ID or a passcode in the Settings app first.").into()
     } else {
-        crate::localized_format!("打开留白时需要{}解锁。你的{}数据只由系统处理，留白不会读取或保存。", "Margin asks for {} when it opens. Your {} data is handled by iOS; Margin never reads or stores it.", how, how).into()
+        crate::localized_format!("打开 Margin 时需要{}解锁。你的{}数据只由系统处理，Margin 不会读取或保存。", "Margin asks for {} when it opens. Your {} data is handled by iOS; Margin never reads or stores it.", how, how).into()
     };
     let switch = toggle("pref-lock", on).when(k == Kind::Unavailable && !on, |d| d.opacity(0.4))
         .when(k != Kind::Unavailable || on, |d| d.on_click(cx.listener(move |_, _, _, cx| {

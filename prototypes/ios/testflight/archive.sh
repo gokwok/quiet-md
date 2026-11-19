@@ -20,11 +20,11 @@ cp "$here/project.yml" "$ios/Info.plist" "$ios/QuietMd.entitlements" "$work/"
 plutil -replace CFBundleExecutable -string '$(EXECUTABLE_NAME)' "$work/Info.plist"
 plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$work/Info.plist"
 plutil -remove CFBundleIcons "$work/Info.plist"
-for name in AppIcon molv zhu; do
+for name in AppIcon mo molv dian qie zhe wu xuan; do
     icon="$work/Assets.xcassets/$name.appiconset"
     mkdir -p "$icon"
-    source=$name
-    [ "$name" != AppIcon ] || source=mo
+    source=margin-$name
+    [ "$name" != AppIcon ] || source=margin
     rsvg-convert -w 1024 -h 1024 "$ios/icons/$source.svg" -o "$icon/icon.png"
     python3 -c "import sys; from PIL import Image; Image.open(sys.argv[1]).convert('RGB').save(sys.argv[1])" "$icon/icon.png"
     echo '{"images":[{"filename":"icon.png","idiom":"universal","platform":"ios","size":"1024x1024"}],"info":{"author":"xcode","version":1}}' > "$icon/Contents.json"

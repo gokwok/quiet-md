@@ -1,6 +1,6 @@
-//! 设置 › 安全（照 Craft，IMG_9171）：用面容 ID 锁住留白。开着时，App 一进后台就盖上一层（多任务切换里也看不到文档），
+//! 设置 › 安全（照 Craft，IMG_9171）：用面容 ID 锁住 Margin。开着时，App 一进后台就盖上一层（多任务切换里也看不到文档），
 //! 刚打开和回到前台时要验证才揭开；验证不过就停在锁屏上，点「解锁」再来。验证交给系统的 LocalAuthentication
-//! （策略 2：生物识别，认不出时可以用设备密码），留白自己不碰也不存生物信息。盖的那层是系统视图，不经过 GPUI。
+//! （策略 2：生物识别，认不出时可以用设备密码），Margin 自己不碰也不存生物信息。盖的那层是系统视图，不经过 GPUI。
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -89,7 +89,7 @@ pub fn mark_unlocked() { UNLOCKED.store(true, Ordering::SeqCst); }
 
 fn ask() {
     if ASKING.swap(true, Ordering::SeqCst) { return }
-    let reason = crate::settings::tr("解锁留白", "Unlock Margin");
+    let reason = crate::settings::tr("解锁 Margin", "Unlock Margin");
     unsafe {
         let Some(class) = AnyClass::get(c"LAContext") else { ASKING.store(false, Ordering::SeqCst); return };
         let ctx: *mut AnyObject = msg_send![class, new];
@@ -110,7 +110,7 @@ fn ask() {
     }
 }
 
-/// 盖上：整窗一层厚磨砂，正中一把锁、「留白已锁定」和「解锁」。已经盖着就不再盖。
+/// 盖上：整窗一层厚磨砂，正中一把锁、「Margin 已锁定」和「解锁」。已经盖着就不再盖。
 fn cover() {
     if !COVER.load(Ordering::SeqCst).is_null() { return }
     unsafe {
@@ -140,7 +140,7 @@ fn cover() {
         let _: () = msg_send![icon, setFrame: CGRect::new(CGPoint::new(w / 2. - 30., mid - 76.), CGSize::new(60., 60.))];
         // 文字。
         let label: *mut AnyObject = msg_send![AnyClass::get(c"UILabel").unwrap(), new];
-        let _: () = msg_send![label, setText: ns_string(crate::settings::tr("留白已锁定", "Margin is locked"))];
+        let _: () = msg_send![label, setText: ns_string(crate::settings::tr("Margin 已锁定", "Margin is locked"))];
         let font: *mut AnyObject = msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: 17f64, weight: 0.3f64];
         let _: () = msg_send![label, setFont: font];
         let _: () = msg_send![label, setTextAlignment: 1isize];
