@@ -24,6 +24,17 @@ struct Pane { key: &'static str, view: *mut AnyObject, image: *mut AnyObject, te
 
 thread_local! { static PANES: RefCell<Vec<Pane>> = const { RefCell::new(Vec::new()) }; }
 
+/// 顶栏同一个位置上的按钮，各页共用一个原生视图：返回、「…」，和中间那颗（浏览页的「选择」、文档页的目录）。
+/// 各用各的视图时，换页结束那一下旧的淡出、新的长出来（`shot::show` 的交接），一模一样的按钮看着就是闪了一下。
+pub(super) fn slot(key: &'static str) -> &'static str {
+    match key {
+        "doc-back" | "browse-back" | "batch-back" | "trash-back" => "top-back",
+        "doc-catalogue" | "browse-select" => "top-middle",
+        "doc-more" | "browse-options" | "hub-more" => "top-more",
+        _ => key,
+    }
+}
+
 thread_local! { static ALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// 每帧开头调用。`allowed` 为假时所有玻璃立刻藏起：原生视图压在 GPUI 的一切之上，
 /// 抽屉、面板、对话框盖上来时必须让开。这一帧画完后，没被 `pane` 点到的也藏起
@@ -98,6 +109,7 @@ pub fn tab_pane(key: &'static str, tabs: Vec<Icon>, picked: Option<(usize, Hsla)
 
 /// 按下时玻璃轻轻缩一下再弹回：GPUI 画不到玻璃上面，按压的反馈只能由原生视图给。
 pub fn pulse(key: &'static str) {
+    let key = slot(key);
     PANES.with(|p| if let Some(pane) = p.borrow().iter().find(|pane| pane.key == key) { unsafe {
         let anim: *mut AnyObject = msg_send![AnyClass::get(c"CABasicAnimation").unwrap(), animationWithKeyPath: ns_string("transform.scale")];
         let to: *mut AnyObject = msg_send![AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: 0.9f64];
@@ -132,6 +144,7 @@ fn place(key: &'static str, look: Look, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
     let parent = super::shot::overlay(handle.ui_view.as_ptr() as *mut AnyObject);
+    let key = slot(key);
     PANES.with(|p| unsafe {
         let mut panes = p.borrow_mut();
         let ix = match panes.iter().position(|pane| pane.key == key) {
@@ -169,6 +182,8 @@ fn place(key: &'static str, look: Look, window: &Window) {
         pane.seen = true;
         pane.set_shown(ALLOWED.with(|a| a.get()));
         if pane.look.as_ref() == Some(&look) { return; }
+        // 共用的那颗换了内容（「选择」↔ 目录）：旧页还在走时先不换，走完再换，和原来交接的时机一样。
+        if super::shot::sliding() && pane.look.as_ref().is_some_and(|o| o.icon.map(|i| i.0) != look.icon.map(|i| i.0) || o.label.as_ref().map(|l| &l.0) != look.label.as_ref().map(|l| &l.0)) { return; }
         let old = pane.look.take();
         let (x, y, w, h) = (f64::from(look.frame.origin.x), f64::from(look.frame.origin.y), f64::from(look.frame.size.width), f64::from(look.frame.size.height));
         let _: () = msg_send![pane.view, setFrame: CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))];

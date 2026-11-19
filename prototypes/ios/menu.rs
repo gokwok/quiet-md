@@ -84,6 +84,7 @@ fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, 
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
     let parent = super::shot::overlay(handle.ui_view.as_ptr() as *mut AnyObject);
     let dark = crate::theme::dark();
+    let key = super::glass::slot(key);
     BUTTONS.with(|b| unsafe {
         let mut buttons = b.borrow_mut();
         let ix = match buttons.iter().position(|button| button.key == key) {
