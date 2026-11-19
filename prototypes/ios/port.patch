@@ -271,12 +271,12 @@
 +        if !page && !ed.title_scrolled() { return None; }
 +        let id = self.current.as_ref()?;
 +        let e = self.entries.iter().find(|e| &e.id == id)?;
-+        let folder = e.meta.parent.as_ref().and_then(|p| self.entries.iter().find(|f| &f.id == p)).and_then(|f| f.meta.folder.clone());
++        let dir = e.meta.parent.as_ref().and_then(|p| self.entries.iter().find(|f| &f.id == p)); let (folder, icon) = (dir.and_then(|f| f.meta.folder.clone()), dir.map(|f| crate::ios::folder_icons::name(f.meta.folder_icon.as_deref())));
 +        if page {
 +            let path: Vec<String> = folder.into_iter().chain(ed.outer.iter().map(|o| crate::settings::display_title(&o.core.doc.title.text).to_string())).collect();
-+            return Some(crate::ios::doc_title(crate::settings::display_title(&ed.core.doc.title.text).into(), Some(path.join(" > ").into())).into_any_element());
++            return Some(crate::ios::doc_title(crate::settings::display_title(&ed.core.doc.title.text).into(), Some(path.join(" > ").into()), icon).into_any_element());
 +        }
-+        Some(crate::ios::doc_title(crate::settings::display_title(&e.title).into(), folder.map(Into::into)).into_any_element())
++        Some(crate::ios::doc_title(crate::settings::display_title(&e.title).into(), folder.map(Into::into), icon).into_any_element())
 +    }
 +
      pub fn new_doc(&mut self, window: &mut Window, cx: &mut Context<Self>) {

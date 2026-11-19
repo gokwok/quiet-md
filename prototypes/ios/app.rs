@@ -372,14 +372,16 @@ pub fn top_fade(page: Hsla, titled: bool) -> impl IntoElement {
         .bg(linear_gradient(180., linear_color_stop(page, if titled { 0.8 } else { 0.55 }), linear_color_stop(page.opacity(0.), 1.)))
 }
 
-/// 文档页顶栏中间的小字标题：正文的标题滚到顶栏底下后淡入，下面一行是所在的文件夹。
-pub fn doc_title(title: SharedString, folder: Option<SharedString>) -> AnyElement {
+/// 文档页顶栏中间的小字标题：正文的标题滚到顶栏底下后淡入，下面一行是所在的文件夹，前面是这个文件夹的图标（照 Craft，和字同色）。
+pub fn doc_title(title: SharedString, folder: Option<SharedString>, icon: Option<&'static str>) -> AnyElement {
     // 有毛玻璃带时标题写在带子上（原生的），这里只留位置。
-    if veil::on() { return veil::title(title, folder, Theme::text(), Theme::text_caption()).into_any_element(); }
+    if veil::on() { return veil::title(title, folder, icon, Theme::text(), Theme::text_caption()).into_any_element(); }
     let (ink, sub) = style::chrome_ink().unwrap_or((Theme::text(), Theme::text_caption()));
     div().id("doc-title").w_full().flex().flex_col().items_start()
         .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(15.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(title))
-        .children(folder.map(|f| div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).line_height(px(14.)).text_color(sub).child(f)))
+        .children(folder.map(|f| div().max_w_full().flex().items_center().gap(px(3.))
+            .children(icon.map(|i| folder_icons::icon(i, 11., sub)))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(11.)).line_height(px(14.)).text_color(sub).child(f))))
         .with_animation("doc-title-in", Animation::new(Duration::from_millis(180)), |d, t| d.opacity(t)).into_any_element()
 }
 

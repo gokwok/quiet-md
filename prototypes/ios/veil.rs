@@ -64,9 +64,9 @@ pub fn slot(dark: bool) -> impl IntoElement {
     canvas(move |bounds, window, _| place(bounds, dark, false, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
-/// 标题的占位（顶栏中间那一格）：两行小字写在带子上。
-pub fn title(title: SharedString, folder: Option<SharedString>, ink: Hsla, sub: Hsla) -> impl IntoElement {
-    canvas(move |bounds, _, _| write(bounds, &title, folder.as_deref().unwrap_or(""), ink, sub, false), |_, _, _, _| {}).w_full().h(px(34.))
+/// 标题的占位（顶栏中间那一格）：两行小字写在带子上。`icon`：文件夹那一行前面的图标（照 Craft）。
+pub fn title(title: SharedString, folder: Option<SharedString>, icon: Option<&'static str>, ink: Hsla, sub: Hsla) -> impl IntoElement {
+    canvas(move |bounds, _, _| write(bounds, &title, folder.as_deref().unwrap_or(""), icon, ink, sub, false), |_, _, _, _| {}).w_full().h(px(34.))
 }
 
 /// 首页的滚动标题。绘制时读取偏移，惯性滚动和玻璃的位置在同一帧更新。
@@ -88,7 +88,7 @@ pub fn home_header(scroll: &ScrollHandle, title: SharedString, avatar: Option<(B
         place(bounds, crate::theme::dark(), true, window);
         if offset >= title_end {
             let frame = Bounds::new(point(bounds.left() + px(72.), bounds.top() + super::insets().top + px(9.)), size(bounds.size.width - px(144.), px(34.)));
-            write(frame, &title, "", crate::theme::Theme::text(), crate::theme::Theme::text_caption(), true);
+            write(frame, &title, "", None, crate::theme::Theme::text(), crate::theme::Theme::text_caption(), true);
         }
     }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
 }
@@ -109,7 +109,7 @@ pub fn page_header(scroll: &ScrollHandle, title: SharedString) -> impl IntoEleme
         }
         place(bounds, crate::theme::dark(), true, window);
         let frame = Bounds::new(point(bounds.left() + px(72.), bounds.top() + super::insets().top + px(9.)), size(bounds.size.width - px(144.), px(34.)));
-        write(frame, &title, "", crate::theme::Theme::text(), crate::theme::Theme::text_caption(), true);
+        write(frame, &title, "", None, crate::theme::Theme::text(), crate::theme::Theme::text_caption(), true);
     }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
 }
 
@@ -364,7 +364,7 @@ unsafe fn blur_image(picture: *mut AnyObject) -> *mut AnyObject {
 }
 
 
-fn write(frame: Bounds<Pixels>, title: &str, folder: &str, ink: Hsla, sub: Hsla, centered: bool) {
+fn write(frame: Bounds<Pixels>, title: &str, folder: &str, icon: Option<&str>, ink: Hsla, sub: Hsla, centered: bool) {
     SEEN.with(|s| { let (b, _, a) = s.get(); s.set((b, true, a)) });
     VEIL.with(|v| unsafe {
         let mut slot = v.borrow_mut();
@@ -385,15 +385,51 @@ fn write(frame: Bounds<Pixels>, title: &str, folder: &str, ink: Hsla, sub: Hsla,
         let _: () = msg_send![veil.title, setTextAlignment: if centered { 1isize } else { 0isize }];
         let _: () = msg_send![veil.sub, setTextAlignment: if centered { 1isize } else { 0isize }];
         let _: () = msg_send![veil.title, setTextColor: super::glass::ui_color(ink)];
-        let _: () = msg_send![veil.sub, setTextColor: super::glass::ui_color(sub)];
-        if veil.text.0 != title || veil.text.1 != folder {
+        // 文件夹那一行带图标时，图标是按这一行的颜色画好的：颜色变了（换了背景）也要重写。
+        let icon = icon.filter(|_| !folder.is_empty());
+        let key = match icon { Some(i) => format!("{i}|{folder}|{sub:?}"), None => folder.to_string() };
+        if icon.is_none() { let _: () = msg_send![veil.sub, setTextColor: super::glass::ui_color(sub)]; }
+        if veil.text.0 != title || veil.text.1 != key {
             let fresh = veil.text.0.is_empty();
-            veil.text = (title.to_string(), folder.to_string());
+            veil.text = (title.to_string(), key);
             let _: () = msg_send![veil.title, setText: ns_string(title)];
-            let _: () = msg_send![veil.sub, setText: ns_string(folder)];
+            match icon {
+                Some(icon) => sub_with_icon(veil.sub, icon, folder, sub),
+                None => { let _: () = msg_send![veil.sub, setText: ns_string(folder)]; }
+            }
             if fresh { fade(veil.title, 1.); fade(veil.sub, 1.); }
         }
     });
+}
+
+/// 文件夹那一行：前面一个和字同色的小图标（照 Craft），再空一格是文件夹名。图标是现成的 SVG（`glass::icon_image`），着好色再插进字里。
+unsafe fn sub_with_icon(label: *mut AnyObject, icon: &str, folder: &str, color: Hsla) {
+    unsafe {
+        let ink = super::glass::ui_color(color);
+        let _: () = msg_send![label, setTextColor: ink];
+        let image = super::glass::icon_image(icon, 11.);
+        if image.is_null() { let _: () = msg_send![label, setText: ns_string(folder)]; return; }
+        // 1 = UIImageRenderingModeAlwaysOriginal：颜色画进图里，不跟着 tintColor 变。
+        let image: *mut AnyObject = msg_send![image, imageWithTintColor: ink, renderingMode: 1isize];
+        let attachment: *mut AnyObject = msg_send![AnyClass::get(c"NSTextAttachment").unwrap(), new];
+        let _: () = msg_send![attachment, setImage: image];
+        // 11pt 的字：图标底边落在基线下面一点，和字的视觉中线对齐。
+        let _: () = msg_send![attachment, setBounds: CGRect::new(CGPoint::new(0., -1.5), CGSize::new(11., 11.))];
+        let glyph: *mut AnyObject = msg_send![AnyClass::get(c"NSAttributedString").unwrap(), attributedStringWithAttachment: attachment];
+        let text: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableAttributedString").unwrap(), new];
+        let _: () = msg_send![text, appendAttributedString: glyph];
+        let rest: *mut AnyObject = msg_send![AnyClass::get(c"NSAttributedString").unwrap(), alloc];
+        let rest: *mut AnyObject = msg_send![rest, initWithString: ns_string(&format!(" {folder}"))];
+        let _: () = msg_send![text, appendAttributedString: rest];
+        let _: () = msg_send![rest, release];
+        let _: () = msg_send![label, setAttributedText: text];
+        let _: () = msg_send![text, release];
+        let _: () = msg_send![attachment, release];
+        // 换成带属性的字之后，字号和颜色照这一行原来的。
+        let font: *mut AnyObject = msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: 11f64, weight: 0f64];
+        let _: () = msg_send![label, setFont: font];
+        let _: () = msg_send![label, setTextColor: ink];
+    }
 }
 
 unsafe fn ns_string(s: &str) -> *mut AnyObject {
