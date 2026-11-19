@@ -48,6 +48,7 @@ fn set(i: usize) {
             None => std::ptr::null_mut(),
         };
         let none: *mut AnyObject = std::ptr::null_mut();
+        // 换完后系统会在进程外弹一句「你已更改……的图标」：版式改不了，私有的 _setAlternateIconName: 也照样弹（iOS 27 模拟器实测）。
         let _: () = msg_send![app(), setAlternateIconName: name, completionHandler: none];
     }
     PICKED.with(|p| p.set(Some(i)));

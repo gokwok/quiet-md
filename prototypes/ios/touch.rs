@@ -740,6 +740,11 @@ impl Editor {
                 let from = self.swipe_offset(id).unwrap_or(0.);
                 if let Some(w) = self.swipe.as_mut() { w.released = Some((std::time::Instant::now(), from)); }
                 if ev.touch_phase == TouchPhase::Ended && dx.abs() >= SWIPE_COMMIT { crate::ios::glass::haptic(); self.toggle_block(id, window, cx); }
+                // 快滑松手后 GPUI 还留着一段横向惯性（正文不横滚，看不见），停下之前的下一次触摸算「接住惯性」、不算点按：
+                // 滑选一块后紧接着点动作栏的「删除」会落空。马上在窗口外补一次按下又取消的触摸，把惯性接掉。
+                if ev.touch_phase == TouchPhase::Ended { window.defer(cx, |window, cx| for phase in [TouchPhase::Started, TouchPhase::Cancelled] {
+                    window.dispatch_event(PlatformInput::Touch(TouchEvent { id: TouchId(u64::MAX), phase, position: point(px(-100.), px(-100.)), predicted_position: None, force: None }), cx);
+                }); }
                 cx.notify();
             }
         }
