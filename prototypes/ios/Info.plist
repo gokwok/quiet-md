@@ -19,6 +19,8 @@
             <key>zhu</key><dict><key>CFBundleIconFiles</key><array><string>IconZhu</string></array></dict>
         </dict>
     </dict>
+    <!-- 生成配音切到后台也接着做（iOS 26 起的 BGContinuedProcessingTask）：标识是这个前缀加一个每次不同的后缀。 -->
+    <key>BGTaskSchedulerPermittedIdentifiers</key><array><string>com.s1dashu.quietmd.prototype.voice.*</string></array>
     <key>MinimumOSVersion</key><string>17.0</string>
     <key>UILaunchScreen</key><dict/>
     <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>

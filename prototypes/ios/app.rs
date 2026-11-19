@@ -36,6 +36,7 @@ pub mod veil;
 pub mod stylepanel;
 pub mod format;
 pub mod voice;
+pub mod background;
 
 pub fn run() {
     crate::apple_files::install();

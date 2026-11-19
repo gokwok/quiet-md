@@ -79,10 +79,17 @@ impl Clip {
 
 enum Job { Writing, Running, Failed(String) }
 
+/// 正在生成的一次。同一段又要生成时，旧的那次作废：它的结果不写、不放，ElevenLabs 那个请求也停掉（免得白花额度）。
+/// 丢掉它就交还后台任务里它那一份。
+struct Live { turn: u64, ticket: super::background::Ticket, call: Option<tokio::task::AbortHandle> }
+impl Drop for Live { fn drop(&mut self) { if let Some(call) = &self.call { call.abort(); } } }
+
 struct Playing { clip: String, player: *mut AnyObject, length: f32, epoch: u64, follow: Vec<(BlockId, std::ops::Range<usize>)>, line: Option<usize> }
 
 thread_local! {
     static JOBS: RefCell<HashMap<String, Job>> = RefCell::new(HashMap::new());
+    static LIVE: RefCell<HashMap<String, Live>> = RefCell::new(HashMap::new());
+    static TURN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// 读过的 json（`None`：没有这个文件）。
     static CLIPS: RefCell<HashMap<String, Option<Clip>>> = RefCell::new(HashMap::new());
     static LAST: RefCell<String> = const { RefCell::new(String::new()) };
@@ -188,35 +195,52 @@ fn begin(ed: &mut Editor, id: &str, blocks: Option<(Vec<BlockId>, bool)>, window
     generate(clip, info, &ed.core.doc, cx);
 }
 
-/// 要台本（需要的话）、再向 ElevenLabs 要音频：这期间那一行写着「编写台本」「生成中」；好了就放一遍。
+/// 要台本（需要的话）、再向 ElevenLabs 要音频：这期间那一行写着「编写台本」「生成中」，切到后台也接着做（`background`）。
+/// 几段可以同时生成，各自记在 `JOBS` 里，不经过发起时的那个编辑器（换了篇文档再回来，那个编辑器就没了）。
+/// 好了就放一遍：只在应用在前台、没有别的在放、这段还在当前文档里时。
 fn generate(clip: String, mut info: Clip, doc: &Document, cx: &mut Context<Editor>) {
-    stop();
+    if playing(&clip) { stop(); }
     info.starts.clear();
     info.length = 0.;
     let scripted = info.scripted();
+    let Some(key) = assistant::read_key() else {
+        drop(LIVE.with(|l| l.borrow_mut().remove(&clip)));
+        JOBS.with(|j| j.borrow_mut().insert(clip, Job::Failed(tr("没有 API Key", "No API Key").into())));
+        return cx.notify();
+    };
+    let turn = TURN.with(|t| { t.set(t.get() + 1); t.get() });
+    // 系统进度条（灵动岛、锁屏）上写的。
+    let stage = if scripted { tr("正在写台本", "Writing script") } else { tr("正在生成语音", "Generating audio") };
+    let ticket = super::background::begin(info.role.clone(), stage, if scripted { 2 } else { 1 }, { let clip = clip.clone(); move || halted(clip, turn) });
+    // 换下来的旧的那次在这里作废。
+    let old = LIVE.with(|l| l.borrow_mut().insert(clip.clone(), Live { turn, ticket, call: None }));
+    drop(old);
     JOBS.with(|j| j.borrow_mut().insert(clip.clone(), if scripted { Job::Writing } else { Job::Running }));
     cx.notify();
-    let Some(key) = assistant::read_key() else {
-        JOBS.with(|j| j.borrow_mut().insert(clip, Job::Failed(tr("没有 API Key", "No API Key").into())));
-        return;
-    };
     let request = scripted.then(|| (assistant::text::quick(), request(doc, &clip, &info)));
-    cx.spawn(async move |this, cx| {
+    cx.spawn(async move |_, _| {
+        let live = || current(&clip, turn);
         let result = async {
+            if !live() { return Ok(()) }
             if let Some((quick, (system, user, segs))) = request {
                 let quick = quick.ok_or_else(|| tr("先在 设置 › 文本 里选择模型", "Choose a model in Settings › Text first").to_owned())?;
                 let reply = ask(quick, system, user).await?;
+                if !live() { return Ok(()) }
                 (info.script, info.direction) = lines(&reply, &info, &segs)?;
                 info.spoken = join(&info.text, &segs, &info.script, &info.lang);
                 if info.spoken.chars().count() > MAX_CHARS { return Err(tr("台本太长，一次最多 5000 字", "The script is too long (5,000 characters at most)").to_owned()); }
                 JOBS.with(|j| j.borrow_mut().insert(clip.clone(), Job::Running));
-                let _ = this.update(cx, |_, cx| cx.notify());
+                LIVE.with(|l| if let Some(x) = l.borrow().get(&clip).filter(|x| x.turn == turn) { x.ticket.advance(tr("正在生成语音", "Generating audio")) });
+                refresh(|_, _| {});
             } else { info.script.clear(); info.spoken.clear(); info.direction.clear(); }
             let spoken = if info.script.is_empty() { info.text.clone() } else { info.spoken.clone() };
             let (tx, rx) = oneshot::channel();
             let (voice, model, lang) = (info.voice_id.clone(), info.model.clone(), info.lang.clone());
-            assistant::llm::runtime().spawn(async move { let _ = tx.send(speak(&key, &voice, &model, &lang, &spoken).await); });
+            let call = assistant::llm::runtime().spawn(async move { let _ = tx.send(speak(&key, &voice, &model, &lang, &spoken).await); });
+            LIVE.with(|l| match l.borrow_mut().get_mut(&clip).filter(|x| x.turn == turn) { Some(x) => x.call = Some(call.abort_handle()), None => call.abort() });
             let (audio, starts, length) = rx.await.unwrap_or_else(|_| Err(tr("请求中断了", "The request was interrupted").into()))?;
+            // 这里到写完没有等待，作废的检查和写文件之间不会插进别的。
+            if !live() { return Ok(()) }
             let path = file(&clip, "mp3").ok_or_else(|| tr("无法保存音频", "Could not save the audio").to_owned())?;
             std::fs::create_dir_all(dir()).and_then(|_| std::fs::write(path, audio)).map_err(|_| tr("无法保存音频", "Could not save the audio").to_owned())?;
             info.starts = starts;
@@ -224,20 +248,46 @@ fn generate(clip: String, mut info: Clip, doc: &Document, cx: &mut Context<Edito
             save_info(&clip, &info);
             Ok::<(), String>(())
         }.await;
-        let _ = this.update(cx, |_, cx| {
-            match result {
-                Ok(()) => { JOBS.with(|j| j.borrow_mut().remove(&clip)); play(clip, cx); }
-                Err(e) => {
-                    log::warn!("Voice over failed: {e}");
-                    // 那一行只写得下「生成失败」：原因（比如还没选文本模型）用提示条说。
-                    let said = e.clone();
-                    menu::dispatch(move |w, _, cx| w.show_toast_kind(ui::ToastKind::Error, &said, cx));
-                    JOBS.with(|j| j.borrow_mut().insert(clip, Job::Failed(e)));
-                }
+        // 作废了（又生成了一次、或后台任务被停掉）：什么都不留。
+        if !live() { return }
+        let Some(done) = LIVE.with(|l| l.borrow_mut().remove(&clip)) else { return };
+        if result.is_err() { done.ticket.fail(); }
+        drop(done);
+        match result {
+            Ok(()) => {
+                JOBS.with(|j| j.borrow_mut().remove(&clip));
+                refresh(move |ed, cx| {
+                    let idle = PLAYING.with(|p| p.borrow().is_none());
+                    if idle && super::background::active() && !ed.core.doc.voiced(&clip).is_empty() { play(clip, cx); }
+                });
             }
-            cx.notify();
-        });
+            Err(e) => {
+                log::warn!("Voice over failed: {e}");
+                // 那一行只写得下「生成失败」：原因（比如还没选文本模型）用提示条说。
+                let said = e.clone();
+                menu::dispatch(move |w, _, cx| w.show_toast_kind(ui::ToastKind::Error, &said, cx));
+                JOBS.with(|j| j.borrow_mut().insert(clip, Job::Failed(e)));
+                refresh(|_, _| {});
+            }
+        }
     }).detach();
+}
+
+/// 这一段正在做的还是第 `turn` 次。
+fn current(clip: &str, turn: u64) -> bool { LIVE.with(|l| l.borrow().get(clip).is_some_and(|x| x.turn == turn)) }
+
+/// 后台任务被停掉了（用户点了停止或系统收回）：这一次作废，那一行写「生成失败」，点了重试。
+fn halted(clip: String, turn: u64) {
+    if !current(&clip, turn) { return }
+    drop(LIVE.with(|l| l.borrow_mut().remove(&clip)));
+    JOBS.with(|j| j.borrow_mut().insert(clip, Job::Failed(tr("后台生成被停止了", "Background generation was stopped").into())));
+    menu::dispatch(|w, _, cx| w.show_toast_kind(ui::ToastKind::Error, tr("后台生成被停止了", "Background generation was stopped"), cx));
+    refresh(|_, _| {});
+}
+
+/// 在当前的编辑器上做（发起生成的那个可能已经换掉了），再重画。
+fn refresh(then: impl FnOnce(&mut Editor, &mut Context<Editor>) + 'static) {
+    menu::dispatch(move |w, _, cx| if let Some(editor) = w.editor.clone() { editor.update(cx, |ed, cx| { then(ed, cx); cx.notify(); }); });
 }
 
 /// 音频、每个字开始的秒数、总长。
@@ -262,6 +312,8 @@ async fn speak(key: &str, voice: &str, model: &str, lang: &str, text: &str) -> R
     let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     if !status.is_success() {
         // `{"detail": {"message": …}}` 或 `{"detail": "…"}`。
+        // 429：同时在念的超过了套餐的上限（几段一起生成、或别处也在用这个 Key）。
+        if status.as_u16() == 429 { return Err(tr("ElevenLabs 同时生成的太多了，稍后点那一行重试", "ElevenLabs is busy with too many requests. Tap the row to retry shortly").into()) }
         let said = ["/detail/message", "/detail"].iter().find_map(|k| v.pointer(k).and_then(Value::as_str)).map(str::to_owned);
         return Err(said.unwrap_or_else(|| match status.as_u16() { 401 => tr("API Key 无效", "The API Key is invalid").into(), code => format!("HTTP {code}") }));
     }
