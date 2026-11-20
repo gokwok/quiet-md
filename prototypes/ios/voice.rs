@@ -211,7 +211,7 @@ fn generate(clip: String, mut info: Clip, doc: &Document, cx: &mut Context<Edito
     let turn = TURN.with(|t| { t.set(t.get() + 1); t.get() });
     // 系统进度条（灵动岛、锁屏）上写的。
     let stage = if scripted { tr("正在写台本", "Writing script") } else { tr("正在生成语音", "Generating audio") };
-    let ticket = super::background::begin(info.role.clone(), stage, if scripted { 2 } else { 1 }, { let clip = clip.clone(); move || halted(clip, turn) });
+    let ticket = super::background::begin(super::background::Kind::Voice, info.role.clone(), stage, if scripted { 2 } else { 1 }, { let clip = clip.clone(); move || halted(clip, turn) });
     // 换下来的旧的那次在这里作废。
     let old = LIVE.with(|l| l.borrow_mut().insert(clip.clone(), Live { turn, ticket, call: None }));
     drop(old);

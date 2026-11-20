@@ -4,7 +4,7 @@ Quiet.md 本体以 MIT 协议发布（见 [LICENSE](LICENSE)）。下面是随�
 
 ## Rust 依赖
 
-由 `cargo metadata` 生成，共 741 个包。许可逐项列于下表，其中也包含 MPL-2.0；本表记录依赖声明，不替代各组件的许可文本。
+由 `cargo metadata` 生成，共 746 个包。许可逐项列于下表，其中也包含 MPL-2.0；本表记录依赖声明，不替代各组件的许可文本。
 
 要重新生成这张表：`scripts/licences.sh`（从 `cargo metadata` 取全部依赖）。
 
@@ -171,6 +171,7 @@ Quiet.md 本体以 MIT 协议发布（见 [LICENSE](LICENSE)）。下面是随�
 | event-listener | 5.4.2 | Apache-2.0 OR MIT |
 | event-listener-strategy | 0.5.4 | Apache-2.0 OR MIT |
 | exr | 1.74.2 | BSD-3-Clause |
+| fancy-regex | 0.20.2 | MIT |
 | fastrand | 1.9.0 | Apache-2.0 OR MIT |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT |
 | fax | 0.2.7 | MIT |
@@ -322,6 +323,7 @@ Quiet.md 本体以 MIT 协议发布（见 [LICENSE](LICENSE)）。下面是随�
 | mime | 0.3.17 | MIT OR Apache-2.0 |
 | mime_guess | 2.0.5 | MIT |
 | minimal-lexical | 0.2.1 | MIT/Apache-2.0 |
+| minisign-verify | 0.3.0 | MIT |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
 | mint | 0.5.9 | MIT |
@@ -642,6 +644,9 @@ Quiet.md 本体以 MIT 协议发布（见 [LICENSE](LICENSE)）。下面是随�
 | wayland-sys | 0.31.11 | MIT |
 | web-sys | 0.3.106 | MIT OR Apache-2.0 |
 | web-time | 1.1.0 | MIT OR Apache-2.0 |
+| webview2-com | 0.38.2 | MIT |
+| webview2-com-macros | 0.8.1 | MIT |
+| webview2-com-sys | 0.38.2 | MIT |
 | weezl | 0.1.12 | MIT OR Apache-2.0 |
 | which | 6.0.3 | MIT |
 | winapi | 0.3.9 | MIT/Apache-2.0 |
@@ -752,10 +757,6 @@ Quiet.md 本体以 MIT 协议发布（见 [LICENSE](LICENSE)）。下面是随�
 | zvariant_derive | 5.15.1 | MIT |
 | zvariant_utils | 4.2.0 | MIT |
 
-## Windows 运行库
-
-Windows 安装包随附未修改的 Microsoft Visual C++ Runtime `vcruntime140.dll`，从 Visual Studio 的 x64 Redistributable 目录复制。它受微软的分发许可约束，不属于本项目的 MIT 许可；参见 [Visual Studio 2022 Redistribution](https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution)。源码仓库不包含该二进制文件。
-
 ## 字体
 
 | 素材 | 许可 |
@@ -766,7 +767,7 @@ Windows 安装包随附未修改的 Microsoft Visual C++ Runtime `vcruntime140.d
 
 | 素材 | 许可 |
 |---|---|
-| `assets/editor-icons/`（编辑器与文档里的 195 个图标） | 其中 49 个直接取自 Lucide（ISC，见同目录 `LICENSE-lucide`），其余按同一 24px / 2px 描边规格绘制 |
+| `assets/editor-icons/`（编辑器与文档里的 174 个图标） | 其中 49 个直接取自 Lucide（ISC，见同目录 `LICENSE-lucide`），其余按同一 24px / 2px 描边规格绘制 |
 | `assets/icons/`（界面外壳的 67 个图标，含一个在 Nucleo 图标上加了 MD 字样的 `doc-md.svg`） | Nucleo UI Outline / Fill 18。本项目持有 Nucleo 商业授权，按授权条款「公开源码项目中最多 100 个图标」使用（<https://nucleoapp.com/license>）。**这些图标不在 MIT 范围内**：fork 时请自行确认授权，或换成自己的图标；不得把它们抽出来做成图标库或图标包。 |
 | `assets/icons/folder.svg`、`assets/icons/disclosure.svg`、`assets/icons/import.svg`、`assets/icons/star-fill.svg`、`assets/icons/chart.svg`、`assets/icons/pulse.svg`、`assets/icons/lock.svg`、`assets/icons/chevron-up-down.svg`，以及文件夹图标 `assets/icons/heart.svg`、`assets/icons/briefcase.svg`、`assets/icons/music.svg`、`assets/icons/plane.svg`、`assets/icons/cart.svg`、`assets/icons/wallet.svg`、`assets/icons/mail.svg`、`assets/icons/chat.svg`、`assets/icons/flag.svg`、`assets/icons/coffee.svg`、`assets/icons/leaf.svg`、`assets/icons/gift.svg`、`assets/icons/moon.svg`、`assets/icons/cloud.svg`、`assets/icons/book-open.svg`、`assets/icons/flask.svg`，键盘上方工具条的 `assets/icons/slash-command.svg`、`assets/icons/more-vertical.svg`、`assets/icons/paste.svg`、`assets/icons/keyboard-down.svg`，分隔线样式板的 `assets/icons/rule-dots.svg`、`assets/icons/rule-dotted.svg`、`assets/icons/rule-page.svg`、`assets/icons/rule-line.svg`、`assets/icons/rule-thick.svg`，文档分隔符换成和纸胶带、涂鸦时那一套的 `assets/icons/washi-1.svg`～`washi-4.svg`、`assets/icons/doodle-1.svg`～`doodle-4.svg` | 本项目绘制，MIT；不属于上述 67 个 Nucleo 图标 |
 | `assets/branding/app-icon.png` | 本项目自有 |

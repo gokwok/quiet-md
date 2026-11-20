@@ -14,14 +14,18 @@ use crate::settings::tr;
 use crate::store::{Backdrop, DividerStyle, DocStyle};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Page { Main, Text, Font, Paper, Background, PhotoLibrary, Divider, Pattern, Gallery, Washi }
+pub enum Page { Main, Text, Font, Paper, Background, PhotoLibrary, Divider, Pattern, Gallery, Washi, Cover }
 
 #[path = "background_gallery.rs"]
 mod background_gallery;
+#[path = "unsplash.rs"]
+mod unsplash;
 
 thread_local! { static PAGE: Cell<Option<Page>> = const { Cell::new(None) }; }
 // 背景页停在哪一段（没有背景时也能停在别的段上挑）。
 thread_local! { static TAB: Cell<Option<usize>> = const { Cell::new(None) }; }
+// 分隔符从和纸胶带换成别的之前用的那卷（图案、颜色），换回和纸胶带时接着用。
+thread_local! { static LAST_TAPE: RefCell<Option<DividerStyle>> = const { RefCell::new(None) }; }
 // 同一轮设置里，切回某种背景时继续用刚才选的值。
 thread_local! {
     static BACKGROUNDS: RefCell<[Option<Backdrop>; 3]> = const { RefCell::new([None, None, None]) };
@@ -37,26 +41,46 @@ pub fn open() {
 }
 pub fn close() { PAGE.with(|p| p.set(None)); }
 
+fn tape_preview(pattern: &str, color: &str) -> Option<Fill> {
+    let path = super::style::tape_image(pattern, color, None)?;
+    Some(if super::style::tape_repeats(pattern) { Fill::Tape(path) } else { Fill::Image(path) })
+}
+
 fn washi_strips(tapes: &[washi::Tape], pattern: &str, cols: usize) -> Node {
     let selected = pattern.strip_prefix("image:");
     let items = tapes.iter().filter_map(|t| Some(Strip {
-        fill: Fill::Image(t.path()?),
+        fill: Fill::Tape(t.path()?),
         title: t.name.into(),
         picked: selected == Some(t.id),
-        act: format!("pat-washi:{}", t.id),
+        act: Some(format!("pat-washi:{}", t.id)),
     })).collect();
     Node::Strips { items, cols }
 }
 
+fn classic_tapes() -> impl Iterator<Item = (&'static str, &'static str, &'static str)> {
+    super::style::GALLERY.iter().map(|t| (t.0, t.1, t.2))
+        .chain(super::style::TAPES.into_iter().zip(super::style::TAPE_NAMES).map(|(id, (zh, en))| (id, zh, en)))
+}
+
 fn classic_washi_strips(pattern: &str) -> Node {
-    let classic = super::style::GALLERY.iter().map(|t| (t.0, t.1, t.2))
-        .chain(super::style::TAPES.into_iter().zip(super::style::TAPE_NAMES).map(|(id, (zh, en))| (id, zh, en)));
-    let items = classic.filter_map(|(id, zh, en)| {
+    let items = classic_tapes().filter_map(|(id, zh, en)| {
         let key = format!("image:{id}");
-        Some(Strip { fill: Fill::Image(super::style::tape_image(&key, "", true)?), title: tr(zh, en).into(),
-            picked: pattern == key, act: format!("pat-washi:{id}") })
+        Some(Strip { fill: tape_preview(&key, "")?, title: tr(zh, en).into(),
+            picked: pattern == key, act: Some(format!("pat-washi:{id}")) })
     }).collect();
     Node::Strips { items, cols: 2 }
+}
+
+fn current_washi_strip(pattern: &str) -> Option<Strip> {
+    let id = pattern.strip_prefix("image:")?;
+    if washi::SUGGESTED.iter().any(|tape| tape.id == id) { return None; }
+    let (title, act) = if id.starts_with("file:") { (tr("上传的胶带", "Uploaded tape"), None) }
+        else {
+            let title = washi::get(id).map(|tape| tape.name)
+                .or_else(|| classic_tapes().find(|tape| tape.0 == id).map(|(_, zh, en)| tr(zh, en)))?;
+            (title, Some(format!("pat-washi:{id}")))
+        };
+    Some(Strip { fill: tape_preview(pattern, "")?, title: title.into(), picked: true, act })
 }
 
 // 色板：Craft 实测（录屏里量的，对上了 Tailwind v4 的色阶）。每组第一颗是「默认」，不在这里。
@@ -68,10 +92,12 @@ const GRADIENT: [(u32, u32); 12] = [
     (0xdbc2bc, 0x7f81a8), (0xcff2d3, 0xf2958e), (0xe1d0eb, 0xf7b4b5), (0x8a91a9, 0xccd3e0), (0xffecac, 0xffcf99), (0x68a8d7, 0xe1f2f8),
 ];
 const FONTS: [(&str, &str, &str, &str); 4] = [("", "默认", "Default", "System"), ("serif", "衬线", "Serif", "Serif"), ("mono", "等宽", "Mono", "Mono"), ("rounded", "圆体", "Rounded", "Rounded")];
+/// 字体圆钮里的字样（照 Craft）。
+const SAMPLES: [&str; 4] = ["Aa", "Ss", "00", "Rr"];
 const DIRS: [(&str, &str); 4] = [("从上到下", "Top to bottom"), ("从左到右", "Left to right"), ("左上到右下", "Diagonal down"), ("左下到右上", "Diagonal up")];
 
-// 胶带的颜色：录屏里那一页是压暗的，照着估的（接近 Tailwind 的 500 一档）。
-const TAPE: [u32; 11] = [0xc050d8, 0x6a8fc8, 0x1d5fd0, 0x00a6c0, 0x2bb5a0, 0x00a86b, 0xc8b010, 0xd0a020, 0xd97706, 0xd64545, 0xd6459a];
+// 胶带色卡：11/19 录屏 58s 的中心像素，从 BT.2020 PQ 转成 sRGB 后取样。
+const TAPE: [u32; 11] = [0xa700b7, 0x183bb6, 0x175cfb, 0x0491b6, 0x059588, 0x05ba7c, 0xefaf01, 0xfd9800, 0xfe6800, 0xe5010b, 0xe40376];
 
 /// 内置的样式（自己配的几套，不是 Craft 的那些）：名字，显示的名字，样式。第一套是什么都不改。
 /// 每一套的字、纸、背景、分隔符是一起配的：纸取背景里最浅的那个调子再提亮，字取最深的那个调子。
@@ -81,8 +107,17 @@ fn presets() -> Vec<(&'static str, &'static str, DocStyle)> {
         background: Some(Backdrop::Image { src: format!("builtin:{image}"), blur: false }), divider, preset: Some(id.to_string()), ..Default::default()
     };
     let tape = |pattern: &str, color: u32| Some(DividerStyle::Tape { pattern: pattern.into(), color: Some(h(color)) });
+    // 照 Craft 的内置样式（IMG_9349、9356）：一张照片作背景，纸色、字色、字体和胶带都从照片里配出来；深色照片配深色的纸。
+    let washi = |id: &str| Some(DividerStyle::Tape { pattern: format!("image:{id}"), color: None });
     vec![
         ("original", tr("原样", "Original"), DocStyle::default()),
+        ("reed-dawn", tr("晨芦", "Reed Dawn"), s("reed-dawn", 0x5a3a22, 0xfbf4ea, "serif", "reed-shore", washi("caramel-picnic"))),
+        ("tea-hour", tr("茶影", "Tea Hour"), s("tea-hour", 0x4a3b2c, 0xf3eadb, "serif", "tea-shadow", Some(DividerStyle::Doodle))),
+        ("basalt", tr("海崖", "Basalt Coast"), s("basalt", 0x23384d, 0xf4f6f8, "", "basalt-coast", washi("ocean-mosaic"))),
+        ("desk", tr("书桌", "Writing Desk"), s("desk", 0x3b2f25, 0xfaf6ee, "mono", "paper-study", washi("the-notebook"))),
+        ("fern-night", tr("雨林", "Fern Night"), s("fern-night", 0xede6cf, 0x1f2e1c, "serif", "fern-rain", washi("olive-cloth"))),
+        ("violet-ridge", tr("暮山", "Violet Ridge"), s("violet-ridge", 0x3e3456, 0xf7f4fa, "rounded", "violet-ridge", washi("lavender-dream"))),
+        ("holiday", tr("冬灯", "Winter Lights"), s("holiday", 0xf4e3c8, 0x3a1416, "serif", "dusk", washi("christmas-glow"))),
         ("sepia", tr("旧纸", "Sepia"), s("sepia", 0x3b2f20, 0xf8f1e3, "serif", "linen", Some(DividerStyle::Doodle))),
         ("blossom", tr("桃花", "Blossom"), s("blossom", 0x6b1d3a, 0xfff6f4, "rounded", "peach", tape("dots", 0xf2a0b5))),
         ("ocean", tr("海", "Ocean"), s("ocean", 0x16305c, 0xf4f8ff, "", "ocean", tape("stripes", 0x2a7fd6))),
@@ -109,6 +144,28 @@ fn saved_path() -> std::path::PathBuf { crate::store::Store::root_dir().join("st
 fn shown() -> Vec<(String, DocStyle)> { let mut all = saved(); all.reverse(); all.truncate(6); all }
 fn saved() -> Vec<(String, DocStyle)> { std::fs::read(saved_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() }
 fn save_all(all: &[(String, DocStyle)]) -> std::io::Result<()> { std::fs::write(saved_path(), serde_json::to_vec_pretty(all).map_err(std::io::Error::other)?) }
+/// 默认样式：新建文档时套上（照 Craft「设置为默认样式」），放在文档库旁的 default-style.json；没有这个文件就是「原样」。
+fn default_path() -> std::path::PathBuf { crate::store::Store::root_dir().join("default-style.json") }
+fn default_style() -> Option<DocStyle> { std::fs::read(default_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()) }
+/// 新建的文档套上默认样式（`Workspace::new_doc` 建好后、列表刷新前调用）。
+pub fn apply_default(w: &mut Workspace, id: &str) {
+    if let Some(style) = default_style().filter(|s| !s.is_plain()) { let _ = w.store.set_style(id, Some(style)); }
+}
+/// 某一套（`p:内置id` 或 `s:自己存的名字`）是不是默认样式。
+fn is_default(key: &str) -> bool {
+    match default_style() { None => key == "p:original", Some(d) => d.preset.as_deref() == Some(&key_preset(key)) }
+}
+fn key_preset(key: &str) -> String { match key.split_once(':') { Some(("s", n)) => format!("saved:{n}"), Some((_, id)) => id.to_string(), None => String::new() } }
+/// 卡片长按和底栏「…」的菜单（照 Craft，IMG_9350/9351）：内置的只有「设置为默认样式」，自己存的还能重命名、删除。
+fn style_menu(key: &str) -> Vec<super::panel::MenuItem> {
+    use super::panel::MenuItem;
+    let mut items = vec![];
+    if let Some(name) = key.strip_prefix("s:") { items.push(MenuItem { title: tr("重命名", "Rename").into(), symbol: "character.cursor.ibeam", act: format!("style-rename:{name}"), danger: false }); }
+    if is_default(key) { if key != "p:original" { items.push(MenuItem { title: tr("取消默认样式", "Remove as Default").into(), symbol: "doc.badge.ellipsis", act: "style-default:p:original".into(), danger: false }); } }
+    else { items.push(MenuItem { title: tr("设置为默认样式", "Set as Default Style").into(), symbol: "doc.text.image", act: format!("style-default:{key}"), danger: false }); }
+    if let Some(name) = key.strip_prefix("s:") { items.push(MenuItem { title: tr("删除", "Delete").into(), symbol: "trash", act: format!("style-delete:{name}"), danger: true }); }
+    items
+}
 
 fn c(v: u32) -> Hsla { rgb(v).into() }
 fn h(v: u32) -> String { format!("#{v:06X}") }
@@ -135,12 +192,12 @@ fn style_card(name: String, style: &DocStyle) -> Card {
     let paper = style.paper.as_deref().and_then(hex).unwrap_or_else(|| crate::themes::base_token("bg_body"));
     let ink = style.text.as_deref().and_then(hex).unwrap_or_else(|| crate::themes::base_token("text"));
     let divider = match &style.divider {
-        Some(DividerStyle::Tape { pattern, color }) => super::style::tape_image(pattern, color.as_deref().unwrap_or(super::style::TAPE), true).map(MiniDivider::Tape),
+        Some(DividerStyle::Tape { pattern, color }) => tape_preview(pattern, color.as_deref().unwrap_or(super::style::TAPE)).map(MiniDivider::Tape),
         Some(DividerStyle::Doodle) => super::style::doodle_image(&to_hex(ink)).map(MiniDivider::Doodle),
         None => None,
     }.unwrap_or(MiniDivider::Line);
     let design = FONTS.iter().find(|f| Some(f.0) == style.font.as_deref()).map_or("", |f| f.0);
-    Card { fill: style.background.as_ref().and_then(backdrop_fill), paper, ink, design, name, faded: style.faded, divider }
+    Card { fill: style.background.as_ref().and_then(backdrop_fill), paper, ink, design, name, faded: style.faded, divider, cover: None, menu: vec![] }
 }
 
 fn background_tab(background: &Option<Backdrop>) -> usize {
@@ -181,8 +238,9 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
     match page {
         Page::Main => {
             let font = FONTS.iter().find(|f| Some(f.0) == style.font.as_deref()).unwrap_or(&FONTS[0]);
-            let cover = w.editor.as_ref().and_then(|e| e.read(cx).core.doc.cover.as_ref().map(|c| c.src.clone()));
-            let current = style_card(style_name(style), style);
+            let cover = w.editor.as_ref().and_then(|e| e.read(cx).core.doc.cover.as_ref().and_then(|c| crate::store::image_path(&c.src))).filter(|p| p.is_file()).map(|p| p.to_string_lossy().into_owned());
+            // 「样式」那一格前面那张是这篇文档本身：带上它的封面（照 Craft）。
+            let current = Card { cover: cover.clone(), ..style_card(style_name(style), style) };
             // 后面露出不同风格的页边，前面永远是当前文档。
             let others = presets().into_iter()
                 .filter(|(id, _, _)| matches!(*id, "ocean" | "blossom" | "lilac") && Some(*id) != style.preset.as_deref())
@@ -193,7 +251,7 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                     Tile { span: 2, title: tr("字体", "Font").into(), art: Art::Font(font.3.into(), font.0), act: "page:font".into() },
                 ],
                 vec![
-                    Tile { span: 1, title: tr("封面", "Cover").into(), art: Art::Cover(cover), act: "cover".into() },
+                    Tile { span: 1, title: tr("封面", "Cover").into(), art: Art::Cover(cover), act: "page:cover".into() },
                     Tile { span: 1, title: tr("背景", "Background").into(), art: Art::Fill(current.fill.clone()), act: "page:background".into() },
                     Tile { span: 1, title: tr("纸", "Paper").into(), art: Art::Paper { paper: current.paper, ink: current.ink }, act: "page:paper".into() },
                 ],
@@ -201,7 +259,7 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                     Tile { span: 2, title: tr("样式", "Style").into(), art: Art::Stack { current, others }, act: "page:gallery".into() },
                     Tile { span: 1, title: tr("分隔符", "Divider").into(), art: match &style.divider {
                         None => Art::Rules(None),
-                        Some(DividerStyle::Tape { pattern, color }) => Art::Rules(super::style::tape_image(pattern, color.as_deref().unwrap_or(super::style::TAPE), true).map(Fill::Image)),
+                        Some(DividerStyle::Tape { pattern, color }) => Art::Rules(tape_preview(pattern, color.as_deref().unwrap_or(super::style::TAPE))),
                         Some(DividerStyle::Doodle) => Art::Symbol("scribble"),
                     }, act: "page:divider".into() },
                 ],
@@ -221,7 +279,8 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
         }
         Page::Font => vec![
             Node::Header { title: tr("字体", "Font").into(), warn: false, reset: style.font.is_some().then(|| "font:0".to_string()), close: back },
-            Node::Segments { symbols: vec![], titles: FONTS.iter().map(|f| tr(f.1, f.2).to_string()).collect(), picked: FONTS.iter().position(|f| Some(f.0) == style.font.as_deref()).unwrap_or(0), act: "font:".into() },
+            // 照 Craft：字样圆钮，选中的拉长成「字样 名字」的胶囊；名字用英文（Craft 中文界面里也是）。
+            Node::Fonts { items: FONTS.iter().zip(SAMPLES).map(|(f, s)| (s.to_string(), f.3.to_string(), f.0)).collect(), picked: Some(FONTS.iter().position(|f| Some(f.0) == style.font.as_deref()).unwrap_or(0)), act: "font:".into() },
         ],
         Page::Divider => {
             let kind = match &style.divider { None => 0, Some(DividerStyle::Tape { .. }) => 1, Some(DividerStyle::Doodle) => 2 };
@@ -231,9 +290,9 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 Node::Segments { symbols: vec!["line.3.horizontal", "bandage", "signature"], titles: vec![tr("线", "Line").into(), tr("和纸胶带", "Washi tape").into(), tr("涂鸦", "Doodle").into()], picked: kind, act: "div-kind:".into() },
             ];
             if let Some(DividerStyle::Tape { pattern, color }) = &style.divider
-                && let Some(tile) = super::style::tape_image(pattern, color.as_deref().unwrap_or(super::style::TAPE), true)
+                && let Some(tile) = tape_preview(pattern, color.as_deref().unwrap_or(super::style::TAPE))
             {
-                v.push(Node::Row { label: tr("图案", "Pattern").into(), trailing: Trailing::Chip(Fill::Image(tile), "page:pattern".into()) });
+                v.push(Node::Row { label: tr("图案", "Pattern").into(), trailing: Trailing::Chip(tile, "page:pattern".into()) });
             }
             v
         }
@@ -246,19 +305,29 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 Node::Segments { symbols: vec!["circle.grid.3x3.fill", "photo"], titles: vec![], picked: tab, act: "pat-tab:".into() },
             ];
             if tab == 0 {
-                v.push(Node::Thumbs { fills: super::style::PATTERNS.iter().filter_map(|p| super::style::tape_image(p, &color, true).map(Fill::Image)).collect(), picked: super::style::PATTERNS.iter().position(|p| *p == pattern), act: "pat:".into() });
+                v.push(Node::Thumbs { fills: super::style::PATTERNS.iter().filter_map(|p| super::style::tape_image(p, &color, None).map(Fill::Image)).collect(), picked: super::style::PATTERNS.iter().position(|p| *p == pattern), act: "pat:".into() });
                 let picked = TAPE.iter().position(|v| same(&color, *v));
                 v.push(Node::Swatches { fills: TAPE.iter().map(|v| Fill::Color(c(*v))).collect(), picked, act: "pat-color:".into(), custom: Some(("custom:tape".into(), picked.is_none(), hex(&color).unwrap_or(c(TAPE[0])))) });
             } else {
-                v.push(Node::Caption(tr("建议", "Suggested").into()));
-                v.push(washi_strips(&washi::SUGGESTED, &pattern, 1));
-                v.push(Node::Wide(vec![("square.and.arrow.up", tr("上传", "Upload").into(), "pat-upload".into()), ("photo.on.rectangle.angled", tr("和纸图库", "Washi gallery").into(), "page:washi".into())]));
+                let mut content = vec![];
+                if let Some(strip) = current_washi_strip(&pattern) {
+                    content.push(Node::Caption(tr("当前胶带", "Current tape").into()));
+                    content.push(Node::Strips { items: vec![strip], cols: 1 });
+                }
+                content.push(Node::Caption(tr("建议", "Suggested").into()));
+                content.push(washi_strips(&washi::SUGGESTED, &pattern, 1));
+                content.push(Node::Wide(vec![("photo.on.rectangle", tr("上传", "Upload").into(), "pat-upload".into()), ("ticket", tr("和纸图库", "Washi gallery").into(), "page:washi".into())]));
+                let (_, safe, viewport) = super::layout();
+                let width = f32::from(viewport.width - px(26.));
+                let max_height = f32::from(viewport.height - safe.top - safe.bottom.max(px(34.))) - super::panel::height(&v, width) - 12.;
+                if super::panel::height(&content, width) > max_height { v.push(Node::Scroll { nodes: content, max_height: f64::from(max_height.max(1.)) }); }
+                else { v.extend(content); }
             }
             v
         }
         Page::Washi => {
             let pattern = match &style.divider { Some(DividerStyle::Tape { pattern, .. }) => pattern.as_str(), _ => "" };
-            let max_height = f64::from(super::layout().2.height) * 0.62;
+            let max_height = f64::from(super::layout().2.height) * 0.67;
             vec![
                 Node::Header { title: tr("和纸胶带", "Washi tape").into(), warn: false, reset: None, close: "page:pattern".into() },
                 Node::Scroll { nodes: vec![
@@ -273,16 +342,21 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
             let mut content = vec![];
             if !mine.is_empty() {
                 content.push(Node::Caption(tr("你的样式", "Your styles").into()));
-                content.push(Node::Cards { items: mine.iter().map(|(n, s)| style_card(n.clone(), s)).collect(), picked: mine.iter().position(|(n, _)| style.preset.as_deref().and_then(|p| p.strip_prefix("saved:")) == Some(n.as_str())), act: "gallery-mine:".into() });
+                content.push(Node::Cards { items: mine.iter().map(|(n, s)| super::panel::Card { menu: style_menu(&format!("s:{n}")), ..style_card(n.clone(), s) }).collect(), picked: mine.iter().position(|(n, _)| style.preset.as_deref().and_then(|p| p.strip_prefix("saved:")) == Some(n.as_str())), act: "gallery-mine:".into() });
             }
             let all = presets();
             content.push(Node::Caption(tr("内置样式", "Built-in styles").into()));
-            content.push(Node::Cards { items: all.iter().map(|(_, n, s)| style_card((*n).into(), s)).collect(), picked: all.iter().position(|(id, _, s)| if s.is_plain() { style.is_plain() } else { style.preset.as_deref() == Some(*id) }), act: "gallery:".into() });
-            let action = if style.preset.as_deref().is_some_and(|p| p.starts_with("saved:")) { Some((tr("删除这个样式", "Delete style").into(), "gallery-delete")) }
-                else { (!style.is_plain()).then(|| (tr("保存", "Save").into(), "gallery-save")) };
+            content.push(Node::Cards { items: all.iter().map(|(id, n, s)| super::panel::Card { menu: style_menu(&format!("p:{id}")), ..style_card((*n).into(), s) }).collect(), picked: all.iter().position(|(id, _, s)| if s.is_plain() { style.is_plain() } else { style.preset.as_deref() == Some(*id) }), act: "gallery:".into() });
+            // 现在用的是哪一套：内置的、自己存的就给「…」菜单，改过还没存的给「保存」。
+            let key = if style.is_plain() { Some("p:original".to_string()) } else { style.preset.as_deref().map(|p| p.strip_prefix("saved:").map_or_else(|| format!("p:{p}"), |n| format!("s:{n}"))) };
+            let menu = key.as_deref().map(style_menu).unwrap_or_default();
+            let action = key.is_none().then(|| (tr("保存", "Save").into(), "gallery-save"));
+            let default_note = key.as_deref().is_some_and(|k| k != "p:original" && is_default(k));
             let mut v = vec![
                 Node::Header { title: tr("样式图库", "Style gallery").into(), warn: false, reset: None, close: back },
-                Node::StyleFooter { title: tr("当前样式", "Current style").into(), card: style_card(style_name(style), style), action },
+                Node::StyleFooter { name: style_name(style), note: if style.preset.as_deref().is_some_and(|p| p.starts_with("saved:")) { tr("由你创建", "Created by you") }
+                    else if style.is_plain() || style.preset.as_deref().is_some_and(|p| presets().iter().any(|(id, ..)| *id == p)) { tr("内置样式", "Built-in style") }
+                    else { tr("还没有保存", "Not saved yet") }.to_string() + if default_note { tr(" · 默认样式", " · Default") } else { "" }, action, menu },
             ];
             let (_, safe, viewport) = super::layout();
             let width = f32::from(viewport.width - px(26.));
@@ -292,6 +366,17 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
             v
         }
         Page::PhotoLibrary => background_gallery::nodes(),
+        Page::Cover => {
+            let has = w.editor.as_ref().is_some_and(|e| e.read(cx).has_cover());
+            let items = COVERS.iter().filter_map(|name| Some(PhotoTile { path: cover_thumb(name)?, title: (*name).into(), credit: None, picked: false, act: format!("cover-preset:{name}") })).collect();
+            vec![
+                Node::Header { title: tr("选择一张图片", "Choose an image").into(), warn: false, reset: has.then(|| "cover-reset".to_string()), close: back },
+                Node::Actions(vec![("arrow.clockwise", tr("随机", "Random").into(), "cover-random".into()),
+                    ("magnifyingglass", "Unsplash".into(), "cover-unsplash".into()),
+                    ("photo.on.rectangle", tr("相册", "Photos").into(), "cover-photos".into())]),
+                Node::Photos { items, library: false },
+            ]
+        }
         Page::Background => {
             let tab = TAB.with(|t| t.get()).unwrap_or_else(|| background_tab(&style.background));
             let mut v = vec![
@@ -325,7 +410,7 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                     let blur = matches!(&style.background, Some(Backdrop::Image { blur: true, .. }));
                     v.push(Node::Photos { items: suggested_backgrounds(&style.background), library: false });
                     v.push(Node::Actions(vec![("arrow.clockwise", tr("随机", "Random").into(), "bg-random".into()),
-                        ("globe", tr("在线图库", "Online library").into(), "bg-library".into()),
+                        if unsplash::available() { ("magnifyingglass", "Unsplash".into(), "bg-library".into()) } else { ("globe", tr("在线图库", "Online library").into(), "bg-library".into()) },
                         ("photo.on.rectangle", tr("相册", "Photos").into(), "bg-photos".into())]));
                     if let Some(credit) = now.and_then(background_gallery::credit) { v.push(Node::Caption(credit)); }
                     v.push(Node::Caption(tr("效果", "Effect").into()));
@@ -357,12 +442,18 @@ pub fn element(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement>
     let width = viewport.width - px(26.);
     let height = px(super::panel::height(&nodes, f32::from(width)));
     let material = match page {
-        Page::Main | Page::Gallery | Page::Background | Page::PhotoLibrary => {
+        // 图库：卡片铺满整页，底下的文档不该再透出来（不然顶上透的是文档、底栏透的是卡片，两头不一样）。
+        Page::Gallery => {
+            let paper = crate::editor_theme::Theme::bg_body();
+            Material { tint: Some(paper.opacity(0.3)), wash: Some(paper.opacity(if crate::theme::dark() { 0.7 } else { 0.78 })) }
+        }
+        Page::Main | Page::Background | Page::PhotoLibrary | Page::Cover => {
             let paper = crate::editor_theme::Theme::bg_body();
             let dark = crate::theme::dark();
-            // 玻璃保留纸后面的颜色，纸色薄层压住穿过面板的高饱和图案。
-            Material { tint: Some(paper.opacity(if dark { 0.30 } else { 0.12 })), wash: Some(paper.opacity(if dark { 0.25 } else { 0.07 })) }
+            // 玻璃保留纸后面的颜色；照 Craft 压一层厚一点的纸色，面板读起来是一块磨砂，不让背景图透得太花。
+            Material { tint: Some(paper.opacity(if dark { 0.30 } else { 0.12 })), wash: Some(paper.opacity(if dark { 0.32 } else { 0.38 })) }
         }
+        Page::Divider | Page::Pattern | Page::Washi => Material { tint: Some(crate::theme::Theme::bg_body().opacity(0.13)), wash: None },
         _ => Material::default(),
     };
     Some(div().id("style-panel").absolute().left(px(13.)).bottom(super::insets().bottom.max(px(34.)) + px(1.)).w(width).h(height).occlude()
@@ -380,7 +471,7 @@ fn update_style(w: &mut Workspace, cx: &mut Context<Workspace>, f: impl FnOnce(&
     let mut style = w.entries[ix].meta.style.clone().unwrap_or_default();
     let before = style.clone();
     f(&mut style);
-    let background_changed = style.background != before.background || style.faded != before.faded;
+    let felt = (DocStyle { preset: before.preset.clone(), ..style.clone() }) != before;
     // 从图库里套来的样式，手动改过一处就不算那一套了。
     if style != before && style.preset == before.preset { style.preset = None; }
     let style = (!style.is_plain()).then_some(style);
@@ -389,9 +480,9 @@ fn update_style(w: &mut Workspace, cx: &mut Context<Workspace>, f: impl FnOnce(&
         return false;
     }
     w.entries[ix].meta.style = style;
-    if background_changed && matches!(PAGE.with(|p| p.get()), Some(Page::Background | Page::PhotoLibrary)) {
-        super::glass::selection_haptic();
-    }
+    // 文档样式的每一处改动都轻轻一震（取色盘拖动中的连续变化不进这里）。
+    // 只是记下「来自哪一套」变了（删掉存的样式时）不算，删除自己有一下更重的。
+    if felt { super::glass::selection_haptic(); }
     if let Some(editor) = w.editor.clone() { editor.update(cx, |_, cx| cx.notify()); }
     cx.notify();
     true
@@ -404,14 +495,42 @@ fn set_photo(src: String, w: &mut Workspace, cx: &mut Context<Workspace>) -> boo
     })
 }
 
+/// 封面页下面那六张自带封面（每个系列挑几张）。
+const COVERS: [&str; 6] = ["landscape-1", "aurora-2", "gradient-3", "geometry-1", "landscape-4", "aurora-5"];
+
+/// 自带封面编在二进制里；缩略图要文件路径，第一次用时写到临时目录。
+fn cover_thumb(name: &str) -> Option<String> {
+    let path = std::env::temp_dir().join("quiet-covers").join(format!("{name}.jpg"));
+    if !path.is_file() {
+        let bytes = crate::editor::cover::preset_bytes(name)?;
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, bytes).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// Unsplash 选中的背景照片：连同出处存进照片目录，再设为背景。
+fn unsplash_background(bytes: &[u8], author: &str, link: &str, w: &mut Workspace, cx: &mut Context<Workspace>) {
+    let credit = background_gallery::Credit { title: String::new(), author: author.into(), license: "Unsplash".into(), license_url: "https://unsplash.com/license".into(), source: link.into() };
+    match background_gallery::store_photo(bytes, &credit) {
+        Ok(src) => { if !set_photo(src, w, cx) { cx.notify(); } }
+        Err(_) => w.show_toast_kind(crate::ui::ToastKind::Error, tr("没能存下这张图片", "Couldn’t save the image"), cx),
+    }
+}
+
 /// 面板里点了什么。动作是「名字:参数」。
 pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let (name, arg) = act.split_once(':').unwrap_or((act, ""));
     let ix: usize = arg.parse().unwrap_or(0);
     match name {
+        // 第一页往下拖走了（`panel.rs` 的下拉收起）。
+        "close" => { close(); cx.notify(); }
         "page" => {
-            let previous = PAGE.with(|p| p.replace(Some(match arg { "text" => Page::Text, "font" => Page::Font, "paper" => Page::Paper, "background" => Page::Background, "divider" => Page::Divider, "pattern" => Page::Pattern, "gallery" => Page::Gallery, "washi" => Page::Washi, _ => Page::Main })));
+            // 进出各个子页（点格子进去、标题栏返回）都轻轻一震。
+            super::glass::haptic();
+            let previous = PAGE.with(|p| p.replace(Some(match arg { "text" => Page::Text, "font" => Page::Font, "paper" => Page::Paper, "background" => Page::Background, "divider" => Page::Divider, "pattern" => Page::Pattern, "gallery" => Page::Gallery, "washi" => Page::Washi, "cover" => Page::Cover, _ => Page::Main })));
             TAB.with(|t| t.set(match (previous, arg) {
+                (Some(Page::Washi), "pattern") => Some(1),
                 (Some(Page::PhotoLibrary), "background") => Some(3),
                 _ => None,
             }));
@@ -449,6 +568,7 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
         "bg-image" => if let Some(name) = arg.strip_prefix("builtin:")
             && (super::style::photo_background(name).is_some() || super::style::BUILTIN.contains(&name)) { set_photo(arg.into(), w, cx); },
         "bg-random" => { shuffle_suggestions(); super::glass::haptic(); cx.notify(); }
+        "bg-library" if unsplash::available() => unsplash::open(unsplash::Target::Background),
         "bg-library" => {
             PAGE.with(|p| p.set(Some(Page::PhotoLibrary)));
             background_gallery::load("", w, window, cx);
@@ -480,15 +600,36 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
                 });
             }).detach();
         }
-        // 封面是文档自己的内容：收起面板，打开编辑器里挑封面的那张。
-        "cover" => { close(); if let Some(editor) = w.editor.clone() { editor.update(cx, |e, cx| e.add_cover(cx)); } cx.notify(); }
+        // 封面页（照 Craft 录屏 00:17）：随机、Unsplash、相册，下面六张自带的封面。
+        "cover-random" => { super::glass::haptic(); if let Some(editor) = w.editor.clone() { editor.update(cx, |e, cx| e.random_cover(cx)); } cx.notify(); }
+        "cover-preset" => if COVERS.contains(&arg) && let Some(editor) = w.editor.clone() { super::glass::selection_haptic(); editor.update(cx, |e, cx| e.apply_preset(arg, cx)); cx.notify(); },
+        "cover-reset" => { super::glass::delete_haptic(); if let Some(editor) = w.editor.clone() { editor.update(cx, |e, cx| { e.set_cover_image(None, cx); }); } cx.notify(); }
+        "cover-unsplash" if unsplash::available() => unsplash::open(unsplash::Target::Cover),
+        "cover-unsplash" => w.show_toast_kind(crate::ui::ToastKind::Error, tr("这个版本没有配置 Unsplash", "Unsplash isn’t set up in this build"), cx),
+        "cover-photos" => {
+            let document = w.current.clone();
+            let rx = super::prompt_for_images(cx, PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(Ok(Some(paths))) = rx.await else { return; };
+                let Some(from) = paths.into_iter().next() else { return; };
+                let ext = from.extension().and_then(|s| s.to_str()).unwrap_or("jpg").to_ascii_lowercase();
+                let Ok(bytes) = std::fs::read(&from) else { return; };
+                let _ = this.update_in(cx, |w, _, cx| {
+                    if w.current != document { return; }
+                    if let Some(editor) = w.editor.clone() { super::glass::selection_haptic(); editor.update(cx, |e, cx| { e.set_cover_image(Some((&bytes, &ext)), cx); }); }
+                    cx.notify();
+                });
+            }).detach();
+        }
+        // 从和纸胶带换走时记下当时的图案和颜色，换回来接着用，不回到默认图案。
         "div-kind" => edit(w, cx, |s| s.divider = match (ix, &s.divider) {
             (1, Some(DividerStyle::Tape { .. })) => s.divider.clone(),
-            (1, _) => Some(DividerStyle::Tape { pattern: super::style::PATTERNS[0].into(), color: None }),
+            (_, tape @ Some(DividerStyle::Tape { .. })) if ix != 1 => { LAST_TAPE.with(|t| *t.borrow_mut() = tape.clone()); if ix == 2 { Some(DividerStyle::Doodle) } else { None } }
+            (1, _) => LAST_TAPE.with(|t| t.borrow().clone()).or(Some(DividerStyle::Tape { pattern: super::style::PATTERNS[0].into(), color: None })),
             (2, _) => Some(DividerStyle::Doodle),
             _ => None,
         }),
-        "pat-tab" => { TAB.with(|t| t.set(Some(ix))); cx.notify(); }
+        "pat-tab" => { if TAB.with(|t| t.replace(Some(ix))) != Some(ix) { super::glass::selection_haptic(); } cx.notify(); }
         "pat-washi" if washi::get(arg).is_some() || super::style::TAPES.contains(&arg) || super::style::GALLERY.iter().any(|g| g.0 == arg) => {
             let pattern = format!("image:{arg}");
             edit(w, cx, |s| { let color = match &s.divider { Some(DividerStyle::Tape { color, .. }) => color.clone(), _ => None }; s.divider = Some(DividerStyle::Tape { pattern, color }); });
@@ -517,21 +658,70 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
         }),
         "gallery" => if let Some((_, _, preset)) = presets().into_iter().nth(ix) { edit(w, cx, |s| *s = preset); },
         "gallery-mine" => if let Some((n, mut style)) = shown().into_iter().nth(ix) { style.preset = Some(format!("saved:{n}")); edit(w, cx, |s| *s = style); },
+        // 照 Craft（IMG_9347）：先弹「保存样式」让人起名；空着就用「自定义样式」，重名时在后面加数字。
         "gallery-save" => {
-            let mut all = saved();
             let base = tr("自定义样式", "Custom style");
-            let n = (1..).map(|i| if i == 1 { base.to_string() } else { format!("{base} {i}") }).find(|n| all.iter().all(|(m, _)| m != n)).unwrap_or_default();
-            let Some(mut style) = super::style::of(w) else { return; };
-            style.preset = None;
-            all.push((n.clone(), style));
+            if !super::assistant::prompt(tr("保存样式", "Save Style"), None, base, "", super::assistant::Field::Text, None, move |value| {
+                let Some(typed) = value else { return; };
+                super::menu::dispatch(move |w, _, cx| {
+                    let mut all = saved();
+                    let base = if typed.is_empty() { base.to_string() } else { typed.clone() };
+                    let n = (1..).map(|i| if i == 1 { base.clone() } else { format!("{base} {i}") }).find(|n| all.iter().all(|(m, _)| m != n)).unwrap_or_default();
+                    let Some(mut style) = super::style::of(w) else { return; };
+                    style.preset = None;
+                    all.push((n.clone(), style));
+                    if let Err(e) = save_all(&all) { return w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx); }
+                    edit(w, cx, |s| s.preset = Some(format!("saved:{n}")));
+                });
+            }) { w.show_toast_kind(crate::ui::ToastKind::Error, tr("没能打开保存对话框", "Couldn’t open the save dialog"), cx); }
+        }
+        "style-default" => {
+            let key = arg;
+            let style = if key == "p:original" { None } else if let Some(n) = key.strip_prefix("s:") {
+                saved().into_iter().find(|(m, _)| m == n).map(|(_, mut s)| { s.preset = Some(format!("saved:{n}")); s })
+            } else { presets().into_iter().find(|(id, ..)| key.strip_prefix("p:") == Some(*id)).map(|(.., s)| s) };
+            let done = match style { None => std::fs::remove_file(default_path()).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
+                Some(s) => serde_json::to_vec_pretty(&s).map_err(std::io::Error::other).and_then(|b| std::fs::write(default_path(), b)) };
+            match done {
+                Err(e) => w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx),
+                Ok(()) => { w.show_toast(if key == "p:original" { tr("新文档不再套用样式", "New documents use no style") } else { tr("新文档会用这套样式", "New documents will use this style") }, cx); cx.notify(); }
+            }
+        }
+        "style-rename" => {
+            let old = arg.to_string();
+            if !super::assistant::prompt(tr("重命名样式", "Rename Style"), None, arg, arg, super::assistant::Field::Text, None, move |value| {
+                let Some(new) = value.filter(|v| !v.is_empty() && *v != old) else { return; };
+                let old = old.clone();
+                super::menu::dispatch(move |w, _, cx| {
+                    let mut all = saved();
+                    if all.iter().any(|(m, _)| *m == new) { return w.show_toast_kind(crate::ui::ToastKind::Error, tr("已经有同名的样式了", "A style with that name already exists"), cx); }
+                    let Some(entry) = all.iter_mut().find(|(m, _)| *m == old) else { return; };
+                    entry.0 = new.clone();
+                    if let Err(e) = save_all(&all) { return w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx); }
+                    if let Some(mut d) = default_style().filter(|d| d.preset.as_deref() == Some(&format!("saved:{old}"))) {
+                        d.preset = Some(format!("saved:{new}"));
+                        if let Ok(b) = serde_json::to_vec_pretty(&d) { let _ = std::fs::write(default_path(), b); }
+                    }
+                    if super::style::of(w).and_then(|s| s.preset).as_deref() == Some(&format!("saved:{old}")) { edit(w, cx, |s| s.preset = Some(format!("saved:{new}"))); }
+                    cx.notify();
+                });
+            }) { w.show_toast_kind(crate::ui::ToastKind::Error, tr("没能打开重命名对话框", "Couldn’t open the rename dialog"), cx); }
+        }
+        "style-delete" => {
+            let n = arg.to_string();
+            let mut all = saved();
+            all.retain(|(m, _)| *m != n);
             if let Err(e) = save_all(&all) { return w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx); }
-            edit(w, cx, |s| s.preset = Some(format!("saved:{n}")));
+            super::glass::delete_haptic();
+            if default_style().is_some_and(|d| d.preset.as_deref() == Some(&format!("saved:{n}"))) { let _ = std::fs::remove_file(default_path()); }
+            if super::style::of(w).and_then(|s| s.preset).as_deref() == Some(&format!("saved:{n}")) { edit(w, cx, |s| s.preset = None); } else { cx.notify(); }
         }
         "gallery-delete" => {
             let Some(n) = super::style::of(w).and_then(|s| s.preset).and_then(|p| p.strip_prefix("saved:").map(str::to_string)) else { return; };
             let mut all = saved();
             all.retain(|(m, _)| *m != n);
             if let Err(e) = save_all(&all) { return w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx); }
+            super::glass::delete_haptic();
             edit(w, cx, |s| s.preset = None);
         }
         "custom" => pick_color(arg, w),

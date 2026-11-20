@@ -42,6 +42,9 @@ pub struct Marks {
     pub bg_color: Option<ColorName>,
     /// 配音：这段文字有一段配好的音频，值是音频的标识（`assets/voice/<标识>.*`）。跨块的一段配音每块都带同一个标识。
     pub voice: Option<String>,
+    /// 模型写的：这段文字由一次生成写出，值是那次生成的标识（附属记录在 `assets/gen/<标识>.json`）。
+    /// 一次生成写出的各块都带同一个标识；自己接着打的字不带。
+    pub generated: Option<String>,
     /// Inline object (equation, button, mention, ...). Each object is one
     /// U+FFFC in the text.
     pub inline: Option<Inline>,
@@ -380,6 +383,7 @@ fn typing_marks(m: &Marks) -> Marks {
         code: false,
         inline: None,
         voice: None,
+        generated: None,
         ..m.clone()
     }
 }
@@ -1100,6 +1104,22 @@ impl Document {
             out.push_str(&b.text.text[r.clone()]);
         });
         out
+    }
+
+    /// 带着这次生成标记的块，按文档顺序。
+    pub fn gen_blocks(&self, id: &str) -> Vec<BlockId> {
+        let mut out = vec![];
+        self.for_each_block(|b| if b.text.spans().any(|(_, m)| m.generated.as_deref() == Some(id)) { out.push(b.id); });
+        out
+    }
+
+    /// 带着这次生成标记的各块的全文（不只是带标记的那几段：块里接着打的字也算），块之间一个换行。
+    /// 生成时存下它的哈希，之后对一下就知道这次生成写的东西有没有被改过。
+    pub fn gen_text(&self, id: &str) -> String {
+        let ids = self.gen_blocks(id);
+        let mut out = vec![];
+        self.for_each_block(|b| if ids.contains(&b.id) { out.push(b.text.text.clone()); });
+        out.join("\n")
     }
 
     /// Visit every block in document order, including table cells.

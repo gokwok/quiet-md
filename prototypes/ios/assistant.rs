@@ -15,6 +15,10 @@ pub mod preview;
 pub mod text;
 #[path = "assistant_llm.rs"]
 pub mod llm;
+#[path = "assistant_writing.rs"]
+pub mod writing;
+#[path = "assistant_sheet.rs"]
+pub mod sheet;
 
 pub const DEFAULT_MODEL: &str = "eleven_v4";
 const MODEL_ACTION: &str = "speech-model-";
@@ -34,14 +38,20 @@ const MODELS: &[(&str, &str, &str, &str, (&str, &str), (&str, &str))] = &[
 
 thread_local! { static KEY_SAVED: Cell<Option<bool>> = const { Cell::new(None) }; }
 
-/// 第二级页面回到哪一页：语音的音色列表、角色设置回语音，选头像回角色设置；模型列表、服务商回文本。
+/// 第二级页面回到哪一页：语音的音色列表、角色设置回语音，选头像回角色设置；模型列表、服务商回文本；写作的几页见 `writing::parent`。
 pub fn parent(page: Page) -> Option<Page> {
+    if let Some(p) = writing::parent(page) { return Some(p); }
     match page { Page::AssistantVoices | Page::AssistantRole => Some(Page::AssistantSpeech), Page::AssistantAvatar => Some(Page::AssistantRole), Page::AssistantModels | Page::AssistantProvider => Some(Page::AssistantText), _ => None }
 }
 
 /// 打开助手设置的某一页时：重新看一眼钥匙串，文本页顺便取模型列表。
 pub fn opened(page: Page, cx: &mut Context<Workspace>) {
-    match page { Page::AssistantSpeech => refresh_key_status(), Page::AssistantText | Page::AssistantModels | Page::AssistantProvider => text::opened(page, cx), _ => {} }
+    match page {
+        Page::AssistantSpeech => refresh_key_status(),
+        Page::AssistantText | Page::AssistantModels | Page::AssistantProvider => text::opened(page, cx),
+        Page::AssistantWriting | Page::AssistantPreset | Page::AssistantEntries | Page::AssistantEntry | Page::AssistantRegexes | Page::AssistantRegex | Page::AssistantCard => writing::opened(page, cx),
+        _ => {}
+    }
 }
 
 pub fn voice(cx: &mut Context<Workspace>) -> AnyElement {
@@ -103,6 +113,7 @@ fn models(current: &str, cx: &mut Context<Workspace>) -> AnyElement {
 
 pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
     if action.starts_with("text-") { return text::menu_action(action, w, cx); }
+    if action.starts_with("tavern-") { return writing::menu_action(action, w, cx); }
     if action.starts_with("speech-role-lang-") { return roles::menu_action(action, w, cx); }
     if !action.starts_with(MODEL_ACTION) { return false; }
     if let Some(&(_, id, ..)) = MODELS.iter().find(|m| m.0 == action) && prefs().speech_model != id {

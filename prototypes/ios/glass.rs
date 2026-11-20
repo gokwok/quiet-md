@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use gpui::*;
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject};
+use objc2::{Encoding, RefEncode};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -17,10 +18,23 @@ pub fn supported() -> bool { AnyClass::get(c"UIGlassEffect").is_some() && std::e
 
 /// 玻璃上的图标：名字（`icons/` 下的，或带目录的完整路径）、边长、颜色。
 pub type Icon = (&'static str, f32, Hsla);
+type Tap = (&'static str, Option<&'static str>);
+
+/// 玻璃上一个会动的图形（代替图标）：`size` 见方，坐标在 0..size 里，非零规则填一种颜色。每帧换一份就是动画。
+#[derive(Clone, PartialEq)]
+pub struct Shape { pub size: f32, pub color: Hsla, pub segs: Vec<Seg> }
+#[derive(Clone, Copy, PartialEq)]
+pub enum Seg { Move(f32, f32), Line(f32, f32), Cubic(f32, f32, f32, f32, f32, f32), Close }
+
+// 调试构建会核对消息的编码：CGPath 要和系统的对上（同 crop.rs）。
+#[repr(C)] struct CGPath { _private: [u8; 0] }
+unsafe impl RefEncode for CGPath { const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGPath", &[])); }
+#[repr(C)] struct CGColor { _private: [u8; 0] }
+unsafe impl RefEncode for CGColor { const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGColor", &[])); }
 
 #[derive(Clone, PartialEq)]
-struct Look { frame: Bounds<Pixels>, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, radius: Option<f32>, bare: bool, stacked: bool, actions: Vec<&'static str>, dark: bool }
-struct Pane { key: &'static str, view: *mut AnyObject, image: *mut AnyObject, text: *mut AnyObject, tabs: Vec<*mut AnyObject>, hits: Vec<*mut AnyObject>, pill: *mut AnyObject, look: Option<Look>, seen: bool, shown: bool }
+struct Look { frame: Bounds<Pixels>, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, radius: Option<f32>, bare: bool, stacked: bool, actions: Vec<Tap>, dark: bool, shape: Option<Shape> }
+struct Pane { key: &'static str, view: *mut AnyObject, image: *mut AnyObject, text: *mut AnyObject, tabs: Vec<*mut AnyObject>, hits: Vec<*mut AnyObject>, pill: *mut AnyObject, shape: *mut AnyObject, look: Option<Look>, seen: bool, shown: bool }
 
 thread_local! { static PANES: RefCell<Vec<Pane>> = const { RefCell::new(Vec::new()) }; }
 
@@ -51,6 +65,8 @@ impl Pane {
         if self.shown == on || !super::shot::show(self.view, on) { return; }
         self.shown = on;
         unsafe {
+            let interactive = on && self.look.as_ref().is_some_and(|look| !look.actions.is_empty());
+            let _: () = msg_send![self.view, setUserInteractionEnabled: interactive];
             // 露面时淡入，和 GPUI 那边换页、收面板的过渡接上；藏起是立刻的，免得压在新盖上来的东西上
             // （返回时离开的那一页的玻璃例外：在原处淡出，见 `shot::show`）。
             if on {
@@ -68,43 +84,49 @@ impl Pane {
 /// 放在 GPUI 元素里的占位：把这个元素的位置交给同名的玻璃。胶囊形，圆角跟着短边走。
 /// 只有图标时图标居中；带文字时图标靠左、文字跟在后面（搜索条）。
 pub fn pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 同 `pane`，但放在会滚动的页面内容里：滚进顶上的返回钮那一条、或出了屏幕底就藏起，免得压在顶栏的玻璃上。
 pub fn page_pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
     canvas(move |bounds, window, _| {
         if bounds.origin.y < px(super::chrome_top()) || bounds.bottom() > window.viewport_size().height { return; }
-        place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark() }, window)
+        place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None }, window)
     }, |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 圆角矩形的一块玻璃：自己拼的弹出菜单的底。首页的菜单已改用系统菜单（`menu.rs`），这两个留给系统菜单放不下的内容。
 #[allow(dead_code)]
 pub fn panel(key: &'static str, radius: f32) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: vec![], picked: None, radius: Some(radius), bare: false, stacked: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: vec![], picked: None, radius: Some(radius), bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 /// 玻璃菜单里的一行：自己没有玻璃，只有图标和字，叠在 `panel` 上面。
 #[allow(dead_code)]
 pub fn row(key: &'static str, icon: Icon, label: (SharedString, Hsla)) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
+}
+
+/// 同 `row`，图标换成会动的图形（助手在想、在写时的标记）。
+pub fn shape_row(key: &'static str, shape: Shape, label: (SharedString, Hsla)) -> impl IntoElement {
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: Some(shape.clone()) }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 块动作栏的一格：原生图标在上、文字在下，点击仍交给下面的 GPUI。`fill` 是垫底的淡色（只有「删除」垫）。
-pub fn tile(key: &'static str, icon: Icon, label: SharedString, fill: Option<Hsla>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: fill, icon: Some(icon), label: Some((label.clone(), icon.2)), tabs: vec![], picked: None, radius: Some(16.), bare: true, stacked: true, actions: vec![], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+pub fn tile(key: &'static str, icon: Icon, label: (SharedString, Hsla), fill: Option<Hsla>) -> impl IntoElement {
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: fill, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(16.), bare: true, stacked: true, actions: vec![], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 自己接触摸的玻璃圆钮：按下时的拉伸和高光由系统给，点了把 `action` 交给 `ios::menu_action`。
 /// 这块地方的点击不再经过 GPUI。
-pub fn tap_pane(key: &'static str, icon: Icon, action: &'static str) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: None, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![action], dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+pub fn tap_pane(key: &'static str, icon: Icon, action: &'static str, label: &'static str) -> impl IntoElement {
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: None, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![(action, Some(label))], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 标签栏：一条玻璃上等分排开几个图标，`picked` 是当前那一格和垫在它下面的底色；`actions` 是各格点了交出去的标识
 /// （给了就由玻璃自己接触摸，同 `tap_pane`）。
 pub fn tab_pane(key: &'static str, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, actions: Vec<&'static str>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, stacked: false, actions: actions.clone(), dark: crate::theme::dark() }, window), |_, _, _, _| {}).absolute().inset_0()
+    let actions: Vec<_> = actions.into_iter().map(|id| (id, None)).collect();
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, stacked: false, actions: actions.clone(), dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 按下时玻璃轻轻缩一下再弹回：GPUI 画不到玻璃上面，按压的反馈只能由原生视图给。
@@ -135,6 +157,25 @@ pub fn haptic() {
     }
 }
 
+/// 删除：比平常的轻触厚、长一点。一下重的，紧接着一下稍轻的余震（约 70ms 后），合起来像一记「咚」。
+pub(super) fn delete_haptic() {
+    if !crate::settings::prefs().haptics { return; }
+    let Some(class) = AnyClass::get(c"UIImpactFeedbackGenerator") else { return; };
+    unsafe {
+        // 2 = UIImpactFeedbackStyleHeavy
+        let first: *mut AnyObject = msg_send![class, alloc];
+        let first: *mut AnyObject = msg_send![first, initWithStyle: 2isize];
+        let _: () = msg_send![first, impactOccurredWithIntensity: 1f64];
+        let _: () = msg_send![first, release];
+        // 余震：performSelector 在主线程排一下，过一会儿再震（它会持有生成器直到震完）。
+        let echo: *mut AnyObject = msg_send![class, alloc];
+        let echo: *mut AnyObject = msg_send![echo, initWithStyle: 2isize];
+        let _: () = msg_send![echo, prepare];
+        let _: () = msg_send![echo, performSelector: objc2::sel!(impactOccurred), withObject: std::ptr::null_mut::<AnyObject>(), afterDelay: 0.07f64];
+        let _: () = msg_send![echo, release];
+    }
+}
+
 /// 切到另一个选项时的轻触感。
 pub(super) fn selection_haptic() {
     if !crate::settings::prefs().haptics { return; }
@@ -146,7 +187,7 @@ pub(super) fn selection_haptic() {
     }
 }
 
-unsafe fn ns_string(s: &str) -> *mut AnyObject {
+pub(crate) unsafe fn ns_string(s: &str) -> *mut AnyObject {
     let c = std::ffi::CString::new(s).unwrap_or_default();
     unsafe { msg_send![AnyClass::get(c"NSString").unwrap(), stringWithUTF8String: c.as_ptr()] }
 }
@@ -185,7 +226,7 @@ fn place(key: &'static str, look: Look, window: &Window) {
                 // 先藏着，位置定好再露面。
                 let _: () = msg_send![view, setHidden: true];
                 let _: () = msg_send![parent, addSubview: view];
-                panes.push(Pane { key, view, image, text, tabs: vec![], hits: vec![], pill, look: None, seen: false, shown: false });
+                panes.push(Pane { key, view, image, text, tabs: vec![], hits: vec![], pill, shape: std::ptr::null_mut(), look: None, seen: false, shown: false });
                 panes.len() - 1
             }
         };
@@ -214,7 +255,7 @@ fn place(key: &'static str, look: Look, window: &Window) {
                 let layer: *mut AnyObject = msg_send![pane.view, layer];
                 let _: () = msg_send![layer, setCornerRadius: 16f64];
             }
-        } else if old.as_ref().map(|o| o.tint) != Some(look.tint) {
+        } else if old.as_ref().map(|o| (o.tint, o.actions.is_empty())) != Some((look.tint, look.actions.is_empty())) {
             let effect: *mut AnyObject = msg_send![AnyClass::get(c"UIGlassEffect").unwrap(), effectWithStyle: 0isize];
             let _: () = msg_send![effect, setInteractive: !look.actions.is_empty()];
             if let Some(tint) = look.tint { let _: () = msg_send![effect, setTintColor: ui_color(tint)]; }
@@ -233,6 +274,37 @@ fn place(key: &'static str, look: Look, window: &Window) {
             left += s + 8.;
         }
         let _: () = msg_send![pane.image, setHidden: look.icon.is_none()];
+        if let Some(shape) = &look.shape {
+            let content: *mut AnyObject = msg_send![pane.view, contentView];
+            if pane.shape.is_null() {
+                pane.shape = msg_send![AnyClass::get(c"CAShapeLayer").unwrap(), layer];
+                let host: *mut AnyObject = msg_send![content, layer];
+                let _: () = msg_send![host, addSublayer: pane.shape];
+            }
+            let s = f64::from(shape.size);
+            let path: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPath];
+            let pt = |x: f32, y: f32| CGPoint::new(f64::from(x), f64::from(y));
+            for seg in &shape.segs {
+                match *seg {
+                    Seg::Move(x, y) => { let _: () = msg_send![path, moveToPoint: pt(x, y)]; }
+                    Seg::Line(x, y) => { let _: () = msg_send![path, addLineToPoint: pt(x, y)]; }
+                    Seg::Cubic(ax, ay, bx, by, x, y) => { let _: () = msg_send![path, addCurveToPoint: pt(x, y), controlPoint1: pt(ax, ay), controlPoint2: pt(bx, by)]; }
+                    Seg::Close => { let _: () = msg_send![path, closePath]; }
+                }
+            }
+            let cg: *mut CGPath = msg_send![path, CGPath];
+            let fill: *const CGColor = msg_send![ui_color(shape.color), CGColor];
+            // 每帧换形状：关掉图层自带的隐式动画，不然每一帧都慢半拍地追。
+            let ca = AnyClass::get(c"CATransaction").unwrap();
+            let _: () = msg_send![ca, begin];
+            let _: () = msg_send![ca, setDisableActions: true];
+            let _: () = msg_send![pane.shape, setFrame: CGRect::new(CGPoint::new(left, (h - s) / 2.), CGSize::new(s, s))];
+            let _: () = msg_send![pane.shape, setPath: cg];
+            let _: () = msg_send![pane.shape, setFillColor: fill];
+            let _: () = msg_send![ca, commit];
+            left += s + 8.;
+        }
+        if !pane.shape.is_null() { let _: () = msg_send![pane.shape, setHidden: look.shape.is_none()]; }
         if let Some((label, color)) = &look.label {
             let font: *mut AnyObject = msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: if look.stacked { 11f64 } else { 16f64 }];
             let _: () = msg_send![pane.text, setFont: font];
@@ -271,16 +343,22 @@ fn place(key: &'static str, look: Look, window: &Window) {
         }
         let _: () = msg_send![pane.pill, setHidden: look.picked.is_none()];
         // 自己接触摸的：每个动作一个透明的原生按钮，等分排开，压在图标上面。
-        if old.is_none() { let _: () = msg_send![pane.view, setUserInteractionEnabled: !look.actions.is_empty()]; }
-        while pane.hits.len() < look.actions.len() {
-            let id = look.actions[pane.hits.len()];
-            let hit: *mut AnyObject = msg_send![AnyClass::get(c"UIButton").unwrap(), buttonWithType: 0isize];
-            let handler = block2::RcBlock::new(move |_action: *mut AnyObject| super::menu::chosen(id));
-            let action: *mut AnyObject = msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(""), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler];
-            // 64 = UIControlEventTouchUpInside
-            let _: () = msg_send![hit, addAction: action, forControlEvents: 64usize];
-            let _: () = msg_send![content, addSubview: hit];
-            pane.hits.push(hit);
+        if old.as_ref().map(|o| &o.actions) != Some(&look.actions) {
+            let _: () = msg_send![pane.view, setUserInteractionEnabled: pane.shown && !look.actions.is_empty()];
+            for hit in pane.hits.drain(..) { let _: () = msg_send![hit, removeFromSuperview]; }
+            for &(id, label) in &look.actions {
+                let hit: *mut AnyObject = msg_send![AnyClass::get(c"UIButton").unwrap(), buttonWithType: 0isize];
+                if let Some(label) = label {
+                    let _: () = msg_send![hit, setAccessibilityIdentifier: ns_string(id)];
+                    let _: () = msg_send![hit, setAccessibilityLabel: ns_string(label)];
+                }
+                let handler = block2::RcBlock::new(move |_action: *mut AnyObject| super::menu::chosen(id));
+                let action: *mut AnyObject = msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(""), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler];
+                // 64 = UIControlEventTouchUpInside
+                let _: () = msg_send![hit, addAction: action, forControlEvents: 64usize];
+                let _: () = msg_send![content, addSubview: hit];
+                pane.hits.push(hit);
+            }
         }
         let span = if pane.hits.is_empty() { 0. } else { w / pane.hits.len() as f64 };
         for (i, hit) in pane.hits.iter().enumerate() {

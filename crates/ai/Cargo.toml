@@ -1,0 +1,17 @@
+# Quiet.md 的 AI 部分：提示词拼装、模型输出成形。不依赖 GPUI，可以单独构建和测试。
+[package]
+name = "fdl_ai"
+version = "0.1.0"
+edition = "2024"
+description = "Prompt assembly and output shaping behind Quiet.md's AI cores"
+license = "MIT"
+publish = false
+authors = ["s1dashu"]
+
+[dependencies]
+fdl_core = { path = "../core" }
+fancy-regex = "0.20"
+serde_json = "1.0.154"
+
+[lints]
+workspace = true

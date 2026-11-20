@@ -9,6 +9,7 @@ pub mod about;
 pub mod alert;
 pub mod appicon;
 pub mod assistant;
+pub mod assist;
 pub mod card;
 pub mod editmenu;
 pub mod editor_surface;
@@ -243,6 +244,26 @@ impl Element for Follow {
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) { self.child.paint(window, cx); }
 }
 
+/// 整块落在裁剪区外就不画（卡片缩略图里卡片底边以下的块）。gpui-pre 0.3.12 把裁剪区按设备像素往外取整
+/// （`Window::cover_bounds`）：自带裁剪的子元素（图片、代码行）整个在外面时，交出来的是一条零高的裁剪区，
+/// 取整后变成一像素高，那一行像素会漏出来；滚动到小数位置时时有时无（主页文件夹第一行上面那条线）。
+pub struct Cull { child: AnyElement }
+pub fn cull(child: impl IntoElement) -> Cull { Cull { child: child.into_any_element() } }
+impl IntoElement for Cull { type Element = Self; fn into_element(self) -> Self { self } }
+impl Element for Cull {
+    type RequestLayoutState = ();
+    type PrepaintState = bool;
+    fn id(&self) -> Option<ElementId> { None }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) { (self.child.request_layout(window, cx), ()) }
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App) -> bool {
+        let shown = window.content_mask().bounds.intersects(&bounds);
+        if shown { self.child.prepaint(window, cx); }
+        shown
+    }
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), shown: &mut bool, window: &mut Window, cx: &mut App) { if *shown { self.child.paint(window, cx); } }
+}
+
 thread_local! { static SETTINGS_DETAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// 手机上设置是两级：先是一页分类的列表，点进去才是那一类的设置。这里记着现在在不在第二级。
 pub fn settings_detail() -> bool { SETTINGS_DETAIL.with(|d| d.get()) }
@@ -314,6 +335,10 @@ pub fn glass_button(id: &'static str, icon: &'static str, size: f32) -> Stateful
     div().id(id).flex_none().size(px(44.)).rounded_full().occlude()
         .child(glass::pane(id, None, Some((icon, size, Theme::text())), None))
         .on_mouse_down(MouseButton::Left, move |_, _, _| glass::pulse(id))
+}
+
+pub fn catalogue_button() -> impl IntoElement {
+    div().flex_none().size(px(44.)).child(glass::tap_pane("doc-catalogue", ("editor-icons/catalogue-list", 18., Theme::text()), "doc-catalogue", crate::settings::tr("目录", "Outline")))
 }
 
 /// 文档页悬浮的那排按钮占的高度（状态栏 + 一行按钮）：正文的开头让到它下面，滚动时从它底下穿过。
@@ -766,6 +791,9 @@ pub fn blocks_removed(n: usize, cut: bool) {
 /// 系统菜单里的一项被点了（`menu.rs` 把它送回工作区）。
 pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     match id {
+        "doc-catalogue" if w.view == View::Doc => {
+            if let Some(editor) = &w.editor { editor.update(cx, |e, cx| e.toggle_catalogue(cx)); }
+        }
         "hub-new-folder" => w.new_folder(None, window, cx),
         "hub-fold" => { FOLDERS_FOLDED.with(|f| f.set(!f.get())); cx.notify(); }
         "hub-customise" => customise::open(),
@@ -816,6 +844,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         _ if search::set_mode(id) => { cx.notify(); }
         _ if keybar::menu_action(id, w, window, cx) => {}
         _ if voice::menu_action(id, w, window, cx) => {}
+        _ if assist::menu_action(id, w, window, cx) => {}
         // 设置子页的选项行（`general::choice`）。
         "pref-lang-zh" | "pref-lang-en" => { let en = id == "pref-lang-en"; if crate::settings::prefs().english != en { w.set_pref(|p| p.english = en, cx); } }
         _ if assistant::menu_action(id, w, cx) => {}
@@ -833,7 +862,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
             *no_ask = true;
             w.confirm_ok(window, cx);
         }
-        "confirm-ok" => w.confirm_ok(window, cx),
+        "confirm-ok" => confirm_ok(w, window, cx),
         "confirm-cancel" => { w.confirm = None; w.after_save = None; cx.notify(); }
         "fab-new-folder" => { let parent = if w.view == View::Folder { w.folder_current.clone() } else { None }; w.new_folder(parent, window, cx); }
         // 文档页底部的铅笔：在文末新起一行开始写。
@@ -857,7 +886,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 "doc-outline" => if let Some(ed) = w.editor.clone() { ed.update(cx,|e,cx| { e.cat_pinned = false; e.toggle_catalogue(cx); }); },
                 "doc-find" => w.find_in_doc(false, window, cx),
                 "doc-text-size" => { style::set_sizing(true); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
-                "doc-style" => { format::close(); stylepanel::open(); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
+                "doc-style" => { glass::haptic(); format::close(); stylepanel::open(); if let Some(editor) = w.editor.clone() { let focus = w.focus.clone(); if editor.read(cx).focus.is_focused(window) { window.focus(&focus, cx); } } cx.notify(); }
                 "doc-move" => w.open_move(vec![cur], window, cx),
                 "doc-pin" => w.toggle_pin(&cur, cx),
                 "doc-star" => w.toggle_star(&cur, cx),
@@ -923,7 +952,14 @@ pub fn alert(title: String, body: String, action: &'static str, danger: bool, cx
         .when(!body.is_empty(), |d| d.child(div().px(px(12.)).mt(px(4.)).text_size(px(13.)).line_height(px(19.)).text_color(Theme::text_caption()).child(body)))
         .child(div().mt(px(16.)).flex().gap(px(8.))
             .child(button("confirm-cancel", crate::settings::text("取消"), Theme::text()).on_click(cx.listener(|w, _, _, cx| { w.confirm = None; w.after_save = None; cx.notify(); })))
-            .child(button("confirm-ok", action, if danger { Theme::danger() } else { Theme::primary() }).on_click(cx.listener(|w, _, window, cx| w.confirm_ok(window, cx)))))
+            .child(button("confirm-ok", action, if danger { Theme::danger() } else { Theme::primary() }).on_click(cx.listener(|w, _, window, cx| confirm_ok(w, window, cx)))))
+}
+
+/// 确认框点了确定：删除文档（进最近删除、彻底删除、清空）先来一下厚一点的删除触感（同样式面板里的删除）。
+fn confirm_ok(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    use crate::app::Confirm;
+    if matches!(w.confirm, Some(Confirm::Delete { .. } | Confirm::Purge(_) | Confirm::PurgeMany(_) | Confirm::EmptyTrash)) { glass::delete_haptic(); }
+    w.confirm_ok(window, cx);
 }
 
 thread_local! { static NEW_FOLDER: std::cell::RefCell<Option<Option<String>>> = const { std::cell::RefCell::new(None) }; }
@@ -1033,7 +1069,7 @@ pub fn new_button(view: View, cx: &mut Context<Workspace>) -> impl IntoElement {
                 menu::Item::new("fab-new-doc", crate::settings::tr("新建文档", "New document"), "doc.badge.plus", 0),
                 menu::Item::new("fab-new-folder", crate::settings::tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
             ])) }
-            else if floating() { d.bottom(dock_inset()).size(px(48.)).child(glass::tap_pane("fab", ("plus", 24., Theme::text()), "new-doc")) }
+            else if floating() { d.bottom(dock_inset()).size(px(48.)).child(glass::tap_pane("fab", ("plus", 24., Theme::text()), "new-doc", crate::settings::text("新建文档"))) }
             else { d.bottom(px(16.)).size(px(56.)).bg(Theme::primary()).shadow(crate::theme::shadow_dialog()).active(|s| s.bg(crate::theme::c(crate::theme::craft::B700))).child(crate::ui::icon("plus", 26., gpui::white())) })
         .occlude().on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx)))
 }

@@ -80,8 +80,8 @@ impl Surface {
     pub fn header(&mut self, title: &str, close: Value, source: bool) {
         self.rows.push(json!({"header":title,"items":[close],"source":source,"h":56})); self.height += 56.;
     }
-    pub fn document_title(&mut self, title: &str, space: &str, close: Value) {
-        self.rows.push(json!({"header":title,"space":space,"items":[close],"h":74})); self.height += 74.;
+    pub fn document_title(&mut self, title: &str, space: &str, close: Value, thumb: Value) {
+        self.rows.push(json!({"header":title,"space":space,"items":[close],"thumb":thumb,"h":74})); self.height += 74.;
     }
     pub fn styled(&mut self, style: &str, items: Vec<Value>, height: f32) {
         self.rows.push(json!({"style":style,"items":items,"h":height})); self.height += height;
@@ -100,6 +100,12 @@ impl Surface {
         self.rows.push(json!({"field":title,"value":value,"multi":true,"tokens":tokens,"input":input,"focus":true,"stretch":true}));
     }
     pub fn list(&mut self) { self.rows.push(json!({"list":true,"h":0})); }
+    /// 自定义行（查找结果卡片、分组标题、空状态、附件缩略图），`h` 写在行里。
+    pub fn push(&mut self, row: Value) { self.height += row["h"].as_f64().unwrap_or(44.) as f32; self.rows.push(row); }
+    /// 列表开始后还没有任何行。
+    pub fn is_empty_list(&self) -> bool { self.rows.last().is_some_and(|r| r["list"] == true) }
+    /// 给最后一行补一个属性（如查找框的放大镜）。
+    pub fn mark(&mut self, key: &str, value: Value) { if let Some(row) = self.rows.last_mut() { row[key] = value; } }
     pub fn page(mut self, key: &'static str, window: &Window, cx: &Context<Editor>, preview: Option<String>) -> AnyElement {
         // 轻点页外沿用同一关闭动作，回到阅读态；滑动不触发关闭。
         if let Some(close) = self.rows[0]["items"][0]["action"].as_u64().and_then(|i| self.handlers.get(i as usize)).cloned() {
@@ -110,7 +116,9 @@ impl Surface {
         let w = window.viewport_size().width;
         let h = (window.viewport_size().height - top - window.insets().ime.bottom).max(px(100.));
         self.height = h.into();
-        let body = div().relative().w(w).h(h).rounded_t(px(24.)).overflow_hidden().bg(crate::theme::Theme::bg_body())
+        // 文档面板由原生视图自己升起、收起，底下不垫 GPUI 底色，免得动画时露出一张静止的纸。
+        let sheet = matches!(key, "find" | "catalogue");
+        let body = div().relative().w(w).h(h).rounded_t(px(24.)).overflow_hidden().when(!sheet, |d| d.bg(crate::theme::Theme::bg_body()))
             .when_some(preview, |d, src| d.child(canvas(move |_,window,_| crate::editor::math::layout(&src,true,20.,crate::theme::Theme::text(),0,window),
                 |b,math,window,cx| if let Some(m) = math { m.paint(point(b.center().x-px(m.width/2.),b.center().y+px((m.ascent-m.depth)/2.)),window,cx); })
                 .absolute().top(px(62.)).w_full().h(px(118.))))

@@ -77,40 +77,50 @@ final class EditorSmoke: XCTestCase {
     @MainActor
     func testSelectionOpensLinkPanel() throws {
         guard #available(iOS 26, *) else { throw XCTSkip("Requires Liquid Glass") }
+        continueAfterFailure = false
         let app = XCUIApplication()
         app.launchEnvironment["QUIET_MD_HOME"] = "Quiet.md-glass-check-\(UUID().uuidString)"
         app.launchEnvironment["QUIET_MD_IOS_SAMPLE"] = "1"
+        app.launchEnvironment["QUIET_MD_IOS_VERIFY_BACKGROUND"] = "1"
         app.launch()
         let word = app.coordinate(withNormalizedOffset: .zero).withOffset(CGVector(dx: 187, dy: 248))
+        let keyboard = app.keyboards.firstMatch
         word.tap()
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(keyboard.waitForExistence(timeout: 5))
         word.doubleTap()
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = "Selection toolbar"; shot.lifetime = .keepAlways; add(shot)
-        // GPUI 工具栏的链接按钮，位于键盘上沿上方。
+        // GPUI 选区工具栏的第六个按钮。iPhone 18 Pro 的键盘 AX frame 不包含上方的候选条。
         let origin = app.coordinate(withNormalizedOffset: .zero)
         origin.withOffset(CGVector(dx: 276, dy: 516)).tap()
-        let field = app.textFields.firstMatch
+        let field = app.textFields.matching(NSPredicate(format: "label IN %@", ["链接", "Link"])).firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()
         field.typeText("https://example.org/quiet")
         let confirm = app.buttons["quiet.link.checkmark"]
-        XCTAssertTrue(confirm.isEnabled)
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: confirm)
+        wait(for: [enabled], timeout: 5)
         confirm.tap()
         XCTAssertTrue(field.waitForNonExistence(timeout: 5))
         XCUIDevice.shared.press(.home)
-        XCTAssertTrue(app.wait(for: .runningBackground, timeout: 5) || app.state == .runningBackgroundSuspended)
+        let backgrounded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let state = app.state
+            return state == .runningBackground || state == .runningBackgroundSuspended
+        }, object: nil)
+        wait(for: [backgrounded], timeout: 10)
     }
 
     @MainActor
     func testDocumentPanelSearch() throws {
         guard #available(iOS 26, *) else { throw XCTSkip("Requires native sheets") }
+        continueAfterFailure = false
         let app = XCUIApplication()
         app.launchEnvironment["QUIET_MD_HOME"] = "Quiet.md-find-check-\(UUID().uuidString)"
         app.launchEnvironment["QUIET_MD_IOS_SAMPLE"] = "1"
         app.launch()
-        let origin = app.coordinate(withNormalizedOffset:.zero)
-        origin.withOffset(CGVector(dx:310,dy:88)).tap()
+        let catalogue = app.buttons["doc-catalogue"]
+        XCTAssertTrue(catalogue.waitForExistence(timeout: 10))
+        catalogue.tap()
         let tabs = app.segmentedControls.firstMatch
         XCTAssertTrue(tabs.waitForExistence(timeout:5))
         func capture(_ name:String) {
@@ -119,15 +129,20 @@ final class EditorSmoke: XCTestCase {
         }
         capture("Document outline")
         tabs.buttons.element(boundBy:3).tap()
-        let field = app.textFields.firstMatch
+        let field = app.textFields.matching(NSPredicate(format: "label IN %@", ["在文档内查找", "Find in document"])).firstMatch
         XCTAssertTrue(field.waitForExistence(timeout:5))
         field.tap(); field.typeText("Quiet")
+        let result = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "双击选择 Quiet")).firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 5))
         app.buttons["quiet.find.chevron.down"].tap()
         app.buttons.matching(NSPredicate(format:"label IN %@",["查找和替换","Find and replace","Find and Replace"])).firstMatch.tap()
-        let replacement = app.textFields.element(boundBy:1)
+        let replacement = app.textFields.matching(NSPredicate(format: "label IN %@", ["替换为", "Replace with"])).firstMatch
+        XCTAssertTrue(replacement.waitForExistence(timeout: 5))
         replacement.tap(); replacement.typeText("Notes")
         capture("Find and replace")
         app.buttons["quiet.find.slider.horizontal.3"].tap()
+        let regex = app.buttons.matching(NSPredicate(format: "label IN %@", ["正则表达式", "Regular expression"])).firstMatch
+        XCTAssertTrue(regex.waitForExistence(timeout: 5))
         capture("Find options")
     }
 

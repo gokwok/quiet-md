@@ -1,4 +1,4 @@
-//! 切到后台也接着做完的活（现在只有生成配音）：用户点了才开始、主要在等网络。
+//! 切到后台也接着做完的活（生成配音、助手写作）：用户点了才开始、主要在等网络。
 //!
 //! 有活时一直拿着一个 UIKit 后台任务（`beginBackgroundTask`，切走后大约还有 30 秒，各版本都有）。iOS 26 起再叠一个
 //! `BGContinuedProcessingTask`：系统在灵动岛、锁屏上显示进度，用户可以停掉，不受 30 秒限制。几件活合用一个任务，
@@ -28,7 +28,8 @@ const STEP: i64 = 100;
 
 struct Work {
     id: u64,
-    /// 角色名：只有一段时写进标题。
+    kind: Kind,
+    /// 角色名：只有一件活时写进标题。
     label: String,
     stage: &'static str,
     steps: u32,
@@ -37,6 +38,14 @@ struct Work {
     ended: bool,
     failed: bool,
     halt: Option<Box<dyn FnOnce()>>,
+}
+
+/// 哪类活：决定灵动岛、锁屏上的标题。
+#[derive(Clone, Copy, PartialEq)]
+pub enum Kind { Voice, Assistant }
+
+impl Kind {
+    fn title(self) -> &'static str { match self { Kind::Voice => tr("配音", "Voice Over"), Kind::Assistant => tr("助手", "Assistant") } }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -62,9 +71,9 @@ thread_local! {
 pub struct Ticket(u64);
 
 /// 开始一件活：`steps` 步，现在在做 `stage`。系统停掉后台任务时调 `halt`（主线程上）。
-pub fn begin(label: String, stage: &'static str, steps: u32, halt: impl FnOnce() + 'static) -> Ticket {
+pub fn begin(kind: Kind, label: String, stage: &'static str, steps: u32, halt: impl FnOnce() + 'static) -> Ticket {
     let id = NEXT.with(|n| { n.set(n.get() + 1); n.get() });
-    WORK.with(|w| w.borrow_mut().push(Work { id, label, stage, steps: steps.max(1), done: 0, since: Instant::now(), ended: false, failed: false, halt: Some(Box::new(halt)) }));
+    WORK.with(|w| w.borrow_mut().push(Work { id, kind, label, stage, steps: steps.max(1), done: 0, since: Instant::now(), ended: false, failed: false, halt: Some(Box::new(halt)) }));
     sync();
     Ticket(id)
 }
@@ -121,7 +130,7 @@ fn begin_uikit() -> usize {
     });
     unsafe {
         let app: *mut AnyObject = msg_send![class!(UIApplication), sharedApplication];
-        msg_send![app, beginBackgroundTaskWithName: ns(c"Voice over"), expirationHandler: &*expired]
+        msg_send![app, beginBackgroundTaskWithName: ns(c"Quiet.md work"), expirationHandler: &*expired]
     }
 }
 
@@ -247,11 +256,12 @@ fn texts() -> (String, String) {
         let w = w.borrow();
         let open: Vec<_> = w.iter().filter(|x| !x.ended).collect();
         match (w.len(), open.as_slice()) {
-            (1, [one]) if one.label.is_empty() => (tr("配音", "Voice Over").into(), one.stage.into()),
-            (1, [one]) => (crate::localized_format!("配音 · {}", "Voice Over · {}", one.label), one.stage.into()),
-            (n, _) if n > 1 => (crate::localized_format!("配音 · {} 段", "Voice Over · {} clips", n),
+            (1, [one]) if one.label.is_empty() => (one.kind.title().into(), one.stage.into()),
+            (1, [one]) => (format!("{} · {}", one.kind.title(), one.label), one.stage.into()),
+            (n, _) if n > 1 => (if w.iter().all(|x| x.kind == Kind::Voice) { crate::localized_format!("配音 · {} 段", "Voice Over · {} clips", n) }
+                    else { crate::localized_format!("后台 · {} 件", "{} background tasks", n) },
                 crate::localized_format!("已完成 {} / {}", "{} of {} done", n - open.len(), n)),
-            _ => (tr("配音", "Voice Over").into(), String::new()),
+            _ => (w.first().map_or(Kind::Voice, |x| x.kind).title().into(), String::new()),
         }
     })
 }

@@ -15,6 +15,8 @@ mkdir -p "$output"
 work=$(mktemp -d "${TMPDIR:-/tmp}/quiet-archive.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 sh "$ios/stage-source.sh"
+# Unsplash Access Key 不进仓库：放在 prototypes/ios/unsplash.key（已忽略），构建时编进二进制。
+[ ! -f "$ios/unsplash.key" ] || export UNSPLASH_ACCESS_KEY="$(tr -d '[:space:]' < "$ios/unsplash.key")"
 cargo build --release --locked --target aarch64-apple-ios --manifest-path "$CARGO_TARGET_DIR/stage/prototypes/ios/Cargo.toml"
 cp "$here/project.yml" "$ios/Info.plist" "$ios/QuietMd.entitlements" "$work/"
 plutil -replace CFBundleExecutable -string '$(EXECUTABLE_NAME)' "$work/Info.plist"

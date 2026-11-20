@@ -14,7 +14,7 @@ while todo:
     if i in seen: continue
     seen.add(i)
     todo += [d["pkg"] for d in nodes[i]["deps"] if any(k.get("kind") is None for k in d["dep_kinds"])]
-own = {"fdl_core", "quiet_md", "quiet_md_ios"}
+own = {"fdl_core", "fdl_ai", "quiet_md", "quiet_md_ios"}
 pkgs = sorted((p for p in m["packages"] if p["id"] in seen and p["id"] not in ws and p["name"] not in own), key=lambda p: (p["name"].lower(), p["version"]))
 sys.stdout.write("".join(p["name"] + "\t" + p["version"] + "\t" + (p.get("license") or "—") + "\n" for p in pkgs))
 ' > "$here/licences.txt"

@@ -10,12 +10,12 @@ use crate::store::Entry;
 const MIN: f32 = 0.72;
 const MAX: f32 = 1.5;
 /// 缩略图里的字（`home_preview_style::SCALE` 缩过的正文）：一个汉字宽多少、一行多高、段间多少。
-const GLYPH: f32 = 4.4;
-const LINE: f32 = 7.3;
-const PARA: f32 = 3.;
+const GLYPH: f32 = 5.9;
+const LINE: f32 = 9.6;
+const PARA: f32 = 4.1;
 /// 纸的边距（`render_home_card` 的 18）、标题一行连同下面的间距。
 const PAD: f32 = 18.;
-const TITLE: f32 = 28.;
+const TITLE: f32 = 31.;
 /// 估高时最多看正文的这么多字：再多卡片也到顶了。
 const PEEK: usize = 800;
 

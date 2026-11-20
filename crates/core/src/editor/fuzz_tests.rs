@@ -124,7 +124,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
     }
     let us = c.units();
     let any = |rng: &mut Rng| rng.pick(&us).id;
-    match rng.below(27) {
+    match rng.below(28) {
         0..=2 => {
             let s = *rng.pick(TEXTS);
             c.insert_text(s);
@@ -244,6 +244,12 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
             // 键盘上方「——」：五种样式随便挑一种。
             let rule = *rng.pick(&[Rule::Dots, Rule::Dotted, Rule::Line, Rule::Thick, Rule::Page]);
             format!("insert_divider({rule:?}) = {:?}", c.insert_divider(rule))
+        }
+        26 => {
+            // 助手写好的块：放到随便一块后面（或文末），那块是空段落时替换掉它。
+            let anchor = if rng.chance(80) { Some(any(rng)) } else { None };
+            let blocks = crate::paste::markdown_to_blocks(rng.pick(PASTES), crate::paste::Off::default());
+            format!("insert_generated({anchor:?}) = {:?}", c.insert_generated(anchor, blocks))
         }
         _ => {
             c.trailing_line();

@@ -20,7 +20,7 @@ const API: &str = "https://commons.wikimedia.org/w/api.php";
 const USER_AGENT: &str = "Margin/0.1 (https://quiet.md/)";
 
 #[derive(Clone, Deserialize, Serialize)]
-struct Credit { title: String, author: String, license: String, license_url: String, source: String }
+pub(super) struct Credit { pub(super) title: String, pub(super) author: String, pub(super) license: String, pub(super) license_url: String, pub(super) source: String }
 
 impl Credit {
     fn caption(&self) -> String { format!("{} · {}", self.author, self.license) }
@@ -275,7 +275,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     result
 }
 
-fn store_photo(bytes: &[u8], credit: &Credit) -> anyhow::Result<String> {
+pub(super) fn store_photo(bytes: &[u8], credit: &Credit) -> anyhow::Result<String> {
     let file = format!("{}.jpg", uuid::Uuid::new_v4());
     let path = crate::ios::style::photos_dir().join(&file);
     let credit_path = path.with_extension("source.json");

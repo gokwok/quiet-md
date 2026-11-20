@@ -228,6 +228,8 @@ impl Editor {
     /// 长按：把手指下面的块提起来。只读、按在标题上、块提不起来时返回假，长按照旧选词。
     pub(super) fn lift_block(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.compact() || self.read_only { return false; }
+        // 助手在写时长按什么都不做（认下来不往下走选词）：预览挂在锚点块里，按在预览上会提起锚点；底部也只留助手的栏。
+        if crate::ios::assist::active() { window.prevent_default(); crate::ios::take_long_press(); return true; }
         let editing = self.focus.is_focused(window);
         // 手指下面最里层的块（引用、高亮块里的那一段，而不是整个容器）。
         let hit = self.block_bounds.borrow().iter().filter(|(id, b)| **id != super::core::TITLE && b.contains(&at))
@@ -395,6 +397,8 @@ impl Editor {
             // 清除格式：整块回到正文的样子（粗体这些、颜色、对齐、底色、字体都去掉）。
             "clear" => self.core.apply_format(&[block], &super::core::BlockFormat { kind: None, align: Align::Left, bg: None, font: None, marks: Default::default() }),
             "delete" => { self.core.select_block(block); self.core.delete_selected_blocks(); }
+            // 助手：写出来的排在这一行下面（这一行空着就在插入时替换掉它）。
+            "assist" => { self.changed(window, cx); return crate::ios::assist::open(self, Some(block), window, cx); }
             // 颜色：打开格式面板的颜色页（和「格式」里的彩虹圈同一页）。
             "color" => { self.changed(window, cx); return crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open_at(crate::ios::format::Page::Color, w, window, cx)); }
             _ => {}
@@ -422,20 +426,27 @@ impl Editor {
     }
 
     /// 块动作栏（照 Craft）：一条玻璃，一排动作（图标在上、小字在下，不垫底色），「删除」在最右，垫一层淡红。
-    /// 动作是 格式 / 添加 / 配音 / 剪切 / 复制，选了多块时只留对多块有意义的几项；最多六格，一行放得下。
+    /// 动作是 格式 / 添加 / 配音 / 助手 / 剪切 / 复制，选了多块时只留对多块有意义的几项；最多七格，一行放得下。
     pub(super) fn block_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // 助手开着时，底部是它的卡片或那块玻璃（贴着键盘或底边）。
+        if let Some(el) = crate::ios::assist::overlay() {
+            let (_, safe, viewport) = crate::ios::layout();
+            return Some(rise_at("sheet-assist", self.rel(point(viewport.width / 2., viewport.height - safe.bottom - px(crate::ios::SHEET_INSET))), el));
+        }
         if !self.block_bar_on() || self.menu.is_some() { return None; }
         let ids = self.core.block_sel_ids();
         let one = (ids.len() == 1).then(|| ids[0]);
         let tr = crate::settings::tr;
         let glass = crate::ios::glass::supported();
         // 玻璃上图标和字是原生的（GPUI 画的会被玻璃盖住）；只有「删除」垫底色。
+        // 「助手」的 ¶ 是朱红的（应用图标的颜色），字照旧。
         let tile = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla, fill: bool| {
+            let ink = if ic == "assistant" { crate::ios::assist::mark() } else { tint };
             div().id(id).flex_1().min_w_0().h(px(58.)).flex().flex_col().items_center().justify_center().gap(px(3.)).rounded(px(16.)).relative()
                 .when(!glass && fill, |d| d.bg(tint.opacity(0.08)))
                 .active(|s| s.bg(Theme::fill_pressed()))
-                .when(glass, |d| d.child(crate::ios::glass::tile(id, (ic, 22., tint), label.into(), fill.then(|| tint.opacity(0.08)))))
-                .when(!glass, |d| d.child(icon(ic, 22., tint)).child(div().text_size(px(11.)).line_height(px(14.)).text_color(tint).whitespace_nowrap().child(label)))
+                .when(glass, |d| d.child(crate::ios::glass::tile(id, (ic, 22., ink), (label.into(), tint), fill.then(|| tint.opacity(0.08)))))
+                .when(!glass, |d| d.child(icon(ic, 22., ink)).child(div().text_size(px(11.)).line_height(px(14.)).text_color(tint).whitespace_nowrap().child(label)))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| { cx.stop_propagation(); window.prevent_default(); if glass { crate::ios::glass::pulse(id); } })
         };
         let item = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla| tile(id, ic, label, tint, false);
@@ -471,7 +482,8 @@ impl Editor {
                     ed.core.select_cells(CellSel { table:id, anchor:(0,0), head:(0,0), kind:CellSelKind::Range });
                     ed.table_page=0; ed.table_panel_target.set(None); cx.notify();
                 }))))
-            .when(one.is_some() && crop.is_none() && !matches!(kind,Some(BlockKind::Table(_) | BlockKind::Code { .. })), |d| d
+            // 选了几块时也有「格式」：打开的是「文字」页，字体、粗体这些、对齐一起改这几块。
+            .when((one.is_none() && ids.iter().any(|id| self.core.kind_of(*id).is_some_and(BlockKind::takes_bg))) || (one.is_some() && crop.is_none() && !matches!(kind,Some(BlockKind::Table(_) | BlockKind::Code { .. }))), |d| d
                 // 「格式」：和键盘上方的「格式」是同一块面板（`crate::ios::format`）。
                 .child(item("bb-format", "type", tr("格式", "Format"), Theme::text()).on_click(|_, _, _| crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open(w, window, cx)))))
             .when(one.is_some(), |d| d.child(item("bb-add", "square-plus", tr("添加", "Add"), Theme::text()).on_click(open(Some(BlockSub::Add(usize::MAX))))))
@@ -482,6 +494,12 @@ impl Editor {
                 if roles.is_empty() { voice.on_click(cx.listener(|ed: &mut Editor, _, w, cx| crate::ios::voice::start_blocks(ed, crate::ios::voice::bar_pick(), w, cx))) }
                 else { voice.child(crate::ios::menu::button("bb-voice-menu", roles)) }
             })
+            // 「助手」：接着选中的最后一块往下写。
+            .child(item("bb-assist", "assistant", tr("助手", "Assistant"), Theme::text()).on_click(cx.listener(|ed: &mut Editor, _, w, cx| {
+                let picked = ed.core.block_sel_ids();
+                let anchor = ed.core.block_order(false).into_iter().rfind(|id| picked.contains(id));
+                crate::ios::assist::open(ed, anchor, w, cx);
+            })))
             .child(item("bb-cut", "scissors", tr("剪切", "Cut"), Theme::text()).on_click(act(true, true)))
             .child(item("bb-copy", "copy", tr("复制", "Copy"), Theme::text()).on_click(act(false, true)))
             .child(tile("bb-del", "trash-2", tr("删除", "Delete"), Theme::danger(), true).on_click(act(true, false)));
@@ -572,7 +590,7 @@ impl Editor {
 
     /// 底部的铅笔出不出：能编辑、没选着块或单元格、没开着菜单、目录、查找和大图（铅笔是原生的玻璃，会盖在这些上面）。
     pub fn can_append(&self) -> bool {
-        self.compact() && !self.read_only && !self.core.in_block_mode() && self.core.cell_sel.is_none() && self.menu.is_none() && self.slash.is_none() && self.block_drag.is_none()
+        self.compact() && !self.read_only && !self.core.in_block_mode() && self.core.cell_sel.is_none() && self.menu.is_none() && self.slash.is_none() && self.block_drag.is_none() && !crate::ios::assist::active()
             && !self.cat_pinned && self.find.is_none() && !self.lightbox_open()
     }
 
@@ -698,9 +716,9 @@ impl Editor {
         false
     }
 
-    /// 横着的平移开始了：落在能滑的一行上就认下这次手势。
+    /// 横着的平移开始了：落在能滑的一行上就认下这次手势。助手在写时不接：预览挂在锚点块里，一滑就把锚点选中了。
     fn swipe_begin(&mut self, at: Point<Pixels>, dx: f32, cx: &mut Context<Self>) {
-        if !self.compact() || self.read_only || self.selection_bar() || crate::ios::overlay() || self.slash.is_some() || self.block_drag.is_some() || self.dragging || self.core.cell_sel.is_some() { return; }
+        if !self.compact() || self.read_only || self.selection_bar() || crate::ios::overlay() || crate::ios::assist::active() || self.slash.is_some() || self.block_drag.is_some() || self.dragging || self.core.cell_sel.is_some() { return; }
         if self.menu.is_some() || !self.list.viewport_bounds().contains(&at) { return; }
         // 手指下面的那一行：文本、标题、列表项各一行，引用、高亮块、分栏连同里面的算一行（`render::Item`）。
         let rows = self.row_ids();
@@ -835,7 +853,7 @@ impl Editor {
             "edit-format" => { self.touch_menu = false; self.toolbar_hidden = false; return cx.notify(); }
             _ if id.starts_with(crate::ios::voice::PICK) => { self.touch_menu = false; return crate::ios::voice::start(self, id, window, cx); }
             // 双击期间收起的是之前的光标菜单。回调可能比选词晚，别把即将出现的选词菜单也收起。
-            "edit-dismissed" if self.touch_double_tap.is_some() => return,
+            "edit-dismissed" if self.touch_menu_delay.is_some() => return,
             // 系统收起了菜单。全选之后菜单要留着（换成带剪切、复制的那一条），那一次收起不算。
             _ => { if !self.touch_keep.is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(600)) { self.touch_menu = false; cx.notify(); } return; }
         };
@@ -863,17 +881,16 @@ impl Editor {
         self.touch_keep = Some(std::time::Instant::now());
     }
 
-    /// 选词和手柄立刻显示。菜单等连点间隔结束再弹，以免系统吞掉第三下。
-    pub(super) fn defer_word_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        if self.core.sel.is_collapsed() { return; }
+    /// 光标和选区立即更新。菜单等连点结束再弹，避免系统拦截后续触摸。
+    pub(super) fn defer_edit_menu(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let at_time = std::time::Instant::now();
-        self.touch_double_tap = Some((at_time, at));
+        self.touch_menu_delay = Some((at_time, at));
         let timer = cx.background_executor().timer(GestureTuning::default().multi_tap_interval);
         cx.spawn(async move |editor, cx| {
             timer.await;
             let _ = editor.update(cx, |e, cx| {
-                if e.touch_double_tap.is_some_and(|(time, _)| time == at_time) {
-                    e.touch_double_tap = None;
+                if e.touch_menu_delay.is_some_and(|(time, _)| time == at_time) {
+                    e.touch_menu_delay = None;
                     cx.notify();
                 }
             });
@@ -882,24 +899,25 @@ impl Editor {
 
     /// 按下前的状态：松手时用来判断是不是「点在原来的光标上」。
     pub(super) fn touch_press(&mut self, window: &Window) {
-        self.touch_double_tap = None;
+        self.touch_menu_delay = None;
         let idle = self.focus.is_focused(window) && self.core.sel.is_collapsed() && self.menu.is_none() && self.slash.is_none();
         self.touch_before = idle.then_some((self.core.sel.head, self.touch_menu));
         self.touch_menu = false;
     }
 
     /// 松手：双击选了词就出菜单；点在原光标上则开合菜单。
-    pub(super) fn touch_release(&mut self) {
+    pub(super) fn touch_release(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
         let before = self.touch_before.take();
         if self.core.in_block_mode() || self.core.cell_sel.is_some() { return; }
         self.touch_menu = if !self.core.sel.is_collapsed() { true } else {
             matches!(before, Some((pos, shown)) if pos == self.core.sel.head && !shown)
         };
+        if self.touch_menu && self.core.sel.is_collapsed() { self.defer_edit_menu(at, cx); }
     }
 
     /// 编辑菜单：有系统的就交给系统（`ios::editmenu`），这里什么都不画；没有时才自己画一条。
     pub(super) fn touch_callout(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let shown = self.touch_menu && self.touch_double_tap.is_none() && !self.dragging && self.menu.is_none() && self.slash.is_none() && self.focus.is_focused(window)
+        let shown = self.touch_menu && self.touch_menu_delay.is_none() && !self.dragging && self.menu.is_none() && self.slash.is_none() && self.focus.is_focused(window)
             && !self.core.in_block_mode() && self.core.cell_sel.is_none() && self.block_drag.is_none();
         let native = crate::ios::editmenu::supported();
         if !shown { if native { crate::ios::editmenu::dismiss(); } return None; }
@@ -964,6 +982,7 @@ const SLASH_CATS: &[(&str, &str, &str, &[Pick])] = {
     use super::menus::SlashKind as K;
     use Pick::{A, K as I};
     &[
+        ("助手", "Assistant", "assistant", &[A("assist", "助手", "Assistant", "assistant")]),
         ("列表", "Lists", "list", &[I(K::Bullet), I(K::Ordered), I(K::Todo)]),
         ("缩进", "Indent", "indent-increase", &[A("indent", "增加缩进", "Indent", "indent-increase"), A("outdent", "减少缩进", "Outdent", "indent-decrease")]),
         ("文本样式", "Text Styles", "type", &[I(K::Text), I(K::Heading(1)), I(K::Heading(2)), I(K::Heading(3)), I(K::Heading(4)), I(K::Quote), I(K::Code)]),
@@ -1016,10 +1035,11 @@ impl Editor {
         let (block, trigger) = (s.block, s.trigger);
         let mut list = div().id("slash-card-list").py(px(6.)).flex().flex_col().overflow_y_scroll().track_scroll(&self.slash_scroll);
         let mut n = 0usize;
-        // 一行：图标、名字，点进一类的行尾一个小箭头。照 Craft：图标都是灰的，删除是红的。
+        // 一行：图标、名字，点进一类的行尾一个小箭头。照 Craft：图标都是灰的，删除是红的；「助手」的 ¶ 是朱红的。
         let pick_row = |id: ElementId, glyph: &'static str, text: SharedString, more: bool, danger: bool| {
             let tint = if danger { crate::feishu_theme::c(0xd83931) } else { Theme::icon() };
-            row(id).child(icon(glyph, 19., tint)).child(label(text).when(danger, |d| d.text_color(tint))).when(more, |d| d.child(icon("chevron-right", 14., Theme::text_caption())))
+            let ink = if glyph == "assistant" { crate::ios::assist::mark() } else { tint };
+            row(id).child(icon(glyph, 19., ink)).child(label(text).when(danger, |d| d.text_color(tint))).when(more, |d| d.child(icon("chevron-right", 14., Theme::text_caption())))
         };
         let has = |k: super::menus::SlashKind| items.iter().any(|i| SLASH_ITEMS[*i].kind == k);
         let usable = |p: &Pick| match p { Pick::K(k) => has(*k), Pick::A(..) => true };
@@ -1092,3 +1112,55 @@ impl Editor {
     }
 }
 
+// ---- 助手的预览
+
+impl super::render::R<'_> {
+    /// 助手写出来的、还没插入的字，排在锚点下面：和正文同一套排版（静态的一份，不进文档），左边一道朱红的细线；
+    /// 新出现的块淡入。锚点不在了就排在最后一块下面。
+    pub(super) fn assist_preview(&self, b: &fdl_core::model::Block, env: super::render::Env, cx: &mut Context<Editor>) -> Option<AnyElement> {
+        use std::{cell::RefCell, collections::{HashMap, HashSet}, rc::Rc};
+        let core = &self.ed.core;
+        let last = core.doc.blocks.last().map(|x| x.id) == Some(b.id);
+        let (blocks, moving) = crate::ios::assist::preview(b.id, last, |a| core.path(a).is_some())?;
+        let r = super::render::R {
+            ed: self.ed, units: Rc::new(vec![]), eqnos: self.eqnos.clone(), focused: false, selected: Rc::new(HashSet::new()), targets: RefCell::new(vec![]),
+            flat: None, cache: Rc::new(RefCell::new(HashMap::new())), bounds: Rc::new(RefCell::new(HashMap::new())), ghost: true,
+        };
+        let mut col = div().w_full().min_w_0().flex().flex_col();
+        let mut prev = super::render::margins(b, env).1;
+        for (ix, x) in blocks.iter().enumerate() {
+            let (mt, mb) = super::render::margins(x, env);
+            // 表格照正文里那样横着滚（列宽是按导入的给的，常比屏幕宽），不然右边就出了屏幕。
+            let el = r.block(x, &blocks, ix, env, cx);
+            // 里面那层给足表格的宽度：块本身只有一屏宽，不撑开的话外面这层没得滚。
+            let el = match &x.kind {
+                BlockKind::Table(t) => div().id(("assist-table", ix)).w_full().overflow_x_scroll()
+                    .child(div().w(px(t.col_widths.iter().sum::<f32>().max(1.) + 2.)).child(el)).into_any_element(),
+                _ => el,
+            };
+            col = col.child(div().mt(px(prev.max(mt))).min_w_0().child(el)
+                .with_animation(("assist-in", ix), Animation::new(std::time::Duration::from_millis(260)).with_easing(crate::ios::assist::ease_out_quint()), |d, t| d.opacity(t)));
+            prev = mb;
+        }
+        // 点在预览上什么都不发生：不落到锚点块里（光标进锚点、键盘弹起来），也不落到预览里的勾选框、链接上
+        // （那些块不在文档里）。捕获阶段就截下，比里面的处理先到。不用 occlude，那样手指在预览上就滚不动了。
+        Some(div().relative().w_full().child(col)
+            .capture_any_mouse_down(|_, w, cx| { w.prevent_default(); cx.stop_propagation(); })
+            .child(div().absolute().left(px(-12.)).top(px(6.)).bottom(px(4.)).w(px(2.)).rounded_full().bg(crate::ios::assist::mark().opacity(0.5)))
+            // 在放字时跟着往下推（`assist::follow`）。列表这一帧正在排，推要等到下一帧开头。
+            .when(moving, |d| d.child({
+                let (list, ed) = (self.ed.list.clone(), cx.weak_entity());
+                canvas(move |bounds, window, _| {
+                    window.request_animation_frame();
+                    let bottom = bounds.bottom();
+                    window.on_next_frame(move |_, cx| {
+                        let Some(d) = crate::ios::assist::follow(bottom, list.logical_scroll_top()) else { return };
+                        list.scroll_by(d);
+                        crate::ios::assist::pushed(list.logical_scroll_top());
+                        let _ = ed.update(cx, |_, cx| cx.notify());
+                    });
+                }, |_, _, _, _| {}).absolute().inset_0()
+            }))
+            .into_any_element())
+    }
+}

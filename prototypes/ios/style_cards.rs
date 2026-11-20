@@ -89,7 +89,7 @@ pub(super) unsafe fn paper_tile(view: *mut AnyObject, width: f64, title: &str, p
 }
 
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum Preview { Gallery, Stack, Badge }
+pub(super) enum Preview { Gallery, Stack }
 
 unsafe fn shadow(view: *mut AnyObject, bounds: CGRect, radius: f64) {
     unsafe {
@@ -106,74 +106,112 @@ unsafe fn shadow(view: *mut AnyObject, bounds: CGRect, radius: f64) {
     }
 }
 
+/// 一套样式的样子（照 Craft 样式图库，IMG_9340–9342）：整块铺背景，中间一张窄窄的纸，纸外一圈半透明的玻璃边；
+/// 纸上左上角是用这套字体写的名字，有封面时斜着横过一条封面当腰封，分隔符是胶带就斜着贴一条（下端出纸边），
+/// 是涂鸦就在纸下部画一笔带小圈的线（照 Gingerbread，IMG_9341）；普通的线不画。主面板「样式」那一格（`Stack`）的纸几乎贴满，下半截出了格子。
 pub(super) unsafe fn preview(parent: *mut AnyObject, frame: CGRect, card: &Card, kind: Preview) -> *mut AnyObject {
     unsafe {
         let (w, h) = (frame.size.width, frame.size.height);
         let shell = plain(parent, frame);
         let bounds = rect(0., 0., w, h);
-        let radius = if kind == Preview::Gallery { 14. } else { 8. };
-        if kind == Preview::Stack { shadow(shell, bounds, radius); }
+        let gallery = kind == Preview::Gallery;
+        let radius = if gallery { 12. } else { 11. };
+        if !gallery { shadow(shell, bounds, radius); }
         let fallback = Fill::Gradient(shade(card.paper, -0.07), shade(card.paper, -0.13), 2);
         let background = fill(shell, bounds, card.fill.as_ref().unwrap_or(&fallback), radius);
         if card.faded && card.fill.is_some() { fill(background, bounds, &Fill::Color(card.paper.opacity(FADED_PAPER_OPACITY)), 0.); }
-        let (inset, top, bottom) = match kind {
-            Preview::Gallery => (w * 0.23, h * 0.13, h * 0.13),
-            Preview::Stack => (5., 5., 5.),
-            Preview::Badge => (w * 0.20, 5., 5.),
-        };
-        let (sw, sh) = (w - 2. * inset, h - top - bottom);
-        let sheet_frame = rect(inset, top, sw, sh);
-        let page = plain(background, sheet_frame);
+        let (sw, sh, sx, sy) = if gallery { (w * 0.41, h * 0.6, w * 0.295, h * 0.19) } else { (w - 7., h - 7., 3.5, 3.5) };
+        if gallery {
+            // 纸外那圈玻璃边：浅白的一层加一道细亮边。
+            let rim = fill(background, rect(sx - 4., sy - 4., sw + 8., sh + 8.), &Fill::Color(white().opacity(0.26)), 9.);
+            ring(rim, rect(0., 0., sw + 8., sh + 8.), 9., ui_color(white().opacity(0.45)), 0., 0.6);
+        }
+        let page = plain(background, rect(sx, sy, sw, sh));
         let sheet_rect = rect(0., 0., sw, sh);
-        if kind == Preview::Gallery { shadow(page, sheet_rect, 6.); }
-        let sheet = gradient(page, sheet_rect, &[shade(card.paper, 0.025), card.paper], (0.18, 0.08), (0.9, 1.), 6.);
-        ring(page, sheet_rect, 6., ui_color(paper_label(card.paper, card.ink).opacity(0.13)), 0., 0.55);
-        let badge = kind == Preview::Badge;
-        let margin = if badge { 4. } else { sw * 0.12 };
-        let body = sw - 2. * margin;
-        if !badge {
-            let title = label(sheet, rect(margin, sh * 0.095, body, sh * 0.29), &card.name,
-                font((sh * 0.125).clamp(9., 17.), 0.42, card.design), ui_color(card.ink), 0);
-            let lines = if card.name.chars().count() <= 6 { 1isize } else { 2isize };
-            let _: () = msg_send![title, setNumberOfLines: lines];
-            let _: () = msg_send![title, setIsAccessibilityElement: false];
+        shadow(page, sheet_rect, 6.);
+        let sheet = gradient(page, sheet_rect, &[shade(card.paper, 0.025), card.paper], (0.18, 0.08), (0.9, 1.), if gallery { 5. } else { 6. });
+        let margin = sw * 0.1;
+        let size = if gallery { (sw * 0.16).clamp(9., 14.) } else { (sw * 0.12).clamp(9., 12.) };
+        let title = label(sheet, rect(margin, sw * 0.07, sw - 2. * margin, size * 2.6), &card.name, font(size, 0.42, card.design), ui_color(paper_label(card.paper, card.ink)), 0);
+        let _: () = msg_send![title, setNumberOfLines: 2isize];
+        let _: () = msg_send![title, sizeToFit];
+        let mut top: CGRect = msg_send![title, frame];
+        top.size.width = top.size.width.min(sw - 2. * margin);
+        let _: () = msg_send![title, setFrame: top];
+        let _: () = msg_send![title, setIsAccessibilityElement: false];
+        let below = top.origin.y + top.size.height + 5.;
+        if let Some(cover) = &card.cover {
+            // 照 Craft（IMG_9345）：封面是斜着横过整张纸的一条「腰封」，两头出纸边，被纸的圆角裁掉。
+            let thick = sw * 0.27;
+            let band = fill(sheet, rect(-sw * 0.3, sh * 0.52 - thick / 2., sw * 1.6, thick), &Fill::Image(cover.clone()), 0.);
+            let (s, c) = (-0.2f64).sin_cos();
+            let _: () = msg_send![band, setTransform: CGAffineTransform { a: c, b: s, c: -s, d: c, tx: 0., ty: 0. }];
         }
-        let rule_h = if badge { 6. } else { (sh * 0.15).clamp(9., 18.) };
-        let rule = rect(margin, sh * 0.58, body, rule_h);
         match &card.divider {
-            MiniDivider::Tape(path) => {
-                let swatch = fill(sheet, rule, &Fill::Image(path.clone()), 0.);
-                torn_edges(swatch, rule.size);
-                if !badge {
-                    let (s, c) = (-0.12f64).sin_cos();
-                    let transform = CGAffineTransform { a: c, b: s, c: -s, d: c, tx: 0., ty: 0. };
-                    let _: () = msg_send![swatch, setTransform: transform];
-                }
+            MiniDivider::Tape(tape) => {
+                let (len, thick) = (sh * 0.62, (sw * 0.2).clamp(8., 18.));
+                let centre = (sw * 0.6, (below + sh) / 2. + sh * 0.12);
+                let swatch = fill(sheet, rect(centre.0 - len / 2., centre.1 - thick / 2., len, thick), tape, 0.);
+                torn_edges(swatch, CGSize::new(len, thick));
+                let (s, c) = (-1.15f64).sin_cos();
+                let _: () = msg_send![swatch, setTransform: CGAffineTransform { a: c, b: s, c: -s, d: c, tx: 0., ty: 0. }];
             }
-            MiniDivider::Doodle(path) => {
-                let image = fill(sheet, rule, &Fill::Image(path.clone()), 0.);
-                let _: () = msg_send![image, setContentMode: 1isize];
+            MiniDivider::Doodle(_) => {
+                // 照 Craft 的 Gingerbread：纸下部一笔手画的线，左边打个小圈，再缓缓扬上去，右端略出纸边（画在 page 上，不被纸的圆角裁掉）。
+                let p = |x: f64, y: f64| CGPoint::new(sw * x, sh * y);
+                let path: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPath];
+                let _: () = msg_send![path, moveToPoint: p(0.03, 0.93)];
+                let _: () = msg_send![path, addCurveToPoint: p(0.28, 0.80), controlPoint1: p(0.12, 0.93), controlPoint2: p(0.25, 0.88)];
+                let _: () = msg_send![path, addCurveToPoint: p(0.19, 0.83), controlPoint1: p(0.31, 0.72), controlPoint2: p(0.16, 0.73)];
+                let _: () = msg_send![path, addCurveToPoint: p(0.42, 0.90), controlPoint1: p(0.22, 0.91), controlPoint2: p(0.32, 0.93)];
+                let _: () = msg_send![path, addCurveToPoint: p(1.05, 0.69), controlPoint1: p(0.6, 0.86), controlPoint2: p(0.8, 0.66)];
+                let stroke: *mut AnyObject = msg_send![AnyClass::get(c"CAShapeLayer").unwrap(), layer];
+                let cg_path: *const super::CGPath = msg_send![path, CGPath];
+                let _: () = msg_send![stroke, setPath: cg_path];
+                let _: () = msg_send![stroke, setFillColor: std::ptr::null::<super::CGColor>()];
+                let _: () = msg_send![stroke, setStrokeColor: cg(ui_color(paper_label(card.paper, card.ink).opacity(0.85)))];
+                let _: () = msg_send![stroke, setLineWidth: (sw * 0.018).clamp(1.1, 1.6)];
+                let cap: *mut AnyObject = msg_send![AnyClass::get(c"NSString").unwrap(), stringWithUTF8String: c"round".as_ptr()];
+                let _: () = msg_send![stroke, setLineCap: cap];
+                let layer: *mut AnyObject = msg_send![page, layer];
+                let _: () = msg_send![layer, addSublayer: stroke];
             }
-            MiniDivider::Line => { fill(sheet, rect(margin, rule.origin.y + rule_h * 0.52, body, 1.), &Fill::Color(card.ink.opacity(0.3)), 0.5); }
+            MiniDivider::Line => {}
         }
-        fill(sheet, rect(margin, if badge { sh * 0.27 } else { sh * 0.43 }, body * 0.82, 1.2), &Fill::Color(card.ink.opacity(0.47)), 0.6);
-        if !badge {
-            for (dy, fraction) in [(0.82, 0.97), (0.88, 0.63)] {
-                fill(sheet, rect(margin, sh * dy, body * fraction, 1.), &Fill::Color(card.ink.opacity(0.31)), 0.5);
-            }
-        }
-        ring(shell, bounds, radius, ui(c"separatorColor"), 0., if kind == Preview::Stack { 0.65 } else { 0.5 });
+        if gallery { ring(shell, bounds, radius, ui(c"separatorColor"), 0., 0.5); }
         shell
     }
 }
 
 pub(super) unsafe fn stack(parent: *mut AnyObject, width: f64, current: &Card, others: &[Card]) {
     unsafe {
-        let (w, h, left) = (90., 118., width - 135.);
+        // 照 Craft（IMG_9339、9343）：当前这套居中、下半截出了格子，后面两套往右斜着露出一条边。
+        // 尺寸和位置照 Craft（思程DEMO台本 3）：前面那张 80pt 宽、离格子顶 15pt，左边落在格子正中，后面两张各往右错开 17pt；
+        // 格子窄时整叠往左让，最后一张右边留 16pt。
+        let (w, h) = (80., 118.);
+        let left = (width * 0.5).min(width - w - 34. - 16.);
+        // 背景是图片时，卡片四周透出一小圈同一张图的晕影（IMG_9359：只是一点点，不是整张）。纯色、渐变背景没有。
+        if let Some(Fill::Image(path)) = &current.fill {
+            let halo = rect(left - 46., 0., w + 126., TILE);
+            let ghost = fill(parent, halo, &Fill::Image(path.clone()), 0.);
+            let _: () = msg_send![ghost, setAlpha: 0.3f64];
+            let mask: *mut AnyObject = msg_send![AnyClass::get(c"CAGradientLayer").unwrap(), layer];
+            let radial: *mut AnyObject = msg_send![AnyClass::get(c"NSString").unwrap(), stringWithUTF8String: c"radial".as_ptr()];
+            let _: () = msg_send![mask, setType: radial];
+            let stops: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
+            for a in [1., 0.8, 0.3, 0.] { let _: () = msg_send![stops, addObject: cg(ui_color(black().opacity(a))) as *mut AnyObject]; }
+            let _: () = msg_send![mask, setColors: stops];
+            let _: () = msg_send![mask, setStartPoint: CGPoint::new(0.5, 0.6)];
+            // 半径在横向正好够到两边、纵向够到底边，四周都淡到没有，不留方边。
+            let _: () = msg_send![mask, setEndPoint: CGPoint::new(1., 1.)];
+            let _: () = msg_send![mask, setFrame: rect(0., 0., halo.size.width, halo.size.height)];
+            let layer: *mut AnyObject = msg_send![ghost, layer];
+            let _: () = msg_send![layer, setMask: mask];
+        }
         for (i, card) in others.iter().enumerate().rev() {
             let offset = i as f64 + 1.;
-            let page = preview(parent, rect(left + offset * 13., 17. + offset * 5., w, h), card, Preview::Stack);
-            let (s, c) = (offset * 0.083).sin_cos();
+            let page = preview(parent, rect(left + offset * 17., 17. + offset * 3., w, h), card, Preview::Stack);
+            let (s, c) = (offset * 0.075).sin_cos();
             let transform = CGAffineTransform { a: c, b: s, c: -s, d: c, tx: 0., ty: 0. };
             let _: () = msg_send![page, setTransform: transform];
         }

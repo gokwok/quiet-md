@@ -215,7 +215,7 @@ impl Editor {
                         let offset = point(p.x, p.y + line/2.) - ev.start_position;
                         // 短词上的第三下可能落在手柄里。只有在连点范围内抬手，且没有拖动，才选中整段。
                         let tuning = GestureTuning::default();
-                        let double_tap_at = e.touch_double_tap.take().filter(|(t, p)| t.elapsed() <= tuning.multi_tap_interval
+                        let double_tap_at = e.touch_menu_delay.take().filter(|(t, p)| t.elapsed() <= tuning.multi_tap_interval
                             && (ev.start_position - *p).magnitude() <= f64::from(tuning.multi_tap_slop)).map(|(t, _)| t);
                         e.range_drag = Some(RangeDrag { original:e.core.sel, offset, keep_keyboard:crate::ios::keyboard_up(w), double_tap_at });
                         e.core.sel = Selection { anchor:fixed, head:pos };

@@ -35,6 +35,9 @@ pub fn open_at(page: Page, w: &mut Workspace, window: &mut Window, cx: &mut Cont
     if editor.update(cx, |ed, cx| { let block = ed.format_begin(); cx.notify(); block }).is_none() { return; }
     super::stylepanel::close();
     super::glass::haptic();
+    // 选了几块：块那页（改类型、缩进这些）只对一块，直接到「文字」页（粗体这些、对齐、字体对每一块都改）。
+    let many = editor.read(cx).core.block_sel_ids().len() > 1;
+    let page = if many && page == Page::Block { Page::Text } else { page };
     PAGE.with(|p| p.set(Some(page)));
     window.focus(&w.focus, cx);
     cx.notify();
@@ -78,6 +81,10 @@ fn same(a: &BlockKind, b: &BlockKind) -> bool {
 /// 面板上的一个动作。
 pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(act) = act.strip_prefix("fmt-") else { return };
+    // 选了几块时「文字」页的 ✕：收起面板回到块动作栏，块仍选着。
+    if act == "back" { close(); return cx.notify(); }
+    // 第一页往下拖走了：和点 ✓ 一样。
+    if act == "done" { return done(w, cx); }
     if let Some(page) = act.strip_prefix("page-") {
         let page = match page { "more" => Page::More, "text" => Page::Text, "color" => Page::Color, _ => Page::Block };
         PAGE.with(|p| p.set(Some(page)));
@@ -162,10 +169,20 @@ const FONTS: [(&str, &str, &str, &str); 4] = [("Aa", "System", "", "system"), ("
 /// 块背景只放浅的一排（和「块」装饰同一种浅色）。
 const BG: [Option<&str>; 8] = [None, Some("light-gray"), Some("light-red"), Some("light-orange"), Some("light-yellow"), Some("light-green"), Some("light-blue"), Some("light-purple")];
 
+/// 几样都一样时是那一样，不一样（或一样也没有）时是 None。
+fn shared<T: PartialEq>(mut all: impl Iterator<Item = T>) -> Option<T> {
+    let first = all.next()?;
+    all.all(|x| x == first).then_some(first)
+}
+
 fn text(label: &str, size: f64, weight: f64) -> Look { Look::Text(label.into(), None, size, weight) }
 
 fn nodes(page: Page, ed: &Editor, block: BlockId) -> Vec<Node> {
     let core = &ed.core;
+    let ids = core.block_sel_ids();
+    // 选了几块：这几块里能带样式的（`takes_bg`），字体、对齐都看它们是不是一样。
+    let styled_ids: Vec<BlockId> = ids.iter().copied().filter(|id| core.kind_of(*id).is_some_and(|k| k.takes_bg())).collect();
+    let many = ids.len() > 1;
     let b = core.block(block);
     let kind = core.kind_of(block);
     let level = heading(kind);
@@ -233,25 +250,29 @@ fn nodes(page: Page, ed: &Editor, block: BlockId) -> Vec<Node> {
         ],
         Page::Text => {
             let on = |get: fn(&fdl_core::model::Marks) -> bool| ed.mark_active(get);
-            let align = b.map(|b| b.align).unwrap_or_default();
-            let code = is("code");
-            let styled = !ed.markdown && kind.is_some_and(|k| k.takes_bg());
+            let blocks = || styled_ids.iter().filter_map(|id| core.block(*id));
+            let align = if many { shared(blocks().map(|b| b.align)) } else { Some(b.map(|b| b.align).unwrap_or_default()) };
+            let align_is = |a: Align| align == Some(a);
+            // 几块里只要有一块不是代码，粗体这些就能用（`toggle_mark` 对整块，代码块会跳过）。
+            let code = if many { ids.iter().all(|id| matches!(core.kind_of(*id), Some(BlockKind::Code { .. }))) } else { is("code") };
+            let styled = !ed.markdown && !styled_ids.is_empty();
+            let font = shared(blocks().map(|b| b.font.as_deref().unwrap_or("system")));
             vec![
-                header(tr("文字", "Text")),
+                // 选了几块时这一页就是面板的第一页（块那页改的是一块），✕ 回到块动作栏。
+                if many { Node::Header { title: tr("文字", "Text").into(), warn: false, reset: None, close: "fmt-back".into() } } else { header(tr("文字", "Text")) },
                 Node::Cells { h: 52., rule: false, cells: vec![
                     Item::new(Look::Symbol("bold"), "fmt-mark-b").on(on(|m| m.bold)).enabled(!code),
                     Item::new(Look::Symbol("italic"), "fmt-mark-i").on(on(|m| m.italic)).enabled(!code),
                     Item::new(Look::Symbol("underline"), "fmt-mark-u").on(on(|m| m.underline)).enabled(!code),
                     Item::new(Look::Symbol("strikethrough"), "fmt-mark-s").on(on(|m| m.strike)).enabled(!code),
                     Item::new(Look::Symbol("chevron.left.forwardslash.chevron.right"), "fmt-mark-c").on(on(|m| m.code)).enabled(!code),
-                    Item::new(Look::Symbol("text.alignleft"), "fmt-align-l").on(align == Align::Left),
-                    Item::new(Look::Symbol("text.aligncenter"), "fmt-align-c").on(align == Align::Center),
-                    Item::new(Look::Symbol("text.alignright"), "fmt-align-r").on(align == Align::Right),
+                    Item::new(Look::Symbol("text.alignleft"), "fmt-align-l").on(align_is(Align::Left)),
+                    Item::new(Look::Symbol("text.aligncenter"), "fmt-align-c").on(align_is(Align::Center)),
+                    Item::new(Look::Symbol("text.alignright"), "fmt-align-r").on(align_is(Align::Right)),
                 ] },
-                // 这一块的字体（Markdown 文档存不下，灰着）。
+                // 这一块（选了几块时是这几块）的字体，几块不一样时哪个都不亮（Markdown 文档存不下，灰着）。
                 Node::Cells { h: 84., rule: false, cells: FONTS.iter().map(|(sample, name, design, key)| {
-                    let now = b.and_then(|b| b.font.as_deref()).unwrap_or("system");
-                    Item::new(Look::Font(sample.to_string(), name.to_string(), design), format!("fmt-font-{key}")).tile().on(now == *key).enabled(styled)
+                    Item::new(Look::Font(sample.to_string(), name.to_string(), design), format!("fmt-font-{key}")).tile().on(font == Some(*key)).enabled(styled)
                 }).collect() },
                 Node::Cells { h: 58., rule: false, cells: vec![
                     Item::new(Look::Text(tr("复制格式", "Copy Format").into(), Some("doc.on.doc"), 15., 0.), "fmt-copy").tile().enabled(styled),

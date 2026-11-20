@@ -94,6 +94,16 @@ pub(crate) fn quick() -> Option<(String, String, String, Option<String>)> {
     })
 }
 
+/// 助手写正文用的模型：主模型，没选就用快速模型。
+pub(crate) fn main() -> Option<(String, String, String, Option<String>)> {
+    let p = prefs();
+    [&p.text_main, &p.text_fast].into_iter().find_map(|s| {
+        let provider = p.text_providers.iter().find(|pr| pr.id == s.provider && !s.model.is_empty())?;
+        let key = super::read_secret(secret(&provider.id)).unwrap_or_default();
+        Some((provider.base_url.clone(), key, s.model.clone(), Some(s.effort.clone()).filter(|e| !e.is_empty())))
+    })
+}
+
 fn find(id: &str) -> Option<Provider> { prefs().text_providers.into_iter().find(|p| p.id == id) }
 
 /// 进文本的几页：重新看一眼钥匙串；哪家的模型列表还没有、地址变了或上次失败了，就去取。

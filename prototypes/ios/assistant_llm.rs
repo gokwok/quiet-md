@@ -85,12 +85,19 @@ pub async fn models(base: String, key: String) -> Result<Vec<Model>, String> {
 
 /// 流式对话。收的那头丢掉（`Receiver` 被 drop）时请求跟着停。
 pub fn chat(base: String, key: String, model: String, effort: Option<String>, messages: Vec<(&'static str, String)>) -> mpsc::UnboundedReceiver<Event> {
+    let messages: Vec<Value> = messages.into_iter().map(|(role, content)| json!({ "role": role, "content": content })).collect();
+    let mut body = json!({ "model": model, "messages": messages });
+    if let Some(effort) = effort { body["reasoning_effort"] = effort.into(); }
+    complete(base, key, body)
+}
+
+/// 流式对话，请求体由调用方拼好（酒馆核心：拼装出的 messages 带 `name`，加上预设的 `temperature` 这些参数）。
+/// `stream` 总是打开。
+pub fn complete(base: String, key: String, mut body: Value) -> mpsc::UnboundedReceiver<Event> {
     let (tx, rx) = mpsc::unbounded();
+    body["stream"] = true.into();
     runtime().spawn(async move {
         let send = |e: Event| tx.unbounded_send(e).is_ok();
-        let messages: Vec<Value> = messages.into_iter().map(|(role, content)| json!({ "role": role, "content": content })).collect();
-        let mut body = json!({ "model": model, "messages": messages, "stream": true });
-        if let Some(effort) = effort { body["reasoning_effort"] = effort.into(); }
         let client = match client(&base, &key) { Ok(c) => c, Err(e) => { send(Event::Failed(e)); return; } };
         let mut stream = match client.chat().create_stream_byot::<Value, Value>(body).await { Ok(s) => s, Err(e) => { send(Event::Failed(describe(e))); return; } };
         while let Some(chunk) = stream.next().await {

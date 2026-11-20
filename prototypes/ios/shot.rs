@@ -724,6 +724,9 @@ pub fn open_zoom() -> bool {
             let _: () = msg_send![&**face, setAlpha: 1f64];
             let _: () = msg_send![sup, insertSubview: &**face, aboveSubview: metal];
         }
+        // 马上提交起点（缩小、遮罩、卡片的样子）：同 `capture_page`，Metal 一画完新页就上屏、不等事务，
+        // 不提交的话第一帧整屏的文档先露出来、下一帧才缩回卡片，就是那一下闪。
+        let _: () = msg_send![AnyClass::get(c"CATransaction").unwrap(), flush];
         let (m, mk) = (metal as usize, &*mask as *const AnyObject as usize);
         let radius = corner_radius();
         let end_face = face.as_ref().map(|f| &**f as *const AnyObject as usize);

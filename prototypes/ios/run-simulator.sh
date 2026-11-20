@@ -11,6 +11,8 @@ bundle=com.s1dashu.quietmd.prototype
 
 sh "$here/stage-source.sh"
 stage="$CARGO_TARGET_DIR/stage"
+# Unsplash Access Key 不进仓库：放在 prototypes/ios/unsplash.key（已忽略），构建时编进二进制。
+[ ! -f "$here/unsplash.key" ] || export UNSPLASH_ACCESS_KEY="$(tr -d '[:space:]' < "$here/unsplash.key")"
 cargo build --locked --manifest-path "$stage/prototypes/ios/Cargo.toml" --target "$target"
 mkdir -p "$app"
 cp "$CARGO_TARGET_DIR/$target/debug/quiet_md_ios" "$app/quiet_md_ios"

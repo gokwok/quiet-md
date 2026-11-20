@@ -295,7 +295,7 @@ impl Core {
     pub fn table_clear_style(&mut self) {
         fn clear(b: &mut Block) {
             b.font = None; b.bg = None; b.align = Align::Left;
-            b.text.update_marks(0..b.text.len(), |m| *m = Marks { inline: m.inline.clone(), link: m.link.clone(), ..Marks::default() });
+            b.text.update_marks(0..b.text.len(), |m| *m = Marks { inline: m.inline.clone(), link: m.link.clone(), generated: m.generated.clone(), ..Marks::default() });
             for b in &mut b.children { clear(b); }
         }
         self.edit_cells(|c| { c.valign = None; c.bg = None; for b in &mut c.blocks { clear(b); } });

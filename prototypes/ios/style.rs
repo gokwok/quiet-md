@@ -44,7 +44,90 @@ pub(super) fn contrast(a: Hsla, b: Hsla) -> f32 {
 
 /// 字体的名字 → 系统里的字体族。
 pub fn family(name: &str) -> Option<&'static str> {
-    match name { "serif" => Some(".AppleSystemUIFontSerif"), "mono" => Some(crate::themes::SYSTEM_MONO), "rounded" => Some(".AppleSystemUIFontRounded"), _ => None }
+    let f = match name { "serif" => Some(".AppleSystemUIFontSerif"), "mono" => Some(crate::themes::SYSTEM_MONO), "rounded" => Some(".AppleSystemUIFontRounded"), _ => None };
+    // 在这里（画之前）就开始下中文字体，编辑器这一帧画完能看到正在下载、下好后重画。
+    if let Some(f) = f { cjk::fallback(f); }
+    f
+}
+
+/// 系统的衬线、圆体只有西文字形，中文会退回苹方，看着像没换字体。iOS 没有自带的中文宋体、圆体，
+/// 用系统按需下载的「宋体-简」「圆体-简」（第一次用到时由系统下载，之后一直在）：下好之前照旧是苹方，
+/// 下好了排在后备字体最前面，再重画一次。等宽没有中文的，中文本来就等宽，仍用苹方。
+pub mod cjk {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
+
+    use gpui::Context;
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
+
+    /// 西文字体族 → 中文后备字体族和要下载的字重。
+    const FACES: [(&str, &str, [&str; 2]); 2] = [
+        (".AppleSystemUIFontSerif", "Songti SC", ["STSongti-SC-Regular", "STSongti-SC-Bold"]),
+        (".AppleSystemUIFontRounded", "Yuanti SC", ["STYuanti-SC-Regular", "STYuanti-SC-Bold"]),
+    ];
+    const IDLE: u8 = 0;
+    const LOADING: u8 = 1;
+    const READY: u8 = 2;
+    const FAILED: u8 = 3;
+    static STATE: [AtomicU8; 2] = [AtomicU8::new(IDLE), AtomicU8::new(IDLE)];
+    /// 每下好一种加一：编辑器的排版缓存带上它，下好后重新排。
+    static GEN: AtomicU32 = AtomicU32::new(0);
+    thread_local! { static WATCHING: Cell<bool> = const { Cell::new(false) }; }
+
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        fn CTFontDescriptorCreateWithNameAndSize(name: *const AnyObject, size: f64) -> *mut AnyObject;
+        fn CTFontDescriptorMatchFontDescriptorsWithProgressHandler(descriptors: *const AnyObject, mandatory: *const AnyObject, handler: &block2::Block<dyn Fn(u32, *const AnyObject) -> Bool>) -> bool;
+    }
+
+    /// `family` 的中文后备字体（还没下好时是 None，并开始下载）。
+    pub fn fallback(family: &str) -> Option<&'static str> {
+        let i = FACES.iter().position(|f| f.0 == family)?;
+        match STATE[i].load(Relaxed) {
+            READY => Some(FACES[i].1),
+            IDLE => { fetch(i); None }
+            _ => None,
+        }
+    }
+
+    pub fn generation() -> u32 { GEN.load(Relaxed) }
+
+    fn loading() -> bool { STATE.iter().any(|s| s.load(Relaxed) == LOADING) }
+
+    /// 有字体正在下载时，下好后让这个视图重画一次。
+    pub fn watch<T: 'static>(cx: &mut Context<T>) {
+        if !loading() || WATCHING.with(|w| w.replace(true)) { return; }
+        cx.spawn(async move |this, cx| {
+            while loading() { cx.background_executor().timer(std::time::Duration::from_millis(300)).await; }
+            WATCHING.with(|w| w.set(false));
+            let _ = this.update(cx, |_, cx| cx.notify());
+        }).detach();
+    }
+
+    fn fetch(i: usize) {
+        if STATE[i].compare_exchange(IDLE, LOADING, Relaxed, Relaxed).is_err() { return; }
+        // CTFontDescriptorMatchingState：DidFinish = 1，DidMatch = 7。已经在设备上的字体也走这一趟，很快就回来。
+        let matched = std::sync::Arc::new(AtomicU8::new(0));
+        let handler: block2::RcBlock<dyn Fn(u32, *const AnyObject) -> Bool> = block2::RcBlock::new(move |state: u32, _: *const AnyObject| -> Bool {
+            if state == 7 { matched.store(1, Relaxed); }
+            if state == 1 {
+                STATE[i].store(if matched.load(Relaxed) == 1 { READY } else { FAILED }, Relaxed);
+                GEN.fetch_add(1, Relaxed);
+            }
+            Bool::YES
+        });
+        unsafe {
+            let list: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
+            for name in FACES[i].2 {
+                let desc = CTFontDescriptorCreateWithNameAndSize(crate::ios::glass::ns_string(name), 0.);
+                if desc.is_null() { continue; }
+                let _: () = msg_send![list, addObject: desc];
+                let _: () = msg_send![desc, release];
+            }
+            if !CTFontDescriptorMatchFontDescriptorsWithProgressHandler(list, std::ptr::null(), &handler) { STATE[i].store(FAILED, Relaxed); }
+        }
+    }
 }
 
 /// 打开着的那篇文档的样式（在文档页时）。
@@ -57,6 +140,8 @@ pub fn of(w: &Workspace) -> Option<DocStyle> {
 /// 每帧开头调用：这一帧画的是哪篇文档，就盖上它的样式；别的页回到主题。按这一帧的状态推，不在开关文档时切，
 /// 跟手返回一开始就换了页，主页不能带着文档的样式画。
 pub fn begin(w: &Workspace) {
+    // 助手也要知道这一帧画的是哪篇文档（它的预览和底部玻璃只在发起它的那篇里出）。
+    super::assist::frame(if w.view == View::Doc { w.current.clone() } else { None });
     let style = of(w);
     let scale = if w.view == View::Doc { w.current.as_ref().and_then(|id| w.entries.iter().find(|e| &e.id == id)).map_or(0, |e| size_percent(e.meta.text_size)) } else { 0 };
     FACTOR.with(|f| f.set(if scale == 0 { 1. } else { scale as f32 / 100. }));
@@ -85,25 +170,48 @@ thread_local! { static SIZING: std::cell::Cell<bool> = const { std::cell::Cell::
 pub fn sizing() -> bool { SIZING.with(|s| s.get()) }
 pub fn set_sizing(on: bool) { SIZING.with(|s| s.set(on)); }
 /// 文字大小：屏幕中间浮出的一颗胶囊，八个由小到大的圆点，当前那档是主色；背后略压暗，点别处收起。
+/// 点一颗或按住在胶囊上左右滑都能换档，每换一档轻轻震一下（照系统的选择触感）。
 pub fn size_capsule(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement> {
     if !sizing() || w.view != View::Doc { set_sizing(false); return None; }
     let id = w.current.clone()?;
     let now = match w.entries.iter().find(|e| e.id == id)?.meta.text_size { 0 => 3, n => n.min(8) };
     let theme = crate::theme::Theme::bg_overlay;
-    let mut row = div().id("text-size").occlude().h(px(60.)).px(px(14.)).rounded_full().bg(crate::theme::raised(theme())).shadow(crate::theme::shadow_dialog()).flex().items_center();
+    // 胶囊居中：左右各 14 的边，八格各 34 宽。按下的横坐标换算成第几档。
+    const CELL: f32 = 34.;
+    const EDGE: f32 = 14.;
+    let step_at = |x: Pixels, window: &Window| -> u8 {
+        let left = (f32::from(window.viewport_size().width) - (EDGE * 2. + CELL * 8.)) / 2. + EDGE;
+        (((f32::from(x) - left) / CELL).floor().clamp(0., 7.) as u8) + 1
+    };
+    let set = move |w: &mut Workspace, id: &str, step: u8, cx: &mut Context<Workspace>| {
+        let now = match w.entries.iter().find(|e| e.id == id).map(|e| e.meta.text_size) { Some(0) | None => 3, Some(n) => n.min(8) };
+        if step == now { return; }
+        // 第三档就是原样，不记。
+        let stored = if step == 3 { 0 } else { step };
+        if let Err(e) = w.store.update_meta(id, |m| m.text_size = stored) { return w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx); }
+        if let Some(e) = w.entries.iter_mut().find(|e| e.id == id) { e.meta.text_size = stored; }
+        super::glass::selection_haptic();
+        cx.notify();
+    };
+    let mut row = div().id("text-size").occlude().h(px(60.)).px(px(EDGE)).rounded_full().bg(crate::theme::raised(theme())).shadow(crate::theme::shadow_dialog()).flex().items_center();
     for step in 1..=8u8 {
         let d = 7. + 2.2 * (step - 1) as f32;
-        let id = id.clone();
-        row = row.child(div().id(("text-size-step", step as usize)).w(px(34.)).h(px(60.)).flex().items_center().justify_center()
-            .child(div().size(px(d)).rounded_full().bg(if step == now { crate::theme::Theme::primary() } else { crate::theme::Theme::text_disabled() }))
-            .on_click(cx.listener(move |w, _, _, cx| {
-                // 第三档就是原样，不记。
-                let step = if step == 3 { 0 } else { step };
-                if let Err(e) = w.store.update_meta(&id, |m| m.text_size = step) { return w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx); }
-                if let Some(e) = w.entries.iter_mut().find(|e| e.id == id) { e.meta.text_size = step; }
-                cx.notify();
-            })));
+        row = row.child(div().w(px(CELL)).h(px(60.)).flex().items_center().justify_center()
+            .child(div().size(px(d)).rounded_full().bg(if step == now { crate::theme::Theme::primary() } else { crate::theme::Theme::text_disabled() })));
     }
+    let (down, moved) = (id.clone(), id);
+    let row = row
+        .on_mouse_down(MouseButton::Left, cx.listener(move |w, ev: &MouseDownEvent, window, cx| { cx.stop_propagation(); set(w, &down, step_at(ev.position.x, window), cx); }))
+        // 手指在胶囊上平移，GPUI 给的是滚动事件：位置一直是按下的那点，手指走了多少在 delta 里，自己累加出手指现在的横坐标。
+        .on_scroll(cx.listener(move |w, ev: &ScrollEvent, window, cx| {
+            cx.stop_propagation();
+            thread_local! { static FINGER: std::cell::Cell<f32> = const { std::cell::Cell::new(0.) }; }
+            if ev.source != ScrollSource::Touch { return; }
+            let dx = match ev.delta { ScrollDelta::Pixels(d) => f32::from(d.x), ScrollDelta::Lines(d) => d.x * 20. };
+            let x = FINGER.with(|f| { let x = if ev.touch_phase == TouchPhase::Started { f32::from(ev.position.x) + dx } else { f.get() + dx }; f.set(x); x });
+            if matches!(ev.touch_phase, TouchPhase::Started | TouchPhase::Moved) { set(w, &moved, step_at(px(x), window), cx); }
+        }))
+        .on_click(|_, _, cx| cx.stop_propagation());
     Some(deferred(div().id("text-size-mask").absolute().inset_0().occlude().bg(black().opacity(0.12)).flex().items_center().justify_center()
         .on_click(cx.listener(|_, _, _, cx| { set_sizing(false); cx.notify(); })).child(row)).with_priority(3).into_any_element())
 }
@@ -359,7 +467,7 @@ pub const GALLERY: [(&str, &str, &str, Motif, u32, u32); 12] = [
     ("ink", "墨点", "Ink Dots", Motif::Polka, 0xfbfaf7, 0x2b2b2b),
 ];
 /// 没挑颜色时胶带的颜色。
-pub const TAPE: &str = "#C050D8";
+pub const TAPE: &str = "#A700B7";
 
 pub fn divider_styled() -> bool { CUR.with(|c| c.borrow().as_ref().is_some_and(|s| s.divider.is_some())) }
 
@@ -376,15 +484,19 @@ pub fn rule_glyphs() -> RuleGlyphs {
             Some(n) if let Some(tape) = super::washi::get(n) => rgb(tape.tint).into(),
             // 经典胶带：浅底的取花色，深底的取底色。
             Some(n) => GALLERY.iter().find(|g| g.0 == n).map(|g| { let b: Hsla = rgb(g.4).into(); if b.l > 0.75 { rgb(g.5).into() } else { b } }).unwrap_or_else(|| rgb(0x5b78c2).into()),
-            None => color.as_deref().and_then(hex).or_else(|| hex(TAPE)).unwrap_or_else(|| rgb(0xC050D8).into()),
+            None => color.as_deref().and_then(hex).unwrap_or_else(|| rgb(0xa700b7).into()),
         }),
         Some(DividerStyle::Doodle) => RuleGlyphs::Doodle,
         None => RuleGlyphs::Line,
     }
 }
 
-/// 一条胶带或胶带的一块样张（面板里用）。画好的放在缓存目录，按图案、颜色、大小记名字。
-pub fn tape_image(pattern: &str, color: &str, tile: bool) -> Option<String> {
+pub(super) fn tape_repeats(pattern: &str) -> bool {
+    pattern.strip_prefix("image:").is_some_and(|id| id.starts_with("file:") || super::washi::get(id).is_some())
+}
+
+/// 图片胶带返回同一份原图。程序画的花纹按样张或正文高度缓存。
+pub fn tape_image(pattern: &str, color: &str, height: Option<u32>) -> Option<String> {
     use resvg::tiny_skia::*;
     let image = pattern.strip_prefix("image:");
     if let Some(name) = image {
@@ -392,12 +504,10 @@ pub fn tape_image(pattern: &str, color: &str, tile: bool) -> Option<String> {
         if let Some(file) = name.strip_prefix("file:") { let p = photos_dir().join(file); return p.exists().then(|| p.to_string_lossy().to_string()); }
         if let Some(tape) = super::washi::get(name) { return tape.path(); }
     }
-    let version = if image.is_some() { 4 } else { 5 };
-    let path = cache_dir().join(format!("tape-{}-{}-{}-{version}.png", pattern.replace(':', "_"), color.trim_start_matches('#'), tile as u8));
+    let path = cache_dir().join(format!("tape-{}-{}-{}-6.png", pattern.replace(':', "_"), color.trim_start_matches('#'), height.unwrap_or_default()));
     if path.exists() { return Some(path.to_string_lossy().to_string()); }
-    // 样张 110×70pt，一个点 3 个像素。长条按 480×16pt 画、一个点 9 个像素：画的时候按高度铺满（最粗的胶带 48pt 也不糊）、两头裁掉。
-    let u = if tile { 3f32 } else { 9. };
-    let (w, h) = if tile { (330u32, 210u32) } else { (4320u32, 144u32) };
+    // 3x 画布。正文按胶带实际高度画，花纹的大小不跟胶带一起放大。
+    let (w, h, u) = height.map_or((360, 240, 3.), |h| (2160, h * 3, 1.7));
     let (wf, hf) = (w as f32, h as f32);
     let mut pm = Pixmap::new(w, h)?;
     let all = Rect::from_xywh(0., 0., wf, hf)?;
@@ -418,8 +528,8 @@ pub fn tape_image(pattern: &str, color: &str, tile: bool) -> Option<String> {
         let mut pb = PathBuilder::new();
         match pattern {
             "lattice" => {
-                pm.fill_rect(all, &light, Transform::identity(), None);
-                let (dx, dy) = (20. * u, 12. * u);
+                pm.fill_rect(all, &solid(rgba(0xffffff, 126)), Transform::identity(), None);
+                let (dx, dy) = (26. * u, 14.8 * u);
                 for col in -1..=(wf / dx).ceil() as i32 {
                     let x = col as f32 * dx;
                     pb.move_to(x, 0.); pb.line_to(x, hf);
@@ -438,7 +548,7 @@ pub fn tape_image(pattern: &str, color: &str, tile: bool) -> Option<String> {
                 pm.fill_path(&pb.finish()?, &light, FillRule::Winding, Transform::identity(), None);
             }
             "diamonds" => {
-                let (a, b) = (13. * u, 15. * u);
+                let (a, b) = (22. * u, 25. * u);
                 let mut faces = [PathBuilder::new(), PathBuilder::new(), PathBuilder::new()];
                 let (mut y, mut row) = (0., 0);
                 while y < hf + b {
@@ -462,23 +572,25 @@ pub fn tape_image(pattern: &str, color: &str, tile: bool) -> Option<String> {
                 }
             }
             "chevron" => {
-                let a = 17. * u;
-                let mut y = -a; while y < hf + a { let (mut x, mut up) = (0., false); pb.move_to(0., y); while x < wf { x += a; up = !up; pb.line_to(x, if up { y + a } else { y }); } y += 6.5 * u; }
-                pm.stroke_path(&pb.finish()?, &light, &stroke(2.25), Transform::identity(), None);
+                pm.fill_rect(all, &solid(rgba(0xffffff, 126)), Transform::identity(), None);
+                let a = 58. * u;
+                let mut y = -a; while y < hf + a { let (mut x, mut up) = (0., true); pb.move_to(0., y + a); while x < wf { x += a; up = !up; pb.line_to(x, if up { y + a } else { y }); } y += 7.5 * u; }
+                pm.stroke_path(&pb.finish()?, &solid(rgba(base, 255)), &stroke(2.6), Transform::identity(), None);
             }
             "stripes" => {
-                let mut x = -16. * u;
+                pm.fill_rect(all, &solid(rgba(0xffffff, 126)), Transform::identity(), None);
+                let mut x = -30. * u;
                 while x < wf {
-                    let mut y = -2. * u;
+                    let mut y = -12. * u;
                     pb.move_to(x, y);
                     while y < hf {
-                        pb.line_to(x, y + 7. * u); pb.line_to(x + 12. * u, y + 14. * u);
-                        pb.line_to(x + 12. * u, y + 23. * u); pb.line_to(x, y + 30. * u);
-                        y += 30. * u;
+                        pb.line_to(x, y + 15. * u); pb.line_to(x + 25. * u, y + 29. * u);
+                        pb.line_to(x + 25. * u, y + 48. * u); pb.line_to(x, y + 62. * u);
+                        y += 62. * u;
                     }
-                    x += 6. * u;
+                    x += 8. * u;
                 }
-                pm.stroke_path(&pb.finish()?, &light, &stroke(1.), Transform::identity(), None);
+                pm.stroke_path(&pb.finish()?, &solid(rgba(base, 255)), &stroke(1.3), Transform::identity(), None);
             }
             _ => {}
         }
@@ -722,25 +834,37 @@ fn doodle_variant(kind: Doodle, color: &str) -> Option<(String, f32, f32)> {
 }
 
 /// 胶带的几种大小（宽 pt，None 是整行；高 pt）。照 Craft 量的（录屏 2026-11-19 20:32，1pt = 3px）。
-fn tape_size(rule: Rule) -> (Option<f32>, f32) {
-    match rule { Rule::Dots => (Some(68.), 26.), Rule::Dotted => (Some(188.), 30.), Rule::Line => (Some(262.), 44.), Rule::Thick => (None, 48.), _ => (None, 16.) }
+fn tape_size(rule: Rule) -> (Option<f32>, u32) {
+    match rule { Rule::Dots => (Some(68.), 28), Rule::Dotted => (Some(188.), 40), Rule::Line => (Some(262.), 50), Rule::Thick => (None, 56), _ => (None, 16) }
 }
 
-/// 一条胶带：图案按高度铺开，两头的锯齿是拿纸色的小三角盖出来的。
-fn tape(path: String, w: Option<f32>, h: f32, paper: Hsla) -> Div {
-    let teeth = (h / 4.).round().max(4.) as usize;
-    let tooth = h / teeth as f32;
+/// 一条胶带：图案按高度铺开，两端和图库使用同样的撕边轮廓。
+fn tape(path: String, repeat: bool, w: Option<f32>, h: f32, paper: Hsla) -> Div {
+    let path = std::path::PathBuf::from(path);
+    let art = if repeat {
+        let source = Resource::from(path);
+        canvas(move |_, window, cx| window.use_asset::<ImgResourceLoader>(&source, cx), |bounds, loaded, window, _| {
+            let Some(Ok(image)) = loaded else { return; };
+            let size = image.size(0);
+            let spans = super::washi::tile_spans(f64::from(f32::from(bounds.size.width)), f64::from(f32::from(bounds.size.height)), f64::from(size.width.0), f64::from(size.height.0));
+            for (x, width) in spans {
+                let tile = Bounds::new(point(bounds.left() + px(x as f32), bounds.top()), gpui::size(px(width as f32), bounds.size.height));
+                let _ = window.paint_image(bounds, tile, Corners::default(), image.clone(), 0, false);
+            }
+        }).absolute().inset_0().into_any_element()
+    } else {
+        img(path).size_full().object_fit(ObjectFit::Cover).into_any_element()
+    };
     div().relative().h(px(h)).flex_none().overflow_hidden().map(|d| match w { Some(w) => d.w(px(w)).max_w_full(), None => d.w_full() })
-        .child(img(std::path::PathBuf::from(path)).size_full().object_fit(ObjectFit::Cover))
+        .child(art)
         .child(canvas(|_, _, _| {}, move |b, _, window, _| {
-            for i in 0..teeth {
-                let y = b.top() + px(tooth * i as f32);
-                for (x, dx) in [(b.left(), px(tooth * 0.75)), (b.right(), px(-tooth * 0.75))] {
-                    let mut p = Path::new(point(x, y));
-                    p.line_to(point(x + dx, y + px(tooth / 2.)));
-                    p.line_to(point(x, y + px(tooth)));
-                    window.paint_path(p, paper);
+            for (right, x, direction) in [(false, b.left(), 1.), (true, b.right(), -1.)] {
+                let mut p = Path::new(point(x, b.top()));
+                for (dx, dy) in super::washi::torn_edge(right, h as f64) {
+                    p.line_to(point(x + px(direction * dx as f32), b.top() + px(dy as f32)));
                 }
+                p.line_to(point(x, b.bottom()));
+                window.paint_path(p, paper);
             }
         }).absolute().inset_0())
 }
@@ -752,9 +876,9 @@ pub fn divider(rule: Rule) -> Option<AnyElement> {
     let paper = crate::editor_theme::Theme::bg_body();
     Some(match style.divider.as_ref()? {
         DividerStyle::Tape { pattern, color } => {
-            let path = tape_image(pattern, color.as_deref().unwrap_or(TAPE), false)?;
             let (w, h) = tape_size(rule);
-            div().py(px(if rule == Rule::Plain { 6. } else { 10. })).w_full().flex().items_center().justify_center().child(tape(path, w, h, paper)).into_any_element()
+            let path = tape_image(pattern, color.as_deref().unwrap_or(TAPE), Some(h))?;
+            div().py(px(if rule == Rule::Plain { 6. } else { 10. })).w_full().flex().items_center().justify_center().child(tape(path, tape_repeats(pattern), w, h as f32, paper)).into_any_element()
         }
         DividerStyle::Doodle => {
             let kind = match rule { Rule::Dots => Doodle::Curl, Rule::Dotted => Doodle::Loop, Rule::Line => Doodle::Chain, Rule::Thick => Doodle::Scribble, _ => Doodle::Wave };

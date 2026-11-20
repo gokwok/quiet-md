@@ -9,3 +9,6 @@
 
 /dist-release.*
 .wrangler/
+
+# Unsplash Access Key（只在本机）
+/prototypes/ios/unsplash.key

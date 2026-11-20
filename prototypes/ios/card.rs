@@ -37,6 +37,8 @@ pub fn prefill(draft: Option<Draft>) { PREFILL.with(|p| *p.borrow_mut() = draft)
 
 /// 每帧开头调用：这一帧没有占位，卡片就收起（键盘跟着下去），填的内容清掉。
 pub fn begin(window: &Window) {
+    // 助手的卡片同一个规矩。
+    super::assist::card::begin(window);
     SEEN.with(|s| s.set(false));
     window.on_next_frame(|_, _| if !SEEN.with(|s| s.get()) { hide(); });
 }

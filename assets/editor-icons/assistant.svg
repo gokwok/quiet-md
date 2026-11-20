@@ -1,0 +1,6 @@
+<!-- 本项目绘制（quiet.md: original, MIT）：助手的标记「朱批」，就是应用图标的 ¶（icons/margin.svg 的比例，高 20、居中）。实心，不按 2px 描边。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+  <path d="M16.085 2H9.81a6.209 6.209 0 0 0 0 12.418H16.085Z"/>
+  <rect x="13.078" y="2" width="3.007" height="20"/>
+  <rect x="17.392" y="2" width="3.007" height="20"/>
+</svg>

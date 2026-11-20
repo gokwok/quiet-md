@@ -733,7 +733,11 @@ impl Core {
                 None => Pos::new(core.units().get(1).map(|u| u.id).unwrap_or(TITLE), 0),
             }
         };
-        self.sel = Selection { anchor: fix(self, self.sel.anchor), head: fix(self, self.sel.head) };
+        let (anchor, head) = (fix(self, self.sel.anchor), fix(self, self.sel.head));
+        // If a block was removed, its fallback may be outside the table of the other endpoint.
+        self.sel = if self.cell_sel.is_none() && anchor.block != head.block && self.table_scope(anchor.block) != self.table_scope(head.block) {
+            Selection::caret(head)
+        } else { Selection { anchor, head } };
     }
 
     // ---- primitive mutations (no checkpoint)
@@ -2309,6 +2313,29 @@ impl Core {
         self.normalize();
     }
 
+    /// 助手写好的块，放到 `anchor` 后面，一步撤销。`anchor` 这时还是一个空段落（从 `/` 菜单叫出助手的那一行）
+    /// 就用新块替换它；`anchor` 不在了就放到文末。光标停在最后一块的末尾。返回最后一块。
+    pub fn insert_generated(&mut self, anchor: Option<BlockId>, blocks: Vec<Block>) -> Option<BlockId> {
+        let last = blocks.last()?.id;
+        let anchor = anchor.filter(|a| *a != TITLE && self.path(*a).is_some()).or_else(|| self.doc.blocks.last().map(|b| b.id));
+        self.checkpoint(EditKind::Other);
+        self.break_coalescing();
+        self.block_sel = None;
+        let blank = anchor.and_then(|a| self.block(a)).is_some_and(|b| b.kind == BlockKind::Text && b.text.is_empty() && b.children.is_empty());
+        match anchor {
+            Some(a) => {
+                self.insert_all_after(a, blocks);
+                if blank { self.remove_subtree(a); }
+            }
+            None => self.doc.blocks.extend(blocks),
+        }
+        self.normalize();
+        let end = self.block(last).map_or(0, |b| b.text.len());
+        self.sel = Selection::caret(Pos::new(last, end));
+        self.fix_selection();
+        Some(last)
+    }
+
     pub fn column_ratios(&self, grid: BlockId) -> Vec<f32> {
         self.block(grid)
             .map(|g| g.children.iter().map(|c| if let BlockKind::Column { ratio } = c.kind { ratio } else { 0. }).collect())
@@ -3691,6 +3718,45 @@ mod tests {
         assert_eq!(c.doc.voice_text("v"), "甲\n丙");
         c.undo();
         assert!(c.doc.voiced("v").is_empty());
+    }
+
+    /// 助手写好的块：空段落被替换，别的块留着；锚点不在了放到文末；一步撤销。
+    #[test]
+    fn generated_blocks_replace_the_blank_anchor() {
+        let blocks = || crate::paste::markdown_to_blocks("甲\n乙", crate::paste::Off::default());
+        let mut c = doc("<title>t</title><p>前</p><p></p><p>后</p>");
+        let blank = id(&c, 2);
+        let last = c.insert_generated(Some(blank), blocks()).unwrap();
+        assert_eq!(xml(&c), "<title>t</title>\n<p>前</p>\n<p>甲</p>\n<p>乙</p>\n<p>后</p>\n");
+        assert_eq!(c.sel, Selection::caret(Pos::new(last, "乙".len())));
+        c.undo();
+        assert_eq!(xml(&c), "<title>t</title>\n<p>前</p>\n<p></p>\n<p>后</p>\n");
+        let first = id(&c, 1);
+        c.insert_generated(Some(first), blocks());
+        assert_eq!(xml(&c), "<title>t</title>\n<p>前</p>\n<p>甲</p>\n<p>乙</p>\n<p></p>\n<p>后</p>\n");
+        c.undo();
+        c.insert_generated(Some(BlockId::new()), blocks());
+        assert!(xml(&c).ends_with("<p>后</p>\n<p>甲</p>\n<p>乙</p>\n"));
+    }
+
+    /// 生成标记：存盘原样往返，导出 Markdown 时去掉；全文跟着块走，块里接着打的字也算。
+    #[test]
+    fn generated_text_follows_its_blocks() {
+        let src = "<title>t</title>\n<p>前</p>\n<p><span gen=\"g\">甲<span voice=\"v\">乙</span></span><span voice=\"v\">丙</span></p>\n<p><span voice=\"v\">丁</span><span gen=\"g\"><span voice=\"v\">戊</span>己</span></p>\n";
+        let mut c = doc(src);
+        assert_eq!(xml(&c), src);
+        assert_eq!(crate::markdown::to_markdown(&c.doc), "# t\n\n前\n\n甲乙丙\n\n丁戊己\n");
+        assert_eq!(c.doc.gen_text("g"), "甲乙丙\n丁戊己");
+        assert_eq!(c.doc.voice_text("v"), "乙丙\n丁戊");
+        // 在生成的段落末尾接着打字：新字不带标记，但这一块的全文变了。
+        let (a, b) = (id(&c, 2), id(&c, 3));
+        c.sel = Selection::caret(Pos::new(a, c.block(a).unwrap().text.len()));
+        c.insert_text("！");
+        assert!(xml(&c).contains("丙</span>！</p>"), "{}", xml(&c));
+        assert_eq!(c.doc.gen_text("g"), "甲乙丙！\n丁戊己");
+        c.delete_block(b);
+        assert_eq!(c.doc.gen_text("g"), "甲乙丙！");
+        assert_eq!(c.doc.gen_blocks("g"), [a]);
     }
 
     #[test]
