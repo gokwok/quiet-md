@@ -160,7 +160,7 @@ fn thumb_block_in(b: &crate::model::Block, depth: usize, inherited: Hsla, quote:
             });
             return node.when_some(caption.as_ref().filter(|c| !c.is_empty()), |d, caption| d.child(div().w_full().max_w_full().when_some(*width, |d, w| d.w(px(w * s))).mt(px(6. * s)).text_size(px(13. * s)).line_height(px(20. * s)).text_color(Theme::text_caption()).text_center().child(caption.clone()))).into_any_element();
         }
-        BlockKind::Divider => return node.h(px(25. * s)).justify_center().child(div().h(px(s)).w_full().bg(Theme::line_divider())).into_any_element(),
+        BlockKind::Divider { .. } => return node.h(px(25. * s)).justify_center().child(div().h(px(s)).w_full().bg(Theme::line_divider())).into_any_element(),
         BlockKind::Grid => node = node.flex_row().gap(px(20. * s)),
         BlockKind::Column { .. } => node = node.flex_1(),
         BlockKind::Quote => node = node.relative().py(px(bs::QUOTE_PAD * s)).pl(px(bs::QUOTE_INSET * s))

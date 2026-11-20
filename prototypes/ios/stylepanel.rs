@@ -6,14 +6,15 @@ use gpui::*;
 use objc2::{ClassType, define_class, msg_send};
 use objc2::runtime::{AnyClass, AnyObject, NSObject};
 
-use super::panel::{Art, Card, Fill, Node, Tile, Trailing};
+use super::panel::{Art, Card, Fill, Node, Strip, Tile, Trailing};
 use super::style::{hex, to_hex};
+use super::washi;
 use crate::app::{View, Workspace};
 use crate::settings::tr;
 use crate::store::{Backdrop, DividerStyle, DocStyle};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Page { Main, Text, Font, Paper, Background, Divider, Pattern, Gallery }
+pub enum Page { Main, Text, Font, Paper, Background, Divider, Pattern, Gallery, Washi }
 
 thread_local! { static PAGE: Cell<Option<Page>> = const { Cell::new(None) }; }
 // 背景页停在哪一段（没有背景时也能停在别的段上挑）。
@@ -22,6 +23,28 @@ thread_local! { static TAB: Cell<Option<usize>> = const { Cell::new(None) }; }
 pub fn is_open() -> bool { PAGE.with(|p| p.get()).is_some() }
 pub fn open() { PAGE.with(|p| p.set(Some(Page::Main))); TAB.with(|t| t.set(None)); }
 pub fn close() { PAGE.with(|p| p.set(None)); }
+
+fn washi_strips(tapes: &[washi::Tape], pattern: &str, cols: usize) -> Node {
+    let selected = pattern.strip_prefix("image:");
+    let items = tapes.iter().filter_map(|t| Some(Strip {
+        fill: Fill::Image(t.path()?),
+        title: t.name.into(),
+        picked: selected == Some(t.id),
+        act: format!("pat-washi:{}", t.id),
+    })).collect();
+    Node::Strips { items, cols }
+}
+
+fn classic_washi_strips(pattern: &str) -> Node {
+    let classic = super::style::GALLERY.iter().map(|t| (t.0, t.1, t.2))
+        .chain(super::style::TAPES.into_iter().zip(super::style::TAPE_NAMES).map(|(id, (zh, en))| (id, zh, en)));
+    let items = classic.filter_map(|(id, zh, en)| {
+        let key = format!("image:{id}");
+        Some(Strip { fill: Fill::Image(super::style::tape_image(&key, "", true)?), title: tr(zh, en).into(),
+            picked: pattern == key, act: format!("pat-washi:{id}") })
+    }).collect();
+    Node::Strips { items, cols: 2 }
+}
 
 // 色板：Craft 实测（录屏里量的，对上了 Tailwind v4 的色阶）。每组第一颗是「默认」，不在这里。
 const TEXT: [u32; 10] = [0x202225, 0xf4f4f5, 0x721378, 0x1c398e, 0x104e64, 0x0b4f4a, 0x006045, 0xa65f00, 0x82181a, 0x861043];
@@ -140,7 +163,8 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
             let kind = match &style.divider { None => 0, Some(DividerStyle::Tape { .. }) => 1, Some(DividerStyle::Doodle) => 2 };
             let mut v = vec![
                 Node::Header { title: tr("分隔符样式", "Divider style").into(), warn: false, reset: style.divider.is_some().then(|| "div-kind:0".to_string()), close: back },
-                Node::Segments { symbols: vec![], titles: vec![tr("线", "Line").into(), tr("和纸胶带", "Washi tape").into(), tr("涂鸦", "Doodle").into()], picked: kind, act: "div-kind:".into() },
+                // 照 Craft：选中那段写字，别的只画图标。
+                Node::Segments { symbols: vec!["line.3.horizontal", "bandage", "signature"], titles: vec![tr("线", "Line").into(), tr("和纸胶带", "Washi tape").into(), tr("涂鸦", "Doodle").into()], picked: kind, act: "div-kind:".into() },
             ];
             if let Some(DividerStyle::Tape { pattern, color }) = &style.divider
                 && let Some(tile) = super::style::tape_image(pattern, color.as_deref().unwrap_or(super::style::TAPE), true)
@@ -163,9 +187,22 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 v.push(Node::Swatches { fills: TAPE.iter().map(|v| Fill::Color(c(*v))).collect(), picked, act: "pat-color:".into(), custom: Some(("custom:tape".into(), picked.is_none(), hex(&color).unwrap_or(c(TAPE[0])))) });
             } else {
                 v.push(Node::Caption(tr("建议", "Suggested").into()));
-                v.push(Node::Thumbs { fills: super::style::TAPES.iter().filter_map(|p| super::style::tape_image(&format!("image:{p}"), "", true).map(Fill::Image)).collect(), picked: super::style::TAPES.iter().position(|p| pattern.strip_prefix("image:") == Some(*p)), act: "pat-image:".into() });
+                v.push(washi_strips(&washi::SUGGESTED, &pattern, 1));
+                v.push(Node::Wide(vec![("square.and.arrow.up", tr("上传", "Upload").into(), "pat-upload".into()), ("photo.on.rectangle.angled", tr("和纸图库", "Washi gallery").into(), "page:washi".into())]));
             }
             v
+        }
+        Page::Washi => {
+            let pattern = match &style.divider { Some(DividerStyle::Tape { pattern, .. }) => pattern.as_str(), _ => "" };
+            let max_height = f64::from(super::layout().2.height) * 0.62;
+            vec![
+                Node::Header { title: tr("和纸胶带", "Washi tape").into(), warn: false, reset: None, close: "page:pattern".into() },
+                Node::Scroll { nodes: vec![
+                    washi_strips(washi::GALLERY, pattern, 2),
+                    Node::Caption(tr("经典胶带", "Classic tapes").into()),
+                    classic_washi_strips(pattern),
+                ], max_height },
+            ]
         }
         Page::Gallery => {
             let card = |name: &str, s: &DocStyle| Card {
@@ -270,8 +307,8 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
     let ix: usize = arg.parse().unwrap_or(0);
     match name {
         "page" => {
-            PAGE.with(|p| p.set(Some(match arg { "text" => Page::Text, "font" => Page::Font, "paper" => Page::Paper, "background" => Page::Background, "divider" => Page::Divider, "pattern" => Page::Pattern, "gallery" => Page::Gallery, _ => Page::Main })));
-            TAB.with(|t| t.set(None));
+            let previous = PAGE.with(|p| p.replace(Some(match arg { "text" => Page::Text, "font" => Page::Font, "paper" => Page::Paper, "background" => Page::Background, "divider" => Page::Divider, "pattern" => Page::Pattern, "gallery" => Page::Gallery, "washi" => Page::Washi, _ => Page::Main })));
+            TAB.with(|t| t.set((previous == Some(Page::Washi) && arg == "pattern").then_some(1)));
             cx.notify();
         }
         "text" => edit(w, cx, |s| s.text = ix.checked_sub(1).and_then(|i| TEXT.get(i)).map(|v| h(*v))),
@@ -325,11 +362,29 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
             _ => None,
         }),
         "pat-tab" => { TAB.with(|t| t.set(Some(ix))); cx.notify(); }
-        "pat" | "pat-image" | "pat-color" => edit(w, cx, |s| {
+        "pat-washi" if washi::get(arg).is_some() || super::style::TAPES.contains(&arg) || super::style::GALLERY.iter().any(|g| g.0 == arg) => {
+            let pattern = format!("image:{arg}");
+            edit(w, cx, |s| { let color = match &s.divider { Some(DividerStyle::Tape { color, .. }) => color.clone(), _ => None }; s.divider = Some(DividerStyle::Tape { pattern, color }); });
+        }
+        // 上传一张图当胶带：和背景照片一样拷进文档库，胶带记 `image:file:<文件名>`。
+        "pat-upload" => {
+            let rx = super::prompt_for_images(cx, PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+            cx.spawn_in(window, async move |this, cx| {
+                let Ok(Ok(Some(paths))) = rx.await else { return; };
+                let Some(from) = paths.into_iter().next() else { return; };
+                let _ = this.update_in(cx, |w, _, cx| {
+                    let ext = from.extension().and_then(|s| s.to_str()).unwrap_or("jpg").to_ascii_lowercase();
+                    let file = format!("{}.{ext}", uuid::Uuid::new_v4());
+                    let dir = super::style::photos_dir();
+                    if std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&from, dir.join(&file))).is_err() { return w.show_toast_kind(crate::ui::ToastKind::Error, tr("没能存下这张图片", "Couldn’t save the image"), cx); }
+                    edit(w, cx, |s| { let color = match &s.divider { Some(DividerStyle::Tape { color, .. }) => color.clone(), _ => None }; s.divider = Some(DividerStyle::Tape { pattern: format!("image:file:{file}"), color }); });
+                });
+            }).detach();
+        }
+        "pat" | "pat-color" => edit(w, cx, |s| {
             let (pattern, color) = match &s.divider { Some(DividerStyle::Tape { pattern, color }) => (pattern.clone(), color.clone()), _ => (super::style::PATTERNS[0].to_string(), None) };
             s.divider = Some(match name {
                 "pat" => DividerStyle::Tape { pattern: super::style::PATTERNS.get(ix).unwrap_or(&"plain").to_string(), color },
-                "pat-image" => DividerStyle::Tape { pattern: format!("image:{}", super::style::TAPES.get(ix).unwrap_or(&"water")), color },
                 _ => DividerStyle::Tape { pattern: if pattern.starts_with("image:") { super::style::PATTERNS[0].to_string() } else { pattern }, color: TAPE.get(ix).map(|v| h(*v)) },
             });
         }),

@@ -1,0 +1,2 @@
+<!-- 本项目绘制：分隔线「粗线」，和 Nucleo UI Outline 18 同样 18 的格子，圆头的粗描边。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" view-box="0 0 18 18" fill="none"><line x1="3.25" y1="9" x2="14.75" y2="9" stroke="currentColor" stroke-linecap="round" stroke-width="2.75"></line></svg>

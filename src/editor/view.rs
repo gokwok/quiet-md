@@ -997,7 +997,7 @@ impl Editor {
             SlashKind::Button => return self.insert_new_button(action, window, cx),
             SlashKind::Reminder => return self.insert_new_reminder(window, cx),
             SlashKind::Divider => {
-                let k = BlockKind::Divider;
+                let k = BlockKind::Divider { rule: Rule::Plain };
                 let nid = self.core.insert_block(Block::new(k, RichText::default()));
                 let p = self.core.ensure_paragraph_after(nid);
                 self.core.sel = Selection::caret(Pos::new(p, 0));

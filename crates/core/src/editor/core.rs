@@ -718,8 +718,8 @@ impl Core {
     }
 
     /// Clamp the selection to existing blocks / valid char boundaries.
+    /// Preserve hidden endpoints so `reveal_caret` can unfold them after undo.
     pub fn fix_selection(&mut self) {
-        let us = self.units();
         let fix = |core: &Core, p: Pos| -> Pos {
             match core.text_of(p.block) {
                 Some(t) => {
@@ -729,8 +729,8 @@ impl Core {
                     }
                     Pos::new(p.block, o)
                 }
-                None if us.iter().any(|u| u.id == p.block) => Pos::new(p.block, 0),
-                None => Pos::new(us.get(1).map(|u| u.id).unwrap_or(TITLE), 0),
+                None if core.kind_of(p.block).is_some_and(|kind| !kind.is_container() && !matches!(kind, BlockKind::Table(_))) => Pos::new(p.block, 0),
+                None => Pos::new(core.units().get(1).map(|u| u.id).unwrap_or(TITLE), 0),
             }
         };
         self.sel = Selection { anchor: fix(self, self.sel.anchor), head: fix(self, self.sel.head) };
@@ -2118,6 +2118,30 @@ impl Core {
         id
     }
 
+    /// 键盘上方「——」选了一种分隔线：光标在空段落上时插在这一段前面，光标留在这段；
+    /// 不然插在光标所在块的后面，再跟一个空段落，光标放过去（照 Craft）。
+    pub fn insert_divider(&mut self, rule: Rule) -> BlockId {
+        self.checkpoint(EditKind::Other);
+        self.break_coalescing();
+        let at = self.sel.head.block;
+        let b = Block::new(BlockKind::Divider { rule }, RichText::default());
+        let id = b.id;
+        let empty = at != TITLE && self.block(at).is_some_and(|x| matches!(x.kind, BlockKind::Text) && x.text.is_empty() && x.children.is_empty());
+        self.block_sel = None;
+        self.cell_sel = None;
+        if empty {
+            self.insert_before(at, b);
+            self.sel = Selection::caret(Pos::new(at, 0));
+        } else {
+            self.insert_after(at, b);
+            let p = Block::text("");
+            let pid = p.id;
+            self.insert_after(id, p);
+            self.sel = Selection::caret(Pos::new(pid, 0));
+        }
+        id
+    }
+
     /// 页面 / 卡片: a new, empty sub-page at the caret (an empty paragraph or
     /// list line becomes it), the caret in its title.
     pub fn insert_page(&mut self, card: bool) -> BlockId {
@@ -3104,7 +3128,7 @@ impl Core {
         let id = p.block;
         let path = self.path(id).unwrap();
         let (list, i) = container_mut(&mut self.doc.blocks, &path).unwrap();
-        let old = std::mem::replace(&mut list[i], Block::new(BlockKind::Divider, RichText::default()));
+        let old = std::mem::replace(&mut list[i], Block::new(BlockKind::Divider { rule: Rule::Plain }, RichText::default()));
         let mut nb = Block::new(BlockKind::Text, tail);
         nb.children = old.children;
         let nid = nb.id;
@@ -3802,6 +3826,22 @@ mod tests {
         assert!(c.block(h).unwrap().folded);
         assert_eq!(c.doc.icon.as_deref(), Some("🐱"));
         assert!(xml(&c).contains("<p>a</p>"), "{}", xml(&c));
+    }
+
+    #[test]
+    fn undo_preserves_the_folded_table_selection_ending_at_a_divider() {
+        let mut c = doc("<title>T</title><h1>h</h1><table><tbody><tr><td><p>a</p><hr style=\"thick\"/></td></tr></tbody></table>");
+        let heading = id(&c, 1);
+        let selection = Selection { anchor: Pos::new(id(&c, 2), 1), head: Pos::new(id(&c, 3), 0) };
+        c.sel = selection;
+        c.insert_divider(Rule::Dotted);
+        c.toggle_fold(heading);
+        assert!(c.undo());
+        assert_eq!(c.sel, selection);
+        assert!(c.block(heading).unwrap().folded);
+        c.reveal_caret();
+        assert!(!c.block(heading).unwrap().folded);
+        assert!(c.units().iter().any(|u| u.id == selection.head.block));
     }
 
     #[test]

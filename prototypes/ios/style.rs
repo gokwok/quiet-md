@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use gpui::{prelude::FluentBuilder as _, *};
 
 use crate::app::{View, Workspace};
+use crate::model::Rule;
 use crate::store::{Backdrop, DividerStyle, DocStyle};
 
 thread_local! { static CUR: RefCell<Option<DocStyle>> = const { RefCell::new(None) }; }
@@ -256,28 +257,79 @@ pub fn photos_dir() -> std::path::PathBuf { crate::store::Store::root_dir().join
 
 // ---- 分隔符：和纸胶带、涂鸦
 
-/// 胶带的图案（自己画的几种几何纹）和渐变胶带（`image:<名字>`）。
+/// 可换色的几何纸纹。标识也用在已存的文档样式里。
 pub const PATTERNS: [&str; 6] = ["lattice", "dots", "diamonds", "chevron", "stripes", "plain"];
 pub const TAPES: [&str; 3] = ["water", "sunset", "mint"];
+/// 旧版的三条建议胶带，仍可在经典胶带里选择。
+pub const TAPE_NAMES: [(&str, &str); 3] = [("水色", "Water"), ("晚霞", "Sunset"), ("薄荷", "Mint")];
+
+/// 和纸图库的经典胶带：
+/// 名字（存成 `image:<名字>`），中文名，英文名，画法，底色，花色。
+#[derive(Clone, Copy, PartialEq)]
+pub enum Motif { Gingham, Waves, Polka, Checker, Confetti, Plaid, Blossom, Zigzag, Stars, Bands, Kraft }
+pub const GALLERY: [(&str, &str, &str, Motif, u32, u32); 12] = [
+    ("gingham", "蓝白格", "Blue Gingham", Motif::Gingham, 0xf3f6fc, 0x5f84cc),
+    ("waves", "青海波", "Indigo Waves", Motif::Waves, 0x2e4a7a, 0xdde7f5),
+    ("polka", "奶油圆点", "Cream Polka", Motif::Polka, 0xf6edd9, 0xe08a6b),
+    ("checker", "鼠尾草棋盘", "Sage Checker", Motif::Checker, 0xe3eadb, 0x98ad85),
+    ("confetti", "彩纸屑", "Confetti", Motif::Confetti, 0xfffaf1, 0xe25d5d),
+    ("plaid", "红格呢", "Red Plaid", Motif::Plaid, 0xc44b4b, 0x2a2626),
+    ("blossom", "小碎花", "Little Blossoms", Motif::Blossom, 0xfbe4ea, 0xdc7a96),
+    ("zigzag", "向阳折线", "Sunny Zigzag", Motif::Zigzag, 0xf5cf5c, 0xfffbe8),
+    ("stars", "星夜", "Starry Night", Motif::Stars, 0x232f55, 0xf2d68a),
+    ("matcha", "抹茶条纹", "Matcha Stripes", Motif::Bands, 0xd4e3b8, 0x86a866),
+    ("kraft", "牛皮纸", "Kraft Paper", Motif::Kraft, 0xc6a379, 0x8d6a45),
+    ("ink", "墨点", "Ink Dots", Motif::Polka, 0xfbfaf7, 0x2b2b2b),
+];
 /// 没挑颜色时胶带的颜色。
 pub const TAPE: &str = "#C050D8";
 
 pub fn divider_styled() -> bool { CUR.with(|c| c.borrow().as_ref().is_some_and(|s| s.divider.is_some())) }
 
+/// 工具条上「——」和样式板用哪一套图标：线、和纸胶带（带胶带的颜色）还是涂鸦。
+pub enum RuleGlyphs { Line, Tape(Hsla), Doodle }
+pub fn rule_glyphs() -> RuleGlyphs {
+    match current().and_then(|s| s.divider) {
+        Some(DividerStyle::Tape { pattern, color }) => RuleGlyphs::Tape(match pattern.strip_prefix("image:") {
+            // 图片胶带：取它中间那一色。
+            Some("sunset") => rgb(0xe06666).into(),
+            Some("mint") => rgb(0x6cc5b0).into(),
+            Some("water") => rgb(0x5b78c2).into(),
+            Some(n) if n.starts_with("file:") => crate::theme::Theme::icon(),
+            Some(n) if let Some(tape) = super::washi::get(n) => rgb(tape.tint).into(),
+            // 经典胶带：浅底的取花色，深底的取底色。
+            Some(n) => GALLERY.iter().find(|g| g.0 == n).map(|g| { let b: Hsla = rgb(g.4).into(); if b.l > 0.75 { rgb(g.5).into() } else { b } }).unwrap_or_else(|| rgb(0x5b78c2).into()),
+            None => color.as_deref().and_then(hex).or_else(|| hex(TAPE)).unwrap_or_else(|| rgb(0xC050D8).into()),
+        }),
+        Some(DividerStyle::Doodle) => RuleGlyphs::Doodle,
+        None => RuleGlyphs::Line,
+    }
+}
+
 /// 一条胶带或胶带的一块样张（面板里用）。画好的放在缓存目录，按图案、颜色、大小记名字。
 pub fn tape_image(pattern: &str, color: &str, tile: bool) -> Option<String> {
     use resvg::tiny_skia::*;
-    let path = cache_dir().join(format!("tape-{}-{}-{}-3.png", pattern.replace(':', "_"), color.trim_start_matches('#'), tile as u8));
+    let image = pattern.strip_prefix("image:");
+    if let Some(name) = image {
+        // 上传的照片放在背景图片的目录，随文档库一起移动。
+        if let Some(file) = name.strip_prefix("file:") { let p = photos_dir().join(file); return p.exists().then(|| p.to_string_lossy().to_string()); }
+        if let Some(tape) = super::washi::get(name) { return tape.path(); }
+    }
+    let version = if image.is_some() { 4 } else { 5 };
+    let path = cache_dir().join(format!("tape-{}-{}-{}-{version}.png", pattern.replace(':', "_"), color.trim_start_matches('#'), tile as u8));
     if path.exists() { return Some(path.to_string_lossy().to_string()); }
-    // 一个点 3 个像素。长条 1000×16pt，画的时候按高度铺、两头裁掉；样张 110×70pt。
-    let u = 3f32;
-    let (w, h) = if tile { (330u32, 210u32) } else { (3000u32, 48u32) };
+    // 样张 110×70pt，一个点 3 个像素。长条按 480×16pt 画、一个点 9 个像素：画的时候按高度铺满（最粗的胶带 48pt 也不糊）、两头裁掉。
+    let u = if tile { 3f32 } else { 9. };
+    let (w, h) = if tile { (330u32, 210u32) } else { (4320u32, 144u32) };
     let (wf, hf) = (w as f32, h as f32);
     let mut pm = Pixmap::new(w, h)?;
     let all = Rect::from_xywh(0., 0., wf, hf)?;
     let rgba = |v: u32, a: u8| Color::from_rgba8((v >> 16) as u8, (v >> 8) as u8, v as u8, a);
     let solid = |c: Color| Paint { shader: Shader::SolidColor(c), anti_alias: true, ..Default::default() };
-    if let Some(name) = pattern.strip_prefix("image:") {
+    if let Some(&(_, _, _, motif, base, ink)) = image.and_then(|n| GALLERY.iter().find(|g| g.0 == n)) {
+        pm.fill(rgba(base, 255));
+        draw_motif(&mut pm, motif, base, ink, u)?;
+    } else if let Some(name) = image {
         let (a, b, c) = match name { "sunset" => (0xf6b26b, 0xe06666, 0x8e7cc3), "mint" => (0xb6e3c8, 0x6cc5b0, 0xd9f2e4), _ => (0xa9b8dc, 0x5b78c2, 0xb9c4e2) };
         let shader = LinearGradient::new(Point::from_xy(0., 0.), Point::from_xy(120. * u, 0.), vec![GradientStop::new(0., rgba(a, 255)), GradientStop::new(0.5, rgba(b, 255)), GradientStop::new(1., rgba(c, 255))], SpreadMode::Reflect, Transform::identity())?;
         pm.fill_rect(all, &Paint { shader, ..Default::default() }, Transform::identity(), None);
@@ -289,26 +341,67 @@ pub fn tape_image(pattern: &str, color: &str, tile: bool) -> Option<String> {
         let mut pb = PathBuilder::new();
         match pattern {
             "lattice" => {
-                let mut x = -hf; while x < wf + hf { pb.move_to(x, 0.); pb.line_to(x + hf * 0.6, hf); pb.move_to(x + hf * 0.6, 0.); pb.line_to(x, hf); x += 8. * u; }
-                let mut y = 4. * u; while y < hf { pb.move_to(0., y); pb.line_to(wf, y); y += 8. * u; }
-                pm.stroke_path(&pb.finish()?, &light, &stroke(0.8), Transform::identity(), None);
+                pm.fill_rect(all, &light, Transform::identity(), None);
+                let (dx, dy) = (20. * u, 12. * u);
+                for col in -1..=(wf / dx).ceil() as i32 {
+                    let x = col as f32 * dx;
+                    pb.move_to(x, 0.); pb.line_to(x, hf);
+                    let mut y = (col.rem_euclid(2) as f32 - 2.) * dy;
+                    while y < hf + dy {
+                        pb.move_to(x + dx, y - dy); pb.line_to(x, y); pb.line_to(x + dx, y + dy);
+                        y += 2. * dy;
+                    }
+                }
+                pm.stroke_path(&pb.finish()?, &solid(rgba(base, 255)), &stroke(0.9), Transform::identity(), None);
             }
             "dots" => {
-                let (mut y, mut row) = (4. * u, 0); while y < hf { let mut x = if row % 2 == 0 { 4. * u } else { 8. * u }; while x < wf { pb.push_circle(x, y, 0.9 * u); x += 8. * u; } y += 8. * u; row += 1; }
-                pm.fill_path(&pb.finish()?, &dark, FillRule::Winding, Transform::identity(), None);
+                let step = 21. * u;
+                let (mut y, mut row) = (6. * u, 0);
+                while y < hf { let mut x = (0.25 + 0.5 * (row % 2) as f32) * step; while x < wf { pb.push_circle(x, y, 1.6 * u); x += step; } y += step; row += 1; }
+                pm.fill_path(&pb.finish()?, &light, FillRule::Winding, Transform::identity(), None);
             }
             "diamonds" => {
-                let (a, b) = (6. * u, 4. * u);
-                let mut y = 0.; while y < hf + b { let mut x = 0.; while x < wf + a { pb.move_to(x, y - b); pb.line_to(x + a, y); pb.line_to(x, y + b); pb.line_to(x - a, y); pb.close(); x += 2. * a; } y += 2. * b; }
-                pm.fill_path(&pb.finish()?, &light, FillRule::EvenOdd, Transform::identity(), None);
+                let (a, b) = (13. * u, 15. * u);
+                let mut faces = [PathBuilder::new(), PathBuilder::new(), PathBuilder::new()];
+                let (mut y, mut row) = (0., 0);
+                while y < hf + b {
+                    let mut x = (row % 2) as f32 * a;
+                    while x < wf + a {
+                        for (face, points) in faces.iter_mut().zip([
+                            [(0., 0.), (-a, -b / 2.), (0., -b), (a, -b / 2.)],
+                            [(0., 0.), (a, -b / 2.), (a, b / 2.), (0., b)],
+                            [(0., 0.), (0., b), (-a, b / 2.), (-a, -b / 2.)],
+                        ]) {
+                            face.move_to(x + points[0].0, y + points[0].1);
+                            for (dx, dy) in points.into_iter().skip(1) { face.line_to(x + dx, y + dy); }
+                            face.close();
+                        }
+                        x += 2. * a;
+                    }
+                    y += 1.5 * b; row += 1;
+                }
+                for (face, tone) in faces.into_iter().zip([solid(rgba(0xffffff, 150)), light, dark]) {
+                    pm.fill_path(&face.finish()?, &tone, FillRule::Winding, Transform::identity(), None);
+                }
             }
             "chevron" => {
-                let mut y = -4. * u; while y < hf + 4. * u { let (mut x, mut up) = (0., false); pb.move_to(0., y); while x < wf { x += 4. * u; up = !up; pb.line_to(x, if up { y + 4. * u } else { y }); } y += 4. * u; }
-                pm.stroke_path(&pb.finish()?, &light, &stroke(1.), Transform::identity(), None);
+                let a = 17. * u;
+                let mut y = -a; while y < hf + a { let (mut x, mut up) = (0., false); pb.move_to(0., y); while x < wf { x += a; up = !up; pb.line_to(x, if up { y + a } else { y }); } y += 6.5 * u; }
+                pm.stroke_path(&pb.finish()?, &light, &stroke(2.25), Transform::identity(), None);
             }
             "stripes" => {
-                let mut x = -hf; while x < wf { pb.move_to(x, hf); pb.line_to(x + hf, 0.); x += 6. * u; }
-                pm.stroke_path(&pb.finish()?, &light, &stroke(2.), Transform::identity(), None);
+                let mut x = -16. * u;
+                while x < wf {
+                    let mut y = -2. * u;
+                    pb.move_to(x, y);
+                    while y < hf {
+                        pb.line_to(x, y + 7. * u); pb.line_to(x + 12. * u, y + 14. * u);
+                        pb.line_to(x + 12. * u, y + 23. * u); pb.line_to(x, y + 30. * u);
+                        y += 30. * u;
+                    }
+                    x += 6. * u;
+                }
+                pm.stroke_path(&pb.finish()?, &light, &stroke(1.), Transform::identity(), None);
             }
             _ => {}
         }
@@ -316,6 +409,132 @@ pub fn tape_image(pattern: &str, color: &str, tile: bool) -> Option<String> {
     std::fs::create_dir_all(cache_dir()).ok()?;
     std::fs::write(&path, pm.encode_png().ok()?).ok()?;
     Some(path.to_string_lossy().to_string())
+}
+
+/// 图库胶带的花纹，画在已经铺了底色的 `pm` 上；`u` 是一个点几个像素。花纹是一个个小格子重复，样张和长条都一样大小。
+fn draw_motif(pm: &mut resvg::tiny_skia::Pixmap, motif: Motif, base: u32, ink: u32, u: f32) -> Option<()> {
+    use resvg::tiny_skia::*;
+    let (wf, hf) = (pm.width() as f32, pm.height() as f32);
+    let color = |v: u32, a: u8| Color::from_rgba8((v >> 16) as u8, (v >> 8) as u8, v as u8, a);
+    let paint = |v: u32, a: u8| Paint { shader: Shader::SolidColor(color(v, a)), anti_alias: true, ..Default::default() };
+    let stroke = |width: f32| Stroke { width: width * u, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
+    let id = Transform::identity();
+    let mut seed = 0x51ed270bu32;
+    let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; (seed % 10000) as f32 / 10000. };
+    let mut pb = PathBuilder::new();
+    match motif {
+        // 格子：横竖两组半透明的带子，交叉的地方自然深一些。
+        Motif::Gingham | Motif::Plaid => {
+            let (step, band) = if motif == Motif::Gingham { (8. * u, 4. * u) } else { (12. * u, 5. * u) };
+            let mut x = 0.; while x < wf { if let Some(r) = Rect::from_xywh(x, 0., band, hf) { pb.push_rect(r); } x += step; }
+            let mut y = 0.; while y < hf { if let Some(r) = Rect::from_xywh(0., y, wf, band) { pb.push_rect(r); } y += step; }
+            pm.fill_path(&pb.finish()?, &paint(ink, if motif == Motif::Gingham { 90 } else { 110 }), FillRule::Winding, id, None);
+            if motif == Motif::Plaid {
+                let mut pb = PathBuilder::new();
+                let mut x = 9. * u; while x < wf { pb.move_to(x, 0.); pb.line_to(x, hf); x += step; }
+                let mut y = 9. * u; while y < hf { pb.move_to(0., y); pb.line_to(wf, y); y += step; }
+                pm.stroke_path(&pb.finish()?, &paint(0xf2d06b, 200), &stroke(0.5), id, None);
+            }
+        }
+        // 一层层的半圆，从上往下盖，每个半圆里三道圈。
+        Motif::Waves => {
+            let r = 6. * u;
+            let (mut row, mut y) = (0, 0.);
+            while y < hf + r {
+                let mut x = if row % 2 == 0 { 0. } else { r };
+                let mut rings = PathBuilder::new();
+                let mut disc = PathBuilder::new();
+                while x < wf + r { disc.push_circle(x, y, r); for k in [0.95, 0.68, 0.4] { rings.push_circle(x, y, r * k); } x += 2. * r; }
+                pm.fill_path(&disc.finish()?, &paint(base, 255), FillRule::Winding, id, None);
+                pm.stroke_path(&rings.finish()?, &paint(ink, 230), &stroke(0.55), id, None);
+                y += r * 0.5; row += 1;
+            }
+        }
+        Motif::Polka => {
+            let (step, r) = if ink == 0x2b2b2b { (6. * u, 0.8 * u) } else { (9. * u, 2. * u) };
+            let (mut row, mut y) = (0, step / 2.);
+            while y < hf + step { let mut x = if row % 2 == 0 { step / 2. } else { step }; while x < wf { pb.push_circle(x, y, r); x += step; } y += step / 2. * 1.0; row += 1; }
+            pm.fill_path(&pb.finish()?, &paint(ink, 235), FillRule::Winding, id, None);
+        }
+        Motif::Checker => {
+            let a = 6. * u;
+            let (mut j, mut y) = (0, 0.);
+            while y < hf { let mut x = (j % 2) as f32 * a; while x < wf { if let Some(r) = Rect::from_xywh(x, y, a, a) { pb.push_rect(r); } x += 2. * a; } y += a; j += 1; }
+            pm.fill_path(&pb.finish()?, &paint(ink, 200), FillRule::Winding, id, None);
+        }
+        // 彩纸屑：几种颜色的短道道，方向随便。
+        Motif::Confetti => {
+            let colors = [ink, 0x4f9be0, 0xf2b84b, 0x58b98a, 0xa47be0];
+            let n = (wf * hf / (40. * u * u)) as usize;
+            let mut bins: Vec<PathBuilder> = colors.iter().map(|_| PathBuilder::new()).collect();
+            for _ in 0..n {
+                let (x, y, t, k) = (rnd() * wf, rnd() * hf, rnd() * std::f32::consts::TAU, (rnd() * colors.len() as f32) as usize % colors.len());
+                let l = 1.6 * u;
+                bins[k].move_to(x - t.cos() * l, y - t.sin() * l); bins[k].line_to(x + t.cos() * l, y + t.sin() * l);
+            }
+            for (pb, c) in bins.into_iter().zip(colors) { if let Some(p) = pb.finish() { pm.stroke_path(&p, &paint(c, 230), &stroke(1.), id, None); } }
+        }
+        // 小碎花：五片圆瓣，中间一个黄点，错开着排。
+        Motif::Blossom => {
+            let step = 11. * u;
+            let mut centers = PathBuilder::new();
+            let (mut row, mut y) = (0, step / 2.);
+            while y < hf + step {
+                let mut x = if row % 2 == 0 { step / 2. } else { step };
+                while x < wf + step {
+                    let (jx, jy, rot) = ((rnd() - 0.5) * 2. * u, (rnd() - 0.5) * 2. * u, rnd() * 1.2);
+                    for k in 0..5 { let t = rot + k as f32 * std::f32::consts::TAU / 5.; pb.push_circle(x + jx + t.cos() * 1.7 * u, y + jy + t.sin() * 1.7 * u, 1.3 * u); }
+                    centers.push_circle(x + jx, y + jy, 0.8 * u);
+                    x += step;
+                }
+                y += step / 2.; row += 1;
+            }
+            pm.fill_path(&pb.finish()?, &paint(ink, 235), FillRule::Winding, id, None);
+            pm.fill_path(&centers.finish()?, &paint(0xf6d36b, 255), FillRule::Winding, id, None);
+        }
+        Motif::Zigzag => {
+            let (a, step) = (4. * u, 7. * u);
+            let mut y = 2. * u;
+            while y < hf + a { let (mut x, mut up) = (0., true); pb.move_to(0., y); while x < wf { x += a; up = !up; pb.line_to(x, if up { y } else { y + a * 0.8 }); } y += step; }
+            pm.stroke_path(&pb.finish()?, &paint(ink, 240), &stroke(1.3), id, None);
+        }
+        // 星夜：四个尖的小星星，夹着几粒小点。
+        Motif::Stars => {
+            let n = (wf * hf / (90. * u * u)) as usize;
+            let mut dots = PathBuilder::new();
+            for i in 0..n {
+                let (x, y) = (rnd() * wf, rnd() * hf);
+                if i % 3 == 0 {
+                    let (r, k) = (2.4 * u, 0.7 * u);
+                    pb.move_to(x, y - r); pb.line_to(x + k, y - k); pb.line_to(x + r, y); pb.line_to(x + k, y + k);
+                    pb.line_to(x, y + r); pb.line_to(x - k, y + k); pb.line_to(x - r, y); pb.line_to(x - k, y - k); pb.close();
+                } else { dots.push_circle(x, y, 0.45 * u); }
+            }
+            pm.fill_path(&pb.finish()?, &paint(ink, 255), FillRule::Winding, id, None);
+            pm.fill_path(&dots.finish()?, &paint(ink, 170), FillRule::Winding, id, None);
+        }
+        // 竖条：一宽一窄。
+        Motif::Bands => {
+            let mut x = 0.;
+            while x < wf { for (o, w) in [(0., 4. * u), (6.5 * u, 1.2 * u)] { if let Some(r) = Rect::from_xywh(x + o, 0., w, hf) { pb.push_rect(r); } } x += 10. * u; }
+            pm.fill_path(&pb.finish()?, &paint(ink, 200), FillRule::Winding, id, None);
+        }
+        // 牛皮纸：一层颗粒，再撒几根纤维。
+        Motif::Kraft => {
+            let mut s2 = 0x2545f491u32;
+            for px in pm.pixels_mut() {
+                s2 ^= s2 << 13; s2 ^= s2 >> 17; s2 ^= s2 << 5;
+                let d = (s2 % 23) as i16 - 11;
+                let c = px.demultiply();
+                let f = |v: u8| (v as i16 + d).clamp(0, 255) as u8;
+                *px = ColorU8::from_rgba(f(c.red()), f(c.green()), f(c.blue()), 255).premultiply();
+            }
+            let n = (wf * hf / (60. * u * u)) as usize;
+            for _ in 0..n { let (x, y, t) = (rnd() * wf, rnd() * hf, (rnd() - 0.5) * 0.8); let l = (2. + rnd() * 4.) * u; pb.move_to(x, y); pb.line_to(x + t.cos() * l, y + t.sin() * l); }
+            pm.stroke_path(&pb.finish()?, &paint(ink, 120), &stroke(0.35), id, None);
+        }
+    }
+    Some(())
 }
 
 /// 涂鸦：一笔手画似的波浪线，用给的颜色。
@@ -345,32 +564,127 @@ fn doodle_image(color: &str) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
-/// 这篇文档的分隔符（样式里换了的话）。胶带两头的锯齿是拿纸色的小三角盖出来的。
-pub fn divider() -> Option<AnyElement> {
+/// 涂鸦的几种（照 Craft，录屏 2026-11-19 20:32）：分隔线五种里除了分页，各对一种手画的线。
+#[derive(Clone, Copy, PartialEq)]
+enum Doodle { Wave, Curl, Loop, Chain, Scribble }
+
+/// 一种涂鸦画成的图：宽 `w`、高 `h`（pt），画在中间一条线上；颜色是正文色。
+fn doodle_variant(kind: Doodle, color: &str) -> Option<(String, f32, f32)> {
+    use resvg::tiny_skia::*;
+    let (w, h) = match kind { Doodle::Wave => (360., 14.), Doodle::Curl => (64., 14.), Doodle::Loop => (360., 22.), Doodle::Chain => (330., 22.), Doodle::Scribble => (360., 16.) };
+    let path = cache_dir().join(format!("doodle-{}-{}-2.png", kind as u8, color.trim_start_matches('#')));
+    if path.exists() { return Some((path.to_string_lossy().to_string(), w, h)); }
+    if kind == Doodle::Wave { return doodle_image(color).map(|p| (p, w, h)); }
+    let v = u32::from_str_radix(color.trim_start_matches('#'), 16).ok()?;
+    let u = 3f32;
+    let mut pm = Pixmap::new((w * u) as u32, (h * u) as u32)?;
+    let mid = h / 2.;
+    let mut seed = 0x2545f491u32;
+    let mut noise = || { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; (seed % 1000) as f32 / 1000. - 0.5 };
+    let mut pb = PathBuilder::new();
+    let pt = |x: f32, y: f32| (x * u, y * u);
+    // 一串向上打的圈：每圈往右走 `a`，x = a·t/2π + b·sin t、y = 基线 − c·(1 − cos t)/2；b 比 a/2π 大就打圈。
+    let loops = |pb: &mut PathBuilder, x0: f32, n: usize, a: f32, b: f32, c: f32, y0: f32, jitter: f32, noise: &mut dyn FnMut() -> f32| -> f32 {
+        let tau = std::f32::consts::TAU;
+        let mut k = 1.;
+        for i in 0..=n * 24 {
+            if i % 24 == 0 { k = 1. + jitter * noise(); }
+            let t = i as f32 / 24. * tau;
+            let (x, y) = (x0 + a * t / tau + b * k * t.sin(), y0 - c * k * (1. - t.cos()) / 2.);
+            pb.line_to(x * u, y * u);
+        }
+        x0 + a * n as f32
+    };
+    let stroke = |width: f32| Stroke { width: width * u, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
+    let mut width = 1.4;
+    match kind {
+        Doodle::Curl => {
+            let (sx, sy) = pt(2., mid + 2.); pb.move_to(sx, sy);
+            let x = loops(&mut pb, 6., 4, 13., 4.5, 8., mid + 2., 0.15, &mut noise);
+            let (ex, ey) = pt((x + 6.).min(w - 2.), mid + 2.); pb.line_to(ex, ey);
+        }
+        Doodle::Loop => {
+            let base = mid + 5.;
+            let (sx, sy) = pt(2., base); pb.move_to(sx, sy);
+            let x0 = w / 2. - 10.;
+            let (lx, ly) = pt(x0, base - 0.5); pb.line_to(lx, ly);
+            let x = loops(&mut pb, x0, 1, 20., 7., 13., base, 0., &mut noise);
+            let (ex, ey) = pt(x + 2., base); pb.line_to(ex, ey);
+            let (fx, fy) = pt(w - 2., base + 0.5); pb.line_to(fx, fy);
+        }
+        Doodle::Chain => {
+            let base = mid + 4.;
+            let (sx, sy) = pt(2., base + 1.); pb.move_to(sx, sy);
+            let (lx, ly) = pt(18., base); pb.quad_to(sx + 8. * u, sy - 3., lx, ly);
+            let x = loops(&mut pb, 18., 13, 22., 6., 12., base, 0.3, &mut noise);
+            let (ex, ey) = pt(w - 2., base + 1.); pb.quad_to((x + 8.) * u, (base - 2.) * u, ex, ey);
+        }
+        Doodle::Scribble => {
+            // 来回两笔，像拿笔描粗的一道。
+            width = 1.8;
+            for (pass, dy) in [(0, -1.2f32), (1, 1.)] {
+                let mut x = 3f32;
+                let (sx, sy) = pt(x, mid + dy); pb.move_to(sx, sy);
+                while x < w - 3. {
+                    let step = 40. + noise() * 20.;
+                    let nx = (x + step).min(w - 3.);
+                    let (cx, cy) = pt((x + nx) / 2., mid + dy + noise() * 3. + if pass == 0 { -0.6 } else { 0.6 });
+                    let (ex, ey) = pt(nx, mid + dy + noise() * 1.2);
+                    pb.quad_to(cx, cy, ex, ey);
+                    x = nx;
+                }
+            }
+        }
+        Doodle::Wave => {}
+    }
+    let paint = Paint { shader: Shader::SolidColor(Color::from_rgba8((v >> 16) as u8, (v >> 8) as u8, v as u8, 210)), anti_alias: true, ..Default::default() };
+    pm.stroke_path(&pb.finish()?, &paint, &stroke(width), Transform::identity(), None);
+    std::fs::create_dir_all(cache_dir()).ok()?;
+    std::fs::write(&path, pm.encode_png().ok()?).ok()?;
+    Some((path.to_string_lossy().to_string(), w, h))
+}
+
+/// 胶带的几种大小（宽 pt，None 是整行；高 pt）。照 Craft 量的（录屏 2026-11-19 20:32，1pt = 3px）。
+fn tape_size(rule: Rule) -> (Option<f32>, f32) {
+    match rule { Rule::Dots => (Some(68.), 26.), Rule::Dotted => (Some(188.), 30.), Rule::Line => (Some(262.), 44.), Rule::Thick => (None, 48.), _ => (None, 16.) }
+}
+
+/// 一条胶带：图案按高度铺开，两头的锯齿是拿纸色的小三角盖出来的。
+fn tape(path: String, w: Option<f32>, h: f32, paper: Hsla) -> Div {
+    let teeth = (h / 4.).round().max(4.) as usize;
+    let tooth = h / teeth as f32;
+    div().relative().h(px(h)).flex_none().overflow_hidden().map(|d| match w { Some(w) => d.w(px(w)).max_w_full(), None => d.w_full() })
+        .child(img(std::path::PathBuf::from(path)).size_full().object_fit(ObjectFit::Cover))
+        .child(canvas(|_, _, _| {}, move |b, _, window, _| {
+            for i in 0..teeth {
+                let y = b.top() + px(tooth * i as f32);
+                for (x, dx) in [(b.left(), px(tooth * 0.75)), (b.right(), px(-tooth * 0.75))] {
+                    let mut p = Path::new(point(x, y));
+                    p.line_to(point(x + dx, y + px(tooth / 2.)));
+                    p.line_to(point(x, y + px(tooth)));
+                    window.paint_path(p, paper);
+                }
+            }
+        }).absolute().inset_0())
+}
+
+/// 这篇文档的分隔符（样式里换了的话）。分隔线的五种各对一种：胶带是不同的大小，涂鸦是不同的画法；
+/// 分页单独画；`---` 用普通分隔线的尺寸。
+pub fn divider(rule: Rule) -> Option<AnyElement> {
     let style = current()?;
     let paper = crate::editor_theme::Theme::bg_body();
     Some(match style.divider.as_ref()? {
         DividerStyle::Tape { pattern, color } => {
             let path = tape_image(pattern, color.as_deref().unwrap_or(TAPE), false)?;
-            div().h(px(28.)).w_full().flex().items_center().child(
-                div().relative().h(px(16.)).w_full().overflow_hidden()
-                    .child(img(std::path::PathBuf::from(path)).size_full().object_fit(ObjectFit::Cover))
-                    .child(canvas(|_, _, _| {}, move |b, _, window, _| {
-                        for i in 0..4 {
-                            let y = b.top() + px(4. * i as f32);
-                            for (x, dx) in [(b.left(), px(3.)), (b.right(), px(-3.))] {
-                                let mut p = Path::new(point(x, y));
-                                p.line_to(point(x + dx, y + px(2.)));
-                                p.line_to(point(x, y + px(4.)));
-                                window.paint_path(p, paper);
-                            }
-                        }
-                    }).absolute().inset_0()),
-            ).into_any_element()
+            let (w, h) = tape_size(rule);
+            div().py(px(if rule == Rule::Plain { 6. } else { 10. })).w_full().flex().items_center().justify_center().child(tape(path, w, h, paper)).into_any_element()
         }
         DividerStyle::Doodle => {
-            let path = doodle_image(&to_hex(crate::editor_theme::Theme::text()))?;
-            div().h(px(24.)).w_full().flex().items_center().child(img(std::path::PathBuf::from(path)).w_full().h(px(14.)).object_fit(ObjectFit::Fill)).into_any_element()
+            let kind = match rule { Rule::Dots => Doodle::Curl, Rule::Dotted => Doodle::Loop, Rule::Line => Doodle::Chain, Rule::Thick => Doodle::Scribble, _ => Doodle::Wave };
+            let (path, w, h) = doodle_variant(kind, &to_hex(crate::editor_theme::Theme::text()))?;
+            let image = img(std::path::PathBuf::from(path)).h(px(h)).object_fit(ObjectFit::Fill);
+            let image = if w < 200. { image.w(px(w)) } else if kind == Doodle::Chain { image.w(relative(0.92)) } else { image.w_full() };
+            div().py(px(if kind == Doodle::Wave { 5. } else { 8. })).w_full().flex().items_center().justify_center().child(image).into_any_element()
         }
     })
 }

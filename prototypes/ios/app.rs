@@ -37,6 +37,7 @@ pub mod stylepanel;
 pub mod format;
 pub mod voice;
 pub mod background;
+mod washi;
 
 pub fn run() {
     crate::apple_files::install();

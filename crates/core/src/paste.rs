@@ -297,7 +297,7 @@ fn node(n: &Handle, ctx: &Ctx, out: &mut Vec<Block>, para: &mut RichText) {
                 }
                 "hr" => {
                     flush(para, ctx, out);
-                    out.push(Block::new(BlockKind::Divider, RichText::default()));
+                    out.push(Block::new(BlockKind::Divider { rule: Rule::Plain }, RichText::default()));
                 }
                 "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
                     flush(para, ctx, out);
@@ -974,7 +974,7 @@ fn md_blocks(lines: &[&str], off: Off, mut spans: Option<&mut Vec<(usize, usize)
             continue;
         }
         if divider(body) && !off.code_divider {
-            out.push(Block::new(BlockKind::Divider, RichText::default()));
+            out.push(Block::new(BlockKind::Divider { rule: Rule::Plain }, RichText::default()));
             i += 1;
             continue;
         }

@@ -77,7 +77,7 @@ pub fn kind_icon(k: &BlockKind) -> &'static str {
         BlockKind::Code { .. } => "braces",
         BlockKind::Quote => "quote",
         BlockKind::Callout { .. } => "callout",
-        BlockKind::Divider => "divider",
+        BlockKind::Divider { .. } => "divider",
         BlockKind::Image { .. } => "image",
         BlockKind::Table(_) => "table",
         BlockKind::Grid | BlockKind::Column { .. } => "columns-2",
@@ -95,7 +95,7 @@ pub fn kind_color(k: &BlockKind) -> Hsla {
     theme::c(match k {
         BlockKind::Bullet | BlockKind::Ordered { .. } | BlockKind::Todo { .. } | BlockKind::Grid | BlockKind::Column { .. } => menus::INDIGO,
         BlockKind::Code { .. } => menus::GREEN,
-        BlockKind::Divider | BlockKind::Callout { .. } => menus::ORANGE,
+        BlockKind::Divider { .. } | BlockKind::Callout { .. } => menus::ORANGE,
         BlockKind::Image { .. } => menus::YELLOW,
         BlockKind::Table(_) => menus::TEAL,
         BlockKind::Raw { .. } => menus::NEUTRAL,

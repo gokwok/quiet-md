@@ -21,7 +21,7 @@ fn one_line(b: &Block) -> bool {
         BlockKind::Code { .. }
             | BlockKind::Quote
             | BlockKind::Callout { .. }
-            | BlockKind::Divider
+            | BlockKind::Divider { .. }
             | BlockKind::Image { .. }
             | BlockKind::Table(_)
             | BlockKind::Grid

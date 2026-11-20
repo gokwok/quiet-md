@@ -611,15 +611,32 @@
                  .child(
                      div()
                          .flex_1()
-@@ -1431,14 +1622,33 @@
+@@ -1431,14 +1622,50 @@
                                  .flex_1()
                                  .min_w_0()
                                  .h_full()
 +                                .when(crate::ios::style::banded(), |d| {
-+                                    // 纸是一张圆角卡片，跟着正文滚；滚上去的部分在顶栏底下裁掉。
++                                    // 纸是一张圆角卡片，跟着正文滚；滚上去的部分在顶栏底下裁掉。正文里有分页时，
++                                    // 纸在分页那几行断成好几张（位置是这一帧排版时量的）。
 +                                    let top = self.editor.as_ref().map_or(crate::ios::doc_top(), |e| e.read(cx).paper_top()).max(-crate::ios::style::RADIUS);
++                                    let breaks = self.editor.as_ref().map(|e| e.read(cx).page_breaks());
 +                                    d.mx(px(crate::ios::style::SIDE)).overflow_hidden()
-+                                        .child(div().absolute().left_0().right_0().top(px(top)).bottom(px(-crate::ios::style::RADIUS)).rounded(px(crate::ios::style::RADIUS)).bg(crate::editor_theme::Theme::bg_body()))
++                                        .child(canvas(|_, _, _| {}, move |b, _, window, _| {
++                                            let rad = px(crate::ios::style::RADIUS);
++                                            let mut gaps: Vec<(Pixels, Pixels)> = breaks.as_ref().map_or(vec![], |(map, ids)| {
++                                                let map = map.borrow();
++                                                ids.iter().filter_map(|id| map.get(id)).map(|r| (r.top() + px(crate::editor::PAGE_PAD), r.top() + px(crate::editor::PAGE_PAD + crate::editor::PAGE_GAP))).collect()
++                                            });
++                                            gaps.sort_by(|a, b| f32::from(a.0).total_cmp(&f32::from(b.0)));
++                                            let mut y = b.top() + px(top);
++                                            let card = |window: &mut Window, y0: Pixels, y1: Pixels| window.paint_quad(fill(Bounds::from_corners(point(b.left(), y0), point(b.right(), y1)), crate::editor_theme::Theme::bg_body()).corner_radii(rad));
++                                            for (g0, g1) in gaps {
++                                                if g1 <= y { continue; }
++                                                if g0 > y { card(window, y, g0); }
++                                                y = g1;
++                                            }
++                                            card(window, y, b.bottom() + rad);
++                                        }).absolute().inset_0())
 +                                })
                                  .children(self.editor.clone()),
                          )
@@ -646,7 +663,7 @@
              View::Settings => self.render_settings(cx),
          };
          let move_dlg = self.render_move_dialog(cx);
-@@ -1450,13 +1660,23 @@
+@@ -1450,13 +1677,23 @@
          // surface beside it; the change of value is the only line between
          // them (no gutter, radius, border or shadow).
          // A document sits on its theme's page colour.
@@ -673,7 +690,7 @@
          div()
              .id("workspace")
              .key_context("Workspace")
-@@ -1480,6 +1700,9 @@
+@@ -1480,6 +1717,9 @@
              // whichever window macOS considers active.
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
              .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
@@ -683,7 +700,7 @@
              .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
                  crate::quick_note::persist(cx);
                  if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
-@@ -1496,7 +1719,7 @@
+@@ -1496,7 +1736,7 @@
              .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
              .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
              .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
@@ -692,7 +709,7 @@
                  cx.notify();
              }))
              .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
-@@ -1533,7 +1756,7 @@
+@@ -1533,7 +1773,7 @@
              }))
              // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
              .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
@@ -701,7 +718,7 @@
                  if ev.keystroke.key == "escape" && w.has_home_drag() {
                      w.cancel_home_drag(cx); cx.stop_propagation(); return;
                  }
-@@ -1565,10 +1788,17 @@
+@@ -1565,10 +1805,17 @@
                  if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
                  cx.stop_propagation();
              }))
@@ -720,7 +737,7 @@
              .children(row_menu)
              .children(doc_menu)
              .children(mode_menu)
-@@ -1580,6 +1810,7 @@
+@@ -1580,6 +1827,7 @@
              .children(move_dlg)
              .children(space_menu)
              .children(space_dialog)
@@ -1961,7 +1978,13 @@
          }
 --- a/src/editor/mod.rs
 +++ b/src/editor/mod.rs
-@@ -28,4 +28,10 @@
+@@ -23,9 +23,15 @@
+ mod scrollbar;
+ pub mod reminder;
+ mod render;
+-pub(crate) use render::equation_numbers;
++pub(crate) use render::{equation_numbers, PAGE_GAP, PAGE_PAD};
+ mod subpages;
  pub mod table;
  pub use fdl_core::editor::table_ops;
  pub mod text;
@@ -3219,7 +3242,18 @@
          let list = super::countdown::list_box().w(px(w)).occlude().child(col).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
 --- a/src/editor/render.rs
 +++ b/src/editor/render.rs
-@@ -77,8 +77,13 @@
+@@ -74,11 +74,24 @@
+ }
+ 
+ impl Editor {
++    /// 文档里的分页（`Rule::Page`）和量它们位置的表（窗口坐标，排版时填）：iOS 文档有背景时，
++    /// 纸是外面画的圆角卡片，要在这些地方断成好几张。
++    pub fn page_breaks(&self) -> (BoundsMap, Vec<BlockId>) {
++        let mut ids = vec![];
++        self.core.doc.for_each_block(|b| if matches!(b.kind, BlockKind::Divider { rule: Rule::Page }) { ids.push(b.id) });
++        (self.block_bounds.clone(), ids)
++    }
++
      /// Fill and radius of selected blocks: `.block.hovered` while the handle
      /// menu is open, else `.selected-mask`.
      pub(super) fn block_tint(&self) -> (Hsla, f32) {
@@ -3233,7 +3267,16 @@
  }
  
  /// Text, heading and list blocks whose children are drawn as separate rows.
-@@ -291,6 +296,8 @@
+@@ -255,6 +268,8 @@
+ 
+ /// 分页：纸在这里断开，上一张的下沿和下一张的上沿都是圆角，中间是窗口底色。
+ fn page_break(bleed: (f32, f32)) -> AnyElement {
++    // 文档有背景时纸是外面画的几张卡片（`style::banded`），这一行只留出位置。
++    if crate::ios::style::banded() { return div().h(px(PAGE_H)).w_full().into_any_element(); }
+     div()
+         .h(px(PAGE_H))
+         .w_full()
+@@ -352,6 +367,8 @@
              let f = theme::heading_font(level);
              if f != theme::body_font() { spec.font = Some(f); }
          }
@@ -3242,16 +3285,16 @@
          spec.dim_marks = env.quote;
          if env.quote {
              if let Some(c) = st.color("quote.color") { spec.color = c; }
-@@ -396,6 +403,8 @@
+@@ -455,6 +472,8 @@
+                     .child(div().flex_1().min_w_0().ml(px(10.)).child(self.blocks(&b.children, Env { color: tc, in_callout: true, width: env.width - 64., ..env }, cx)))
+                     .into_any_element()
              }
++            // 文档样式换了分隔符（和纸胶带、涂鸦）：除了分页，五种都画成那一种的样子。
++            BlockKind::Divider { rule } if *rule != Rule::Page && crate::ios::style::divider_styled() => div().w_full().children(crate::ios::style::divider(*rule)).into_any_element(),
+             BlockKind::Divider { rule } if *rule != Rule::Plain => rule_element(*rule, 20., if env.root { (self.ed.layout.ml, self.ed.layout.mr) } else { (0., 0.) }),
              // The default separator ('light'): a dotted rule, 1.5pt dots
              // every 5pt at half the text colour.
-+            // 文档样式换了分隔符（和纸胶带、涂鸦）：画那一种。
-+            BlockKind::Divider if crate::ios::style::divider_styled() => div().w_full().children(crate::ios::style::divider()).into_any_element(),
-             BlockKind::Divider => div()
-                 .h(px(20.))
-                 .w_full()
-@@ -489,6 +498,7 @@
+@@ -551,6 +570,7 @@
              .w_full()
              .children(bg)
              .child(content)
@@ -3259,7 +3302,7 @@
              .child(record_bounds(b.id, self.bounds.clone()))
              .children(handle)
              .children(self.fold_button(b, env, cx))
-@@ -507,10 +517,11 @@
+@@ -569,10 +589,11 @@
                  )
              })
              // A table draws its own selection (tinted bars and cells).
@@ -3273,7 +3316,7 @@
                  d.child(if self.flat == Some(b.id) { hl.rounded_t(px(r)) } else { hl.rounded(px(r)) })
              })
              .into_any_element()
-@@ -696,7 +707,7 @@
+@@ -758,7 +779,7 @@
                          MouseButton::Left,
                          cx.listener(move |e, _, window, cx| {
                              cx.stop_propagation();
@@ -3282,7 +3325,7 @@
                              e.core.toggle_todo(id);
                              e.changed(window, cx);
                          }),
-@@ -1040,6 +1051,7 @@
+@@ -1102,6 +1123,7 @@
          self.core.doc.title.text.len().hash(&mut h);
          self.core.doc.icon.is_some().hash(&mut h);
          self.core.doc.cover.as_ref().map(|_| cover_h.to_bits()).hash(&mut h);
@@ -3290,7 +3333,7 @@
          self.info.hidden.hash(&mut h);
          let mut keys = vec![h.finish()];
          let links = self.links_key();
-@@ -1117,6 +1129,17 @@
+@@ -1179,6 +1201,17 @@
          super::grid::item_containing(&self.items, &self.core.doc.blocks, id)
      }
  
@@ -3308,7 +3351,7 @@
      fn render_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
          let Some(item) = self.items.get(ix).cloned() else { return div().into_any_element() };
          if let Item::Block { path, .. } = &item {
-@@ -1151,6 +1174,8 @@
+@@ -1213,6 +1246,8 @@
                  spec.size = theme::title().size;
                  spec.line_height = theme::title().line_height;
                  spec.weight = FontWeight(theme::style().num("title.weight"));
@@ -3317,7 +3360,7 @@
                  if let Some(c) = theme::style().color("title.color") { spec.color = c; }
                  let tf = theme::style().font("title.font");
                  if tf != theme::body_font() { spec.font = Some(tf); }
-@@ -1161,8 +1186,9 @@
+@@ -1223,8 +1258,9 @@
                  div()
                      .relative()
                      .group("doc-header")
@@ -3329,7 +3372,7 @@
                      .children(self.header_entries(cx))
                      .child(
                          div()
-@@ -1171,6 +1197,8 @@
+@@ -1233,6 +1269,8 @@
                              .children(self.doc_icon_el(cx))
                              .child(div().flex_1().min_w_0().child(r.text_el(TITLE, &self.core.doc.title, spec, Align::Left, Some(crate::settings::text("请输入标题").into())))),
                      )
@@ -3338,7 +3381,7 @@
                      .into_any_element()
              }
              Item::Block { path, gap } => {
-@@ -1203,6 +1231,8 @@
+@@ -1265,6 +1303,8 @@
                      .relative()
                      .pt(px(gap))
                      .pl(px(25. * depth as f32))
@@ -3347,7 +3390,7 @@
                      .when(dimmed, |d| d.opacity(0.5))
                      .children(bgs.into_iter().map(|(d, fill)| {
                          div()
-@@ -1221,8 +1251,8 @@
+@@ -1283,8 +1323,8 @@
                                  .absolute()
                                  .top_0()
                                  .bottom_0()
@@ -3358,7 +3401,7 @@
                                  .when(last, |d| d.rounded_b(px(self.block_tint().1)))
                                  .bg(self.block_tint().0),
                          )
-@@ -1234,7 +1264,7 @@
+@@ -1296,7 +1336,7 @@
                  .w_full()
                  // An open 页面 has no reference list: the references are the document's.
                  .children(if self.outer.is_empty() { self.refs_list(window, cx) } else { None })
@@ -3367,7 +3410,7 @@
                  .on_mouse_down(MouseButton::Left, cx.listener(Self::on_click_below))
                  .into_any_element(),
          };
-@@ -1243,7 +1273,8 @@
+@@ -1305,7 +1345,8 @@
          let padded = div().w_full().pl(px(self.layout.ml)).pr(px(self.layout.mr)).child(content);
          match cover {
              // The cover spans the whole pane, above the padded header.
@@ -3377,7 +3420,7 @@
              None => padded.into_any_element(),
          }
      }
-@@ -1254,6 +1285,8 @@
+@@ -1316,6 +1357,8 @@
      fn apply_reveal(&mut self, window: &mut Window) {
          let Some((req, tries)) = self.reveal.take() else { return };
          let view = self.list.viewport_bounds();
@@ -3386,7 +3429,7 @@
          let caret_rect = |p: Pos| {
              self.cache.borrow().get(&p.block).map(|l| Bounds::new(l.position_for(p.offset), size(px(2.), l.line_height)))
          };
-@@ -1299,10 +1332,12 @@
+@@ -1361,10 +1404,12 @@
      }
  
      fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3399,7 +3442,7 @@
          let overlays = self.render_overlays(window, cx);
          let lightbox = self.lightbox_el(window, cx);
          let toast = self.toast_el(window);
-@@ -1404,7 +1439,7 @@
+@@ -1466,7 +1511,7 @@
                      }
                  }
                  if pointer_hidden {
@@ -3408,7 +3451,7 @@
                      let e = entity.clone();
                      window.on_mouse_event(move |_: &MouseMoveEvent, phase, _, cx| {
                          if phase == DispatchPhase::Bubble {
-@@ -1577,9 +1612,13 @@
+@@ -1639,9 +1684,13 @@
                      .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                      .on_drag_move(cx.listener(Self::file_drag_move))
                      .on_drop(cx.listener(Self::drop_files))
@@ -3423,7 +3466,7 @@
              .children(file_line)
              .children(catalogue)
              .children(overlays)
-@@ -1612,6 +1651,8 @@
+@@ -1674,6 +1723,8 @@
  impl Editor {
      /// "N 字" chip at the bottom right while text is selected (§2).
      fn word_counter(&self) -> Option<AnyElement> {
@@ -3432,7 +3475,7 @@
          let n = if self.core.in_block_mode() {
              let index = core::block_index(&self.core.doc);
              self.core
-@@ -1671,6 +1712,7 @@
+@@ -1733,6 +1784,7 @@
              spec.color = Theme::todo_done();
              spec.strike_all = true;
          }
@@ -3440,15 +3483,16 @@
          spec
      }
  }
-@@ -1746,6 +1788,7 @@
+@@ -1808,6 +1860,8 @@
                      .child(div().flex_1().min_w_0().ml(px(8.)).child(self.blocks(&b.children, Env { color: tc, in_callout: true, width: env.width - 66., ..env }, cx)))
                      .into_any_element()
              }
-+            BlockKind::Divider if crate::ios::style::divider_styled() => div().w_full().children(crate::ios::style::divider()).into_any_element(),
-             BlockKind::Divider => div()
++            // 文档样式换了分隔符（和纸胶带、涂鸦）：除了分页，五种都画成那一种的样子。
++            BlockKind::Divider { rule } if *rule != Rule::Page && crate::ios::style::divider_styled() => div().w_full().children(crate::ios::style::divider(*rule)).into_any_element(),
+             BlockKind::Divider { rule } if *rule != Rule::Plain => rule_element(*rule, 25., if env.root { (self.ed.layout.ml, self.ed.layout.mr) } else { (0., 0.) }),
+             BlockKind::Divider { .. } => div()
                  .h(px(25.))
-                 .flex()
-@@ -1810,6 +1853,7 @@
+@@ -1873,6 +1927,7 @@
              .w_full()
              .children(bg)
              .child(content)
@@ -3456,7 +3500,7 @@
              .child(record_bounds(b.id, self.bounds.clone()))
              .children(handle)
              .children(self.fold_button(b, env, cx))
-@@ -1828,10 +1872,11 @@
+@@ -1891,10 +1946,11 @@
                  )
              })
              // A table draws its own selection (tinted bars and cells).
@@ -3470,7 +3514,7 @@
                  d.child(if self.flat == Some(b.id) { hl.rounded_t(px(r)) } else { hl.rounded(px(r)) })
              })
              .into_any_element()
-@@ -1948,7 +1993,7 @@
+@@ -2011,7 +2067,7 @@
                          MouseButton::Left,
                          cx.listener(move |e, _, window, cx| {
                              cx.stop_propagation();
@@ -3992,7 +4036,7 @@
          if !self.guard(window, cx) {
              return;
          }
-@@ -2323,7 +2375,16 @@
+@@ -2323,7 +2375,17 @@
      }
  
      pub fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -4005,22 +4049,28 @@
 +        if self.compact() && self.cell_tap(ev.position, cx) { return; }
 +        // 手机：正在编辑时点正文下面的空白是退出编辑。
 +        if self.tap_below(Some(ev.position), window, cx) { return; }
++        let reading = !self.focus.is_focused(window);
 +        self.touch_press(window);
 +        window.focus(&self.focus, cx);
          self.reminder_blur(window, cx);
          self.menu = None;
          self.menu_hovered = false;
-@@ -2348,6 +2409,9 @@
+@@ -2348,6 +2410,14 @@
              return cx.notify();
          }
          let Some(pos) = self.pos_at(ev.position) else { return };
++        // 手机：没在编辑时点分隔线，是选中这一块、升起块动作栏（照 Craft），不进编辑。
++        if self.compact() && reading && !self.read_only && !ev.modifiers.shift && self.core.block(pos.block).is_some_and(|b| matches!(b.kind, BlockKind::Divider { .. })) {
++            window.prevent_default();
++            return self.open_block_menu(pos.block, false, window, cx);
++        }
 +        if crate::ios::editor_surface::enabled() && !self.read_only && self.core.is_code(pos.block) && !ev.modifiers.shift {
 +            window.prevent_default(); self.set_caret(pos,false); return self.open_lang_menu(pos.block,window,cx);
 +        }
          let eq = self.cache.borrow().get(&pos.block).and_then(|l| l.equation_at(ev.position));
          if let Some(ix) = eq
              && !ev.modifiers.shift
-@@ -2371,13 +2435,17 @@
+@@ -2371,13 +2441,17 @@
              let r = core::word_at(&text, pos.offset);
              self.set_caret(Pos::new(pos.block, r.start), false);
              self.core.sel.head = Pos::new(pos.block, r.end);
@@ -4038,7 +4088,7 @@
          self.restart_blink(window, cx);
          cx.notify();
      }
-@@ -2394,6 +2462,43 @@
+@@ -2394,6 +2468,43 @@
          }
      }
  
@@ -4082,7 +4132,7 @@
      /// Mouse-up (or a move without the button) ends a text drag. Events can
      /// arrive before the frame that registers the window-level drag listeners,
      /// so the element-level handlers call this too.
-@@ -2405,6 +2510,7 @@
+@@ -2405,6 +2516,7 @@
              }
              self.link_ui.click = None;
              self.dragging = false;
@@ -4090,7 +4140,7 @@
              cx.notify();
          }
      }
-@@ -2484,7 +2590,9 @@
+@@ -2484,7 +2596,9 @@
  
      /// Click in the empty area below the content: focus a trailing empty paragraph.
      pub fn on_click_below(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -4101,7 +4151,7 @@
          if self.read_only {
              return;
          }
-@@ -2499,7 +2607,14 @@
+@@ -2499,7 +2613,14 @@
  
      /// Handle (⋮⋮) click: select the block and open its menu; "+" opens the add panel.
      pub fn open_block_menu(&mut self, block: BlockId, add: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -4117,7 +4167,7 @@
          self.slash = None;
          self.menu_hovered = false;
          if add {
-@@ -2521,6 +2636,8 @@
+@@ -2521,6 +2642,8 @@
          if !matches!(act, BlockAct::HeaderRow | BlockAct::HeaderCol) {
              self.menu = None;
          }
@@ -4126,7 +4176,7 @@
          match act {
              BlockAct::Cut => {
                  self.core.select_block(block);
-@@ -2573,7 +2690,7 @@
+@@ -2573,7 +2696,7 @@
              BlockAct::HeaderCol => self.core.table_toggle_header_col(block),
              BlockAct::DistributeCols => self.core.table_distribute(block),
          }
@@ -4135,7 +4185,7 @@
          self.changed(window, cx);
      }
  
-@@ -2670,7 +2787,36 @@
+@@ -2670,7 +2793,36 @@
      DistributeCols,
  }
  
@@ -4172,7 +4222,7 @@
      fn text_for_range(
          &mut self,
          range: Range<usize>,
-@@ -2679,6 +2825,11 @@
+@@ -2679,6 +2831,11 @@
          _: &mut Context<Self>,
      ) -> Option<String> {
          let t = self.head_text()?;
@@ -4184,7 +4234,7 @@
          let r = from16(&t, range.start)..from16(&t, range.end);
          actual.replace(to16(&t, r.start)..to16(&t, r.end));
          Some(t[r].to_string())
-@@ -2686,6 +2837,7 @@
+@@ -2686,6 +2843,7 @@
  
      fn selected_text_range(&mut self, _: bool, _: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
          let t = self.head_text()?;
@@ -4192,7 +4242,7 @@
          let (r, reversed) = self.reported_range(&t);
          Some(UTF16Selection { range: to16(&t, r.start)..to16(&t, r.end), reversed })
      }
-@@ -2699,12 +2851,22 @@
+@@ -2699,12 +2857,22 @@
          Some(to16(&t.text, r.start)..to16(&t.text, r.end))
      }
  
@@ -4217,7 +4267,7 @@
          if self.core.in_block_mode() {
              return;
          }
-@@ -2720,7 +2882,8 @@
+@@ -2720,7 +2888,8 @@
                  self.core.sel = Selection { anchor: Pos::new(head, r.start), head: Pos::new(head, r.end) };
              }
          }
@@ -4227,7 +4277,7 @@
      }
  
      fn replace_and_mark_text_in_range(
-@@ -2760,7 +2923,8 @@
+@@ -2760,7 +2929,8 @@
              let b = from16(&t2, base + ns.end);
              self.core.sel = Selection { anchor: Pos::new(head, a), head: Pos::new(head, b) };
          }
@@ -4816,7 +4866,7 @@
 +                    let t = unit * 5.;
 +                    (div().w_full().h(px(t)).rounded(px(unit)).bg(fill).p(px(unit)).flex().flex_col().gap(px(unit * 0.8)).child(bar(0.8, 0.25, unit * 0.8)).child(bar(0.5, 0.25, unit * 0.8)), t)
 +                }
-+                BlockKind::Divider => (div().h(px(unit * 0.5)).w_full().bg(tint(0.15)), unit * 0.5),
++                BlockKind::Divider { .. } => (div().h(px(unit * 0.5)).w_full().bg(tint(0.15)), unit * 0.5),
 +                BlockKind::Image { src, width, height, .. } => {
 +                    let full = w - pad_x * 2. - indent;
 +                    let ratio = match (width, height) { (Some(iw), Some(ih)) if *iw > 0. => (ih / iw).clamp(0.3, 1.2), _ => 0.66 };

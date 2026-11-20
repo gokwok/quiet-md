@@ -197,7 +197,7 @@ impl Writer<'_> {
                 self.blocks(&b.children, depth, out);
                 out.push_str("</div></div>");
             }
-            BlockKind::Divider => out.push_str("<hr>"),
+            BlockKind::Divider { .. } => out.push_str("<hr>"),
             BlockKind::Image { src, width, height, caption, crop, .. } => {
                 let _ = write!(out, "<div class=\"img\"{align}>");
                 match data_uri(src) {

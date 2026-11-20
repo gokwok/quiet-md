@@ -213,6 +213,67 @@ pub(super) fn record_bounds(id: BlockId, map: BoundsMap) -> impl IntoElement {
     .size_full()
 }
 
+/// 分页那一行：上下各 `PAGE_PAD` 还是纸，中间 `PAGE_GAP` 露出窗口底色（照 Craft 的录屏量的）。
+pub const PAGE_PAD: f32 = 24.;
+pub const PAGE_GAP: f32 = 35.;
+pub const PAGE_H: f32 = PAGE_PAD * 2. + PAGE_GAP;
+
+/// 键盘上方「——」里选的分隔线（照 Craft）：三个点、点线、细线、粗线和分页。`h` 是线这一行的高，
+/// 和默认分隔线一样；`bleed` 是分页的底色左右再伸出去多少（正文两边的留白），好贴齐纸的两边。
+pub(super) fn rule_element(rule: Rule, h: f32, bleed: (f32, f32)) -> AnyElement {
+    if rule == Rule::Page { return page_break(bleed); }
+    div()
+        .h(px(h))
+        .w_full()
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |b, _, window, _| {
+                    let y = b.center().y;
+                    let col = Theme::separator_dots();
+                    let dot = |window: &mut Window, x: Pixels, d: f32| window.paint_quad(fill(Bounds::new(point(x - px(d / 2.), y - px(d / 2.)), size(px(d), px(d))), col).corner_radii(px(d / 2.)));
+                    match rule {
+                        // 三个 2.5pt 的点，相隔 15pt，居中。
+                        Rule::Dots => for i in -1..=1 { dot(window, b.center().x + px(15. * i as f32), 2.5) },
+                        // 1.5pt 的点每 4.5pt 一个，铺满一行。
+                        Rule::Dotted => {
+                            let n = ((f32::from(b.size.width) - 1.5) / 4.5).floor().max(0.) as usize + 1;
+                            let left = b.center().x - px(4.5 * (n - 1) as f32 / 2.);
+                            for i in 0..n { dot(window, left + px(4.5 * i as f32), 1.5) }
+                        }
+                        Rule::Line => window.paint_quad(fill(Bounds::new(point(b.left(), y - px(0.25)), size(b.size.width, px(0.5))), col)),
+                        // 粗线 1.5pt，圆头，颜色比细线淡一半。
+                        Rule::Thick => window.paint_quad(fill(Bounds::new(point(b.left(), y - px(0.75)), size(b.size.width, px(1.5))), col.opacity(0.5)).corner_radii(px(0.75))),
+                        Rule::Plain | Rule::Page => {}
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
+/// 分页：纸在这里断开，上一张的下沿和下一张的上沿都是圆角，中间是窗口底色。
+fn page_break(bleed: (f32, f32)) -> AnyElement {
+    div()
+        .h(px(PAGE_H))
+        .w_full()
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |b, _, window, _| {
+                    let (l, r) = (b.left() - px(bleed.0), b.right() + px(bleed.1));
+                    let (g0, g1, rad) = (b.top() + px(PAGE_PAD), b.top() + px(PAGE_PAD + PAGE_GAP), px(PAGE_PAD));
+                    window.paint_quad(fill(Bounds::from_corners(point(l, g0 - rad), point(r, g1 + rad)), theme::c(craft::WINDOW)));
+                    window.paint_quad(fill(Bounds::from_corners(point(l, g0 - rad), point(r, g0)), Theme::bg_body()).corner_radii(Corners { bottom_left: rad, bottom_right: rad, ..Default::default() }));
+                    window.paint_quad(fill(Bounds::from_corners(point(l, g1), point(r, g1 + rad)), Theme::bg_body()).corner_radii(Corners { top_left: rad, top_right: rad, ..Default::default() }));
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
+}
+
 /// The document-wide `katexEqnNo` counter at each block with equations.
 pub(crate) fn equation_numbers(doc: &crate::model::Document) -> HashMap<BlockId, u32> {
     let mut out = HashMap::new();
@@ -394,9 +455,10 @@ impl R<'_> {
                     .child(div().flex_1().min_w_0().ml(px(10.)).child(self.blocks(&b.children, Env { color: tc, in_callout: true, width: env.width - 64., ..env }, cx)))
                     .into_any_element()
             }
+            BlockKind::Divider { rule } if *rule != Rule::Plain => rule_element(*rule, 20., if env.root { (self.ed.layout.ml, self.ed.layout.mr) } else { (0., 0.) }),
             // The default separator ('light'): a dotted rule, 1.5pt dots
             // every 5pt at half the text colour.
-            BlockKind::Divider => div()
+            BlockKind::Divider { .. } => div()
                 .h(px(20.))
                 .w_full()
                 .child(
@@ -1746,7 +1808,8 @@ pub(super) fn block_feishu(&self, b: &Block, siblings: &[Block], idx: usize, env
                     .child(div().flex_1().min_w_0().ml(px(8.)).child(self.blocks(&b.children, Env { color: tc, in_callout: true, width: env.width - 66., ..env }, cx)))
                     .into_any_element()
             }
-            BlockKind::Divider => div()
+            BlockKind::Divider { rule } if *rule != Rule::Plain => rule_element(*rule, 25., if env.root { (self.ed.layout.ml, self.ed.layout.mr) } else { (0., 0.) }),
+            BlockKind::Divider { .. } => div()
                 .h(px(25.))
                 .flex()
                 .items_center()

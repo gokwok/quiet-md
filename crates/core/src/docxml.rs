@@ -212,7 +212,7 @@ fn parse_block(e: &Element, out: &mut Vec<Block>) {
                 .with_children(nested)
         }
         "blockquote" => Block::new(BlockKind::Quote, RichText::default()).with_children(non_empty(parse_blocks(&e.children))),
-        "hr" => Block::new(BlockKind::Divider, RichText::default()),
+        "hr" => Block::new(BlockKind::Divider { rule: Rule::from_attr(e.attr("style")) }, RichText::default()),
         "sub-page-list" => Block::new(BlockKind::SubPageList, RichText::default()),
         // 页面 / 卡片: the title, then the page's blocks.
         "page" => {
@@ -882,7 +882,10 @@ fn write_block(b: &Block, s: &mut String, depth: usize) {
             indent(s, depth);
             s.push_str("</callout>\n");
         }
-        BlockKind::Divider => s.push_str("<hr/>\n"),
+        BlockKind::Divider { rule } => match rule.attr() {
+            Some(style) => s.push_str(&format!("<hr style=\"{style}\"/>\n")),
+            None => s.push_str("<hr/>\n"),
+        },
         BlockKind::SubPageList => s.push_str("<sub-page-list/>\n"),
         BlockKind::Page { card } => {
             s.push_str(&format!("<page{}{}>", if *card { " view=\"card\"" } else { "" }, align_attr(b.align)));

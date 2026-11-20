@@ -42,7 +42,7 @@ pub fn gap(kind: &BlockKind) -> (f32, f32) {
         BlockKind::Table(_) => (11., 11.),
         BlockKind::Code { .. } | BlockKind::Callout { .. } | BlockKind::Image { .. } | BlockKind::File(_) | BlockKind::Grid => (16., 16.),
         BlockKind::Quote => (8., 14.),
-        BlockKind::Divider => (12., 12.),
+        BlockKind::Divider { .. } => (12., 12.),
         _ => (0., PARAGRAPH_GAP),
     }
 }

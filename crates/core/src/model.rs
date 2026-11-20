@@ -717,6 +717,44 @@ impl CellRange {
     }
 }
 
+/// 分隔线画成什么样（照 Craft，键盘上方「——」里选）。`Plain` 是原来的 `<hr/>`，照主题画；
+/// 别的写在 `<hr style="…"/>` 里。`Page` 是分页：纸在这里断成上下两张。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Rule {
+    #[default]
+    Plain,
+    Dots,
+    Dotted,
+    Line,
+    Thick,
+    Page,
+}
+
+impl Rule {
+    /// `<hr style="…"/>` 里的写法；`Plain` 不写。
+    pub fn attr(self) -> Option<&'static str> {
+        match self {
+            Rule::Plain => None,
+            Rule::Dots => Some("dots"),
+            Rule::Dotted => Some("dotted"),
+            Rule::Line => Some("line"),
+            Rule::Thick => Some("thick"),
+            Rule::Page => Some("page-break"),
+        }
+    }
+
+    pub fn from_attr(s: Option<&str>) -> Rule {
+        match s {
+            Some("dots") => Rule::Dots,
+            Some("dotted") => Rule::Dotted,
+            Some("line") => Rule::Line,
+            Some("thick") => Rule::Thick,
+            Some("page-break") => Rule::Page,
+            _ => Rule::Plain,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum BlockKind {
     Text,
@@ -732,7 +770,7 @@ pub enum BlockKind {
         border: Option<ColorName>,
         text_color: Option<ColorName>,
     },
-    Divider,
+    Divider { rule: Rule },
     Image {
         /// Which DocxXML attribute carries the source: `path`, `href` or `src`.
         src_kind: String,

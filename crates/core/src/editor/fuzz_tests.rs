@@ -124,7 +124,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
     }
     let us = c.units();
     let any = |rng: &mut Rng| rng.pick(&us).id;
-    match rng.below(26) {
+    match rng.below(27) {
         0..=2 => {
             let s = *rng.pick(TEXTS);
             c.insert_text(s);
@@ -240,6 +240,11 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
             format!("set_voice({clip}) = {}", c.set_voice(clip))
         }
         24 => format!("remove_empty_paragraphs({})", c.remove_empty_paragraphs()),
+        25 => {
+            // 键盘上方「——」：五种样式随便挑一种。
+            let rule = *rng.pick(&[Rule::Dots, Rule::Dotted, Rule::Line, Rule::Thick, Rule::Page]);
+            format!("insert_divider({rule:?}) = {:?}", c.insert_divider(rule))
+        }
         _ => {
             c.trailing_line();
             "trailing_line".into()

@@ -65,6 +65,11 @@
 }</code></pre>
 <pre lang="plaintext"><code></code></pre>
 <hr/>
+<hr style="dots"/>
+<hr style="dotted"/>
+<hr style="line"/>
+<hr style="thick"/>
+<hr style="page-break"/>
 <callout emoji="💡" background-color="light-orange" border-color="orange">
   <p>提示</p>
   <checkbox done="false">里的待办</checkbox>

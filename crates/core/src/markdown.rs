@@ -125,7 +125,7 @@ impl Writer<'_> {
                 let body = self.blocks(&b.children);
                 indent(&format!("{emoji} {body}"), "> ")
             }
-            BlockKind::Divider => "---".into(),
+            BlockKind::Divider { .. } => "---".into(),
             BlockKind::Image { src, caption, .. } if self.opts.in_place => {
                 format!("![{}]({})", escape(caption.as_deref().unwrap_or_default()), link_target(&self.keep(src, true)))
             }
@@ -651,7 +651,7 @@ mod tests {
                 Block::new(BlockKind::Todo { done: true }, RichText::plain("done")),
                 Block::new(BlockKind::Code { lang: "Rust".into(), caption: None, wrap: false }, RichText::plain("fn main() {}")),
                 Block::new(BlockKind::Quote, RichText::default()).with_children(vec![Block::text("q")]),
-                Block::new(BlockKind::Divider, RichText::default()),
+                Block::new(BlockKind::Divider { rule: Rule::Plain }, RichText::default()),
             ],
             ..Default::default()
         };

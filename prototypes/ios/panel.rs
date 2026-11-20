@@ -77,12 +77,16 @@ pub enum Look {
 }
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct Strip { pub fill: Fill, pub title: String, pub picked: bool, pub act: String }
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum Node {
     /// 主面板顶上的小横条。
     Grab,
     /// 标题栏：标题，对比度不够的警告，重置（动作），关闭（动作）。下面一条线。
     Header { title: String, warn: bool, reset: Option<String>, close: String },
     /// 一条分段：图标（SF Symbols）或文字，当前那一段是深色的胶囊。点了交出 `act` + 序号。
+    /// 图标和文字都给了：选中那段图标后面跟着文字，别的段只有图标（照 Craft 的分隔符样式）。
     Segments { symbols: Vec<&'static str>, titles: Vec<String>, picked: usize, act: String },
     /// 色点，一排六个。点了交出 `act` + 序号；`custom` 是最后那颗彩虹圈（动作，是否选中，圈里的颜色）。
     Swatches { fills: Vec<Fill>, picked: Option<usize>, act: String, custom: Option<(String, bool, Hsla)> },
@@ -97,6 +101,12 @@ pub enum Node {
     Cards { items: Vec<Card>, picked: Option<usize>, act: String },
     /// 一排带图标的方格按钮（图标，标题，动作）。
     Actions(Vec<(&'static str, String, String)>),
+    /// 同样的按钮，几个平分一整行（和纸胶带的「上传」「和纸图库」）。
+    Wide(Vec<(&'static str, String, String)>),
+    /// 一条条胶带，下面写名字；一行 `cols` 条，选中的垫一块底。
+    Strips { items: Vec<Strip>, cols: usize },
+    /// 标题下方滚动的内容，面板高度受窗口限制。
+    Scroll { nodes: Vec<Node>, max_height: f64 },
     /// 空着时的一句话。
     Empty(&'static str, String),
     /// 一排小色点（格式面板的颜色），一排八颗；`None` 是「无」：空圈上一道斜线。点了交出 `act` + 序号。
@@ -124,17 +134,21 @@ fn node_h(node: &Node, w: f64) -> f64 {
         Node::Tiles(rows) => rows.len() as f64 * (TILE + GAP) - GAP + 8.,
         Node::Thumbs { fills, .. } => rows(fills.len(), 3) * (thumb_h(w) + 5.),
         Node::Cards { items, .. } => rows(items.len(), 3) * (thumb_h(w) + 26.),
-        Node::Actions(_) => thumb_h(w) + 5.,
+        Node::Actions(_) | Node::Wide(_) => thumb_h(w) + 5.,
+        Node::Strips { items, cols, .. } => rows(items.len(), (*cols).max(1)) * strip_h(*cols),
+        Node::Scroll { nodes, max_height } => f64::from(height(nodes, w as f32)).min(*max_height),
         Node::Empty(..) => 110.,
         Node::Cells { h, .. } => *h,
         Node::Dots { fills, .. } => rows(fills.len(), 8) * 48. + 6.,
     }
 }
+/// 胶带一行多高：上下留白、胶带、名字。一列的胶带粗一些。
+fn strip_h(cols: usize) -> f64 { 6. + if cols <= 1 { 34. } else { 30. } + 4. + 16. + 8. }
 fn thumb_h(w: f64) -> f64 { ((w - PAD as f64 * 2. - 10.) / 3. * 0.68).round() }
 /// 这一列内容要多高（宽 `w` 时），占位按它留。
 pub fn height(nodes: &[Node], w: f32) -> f32 { (nodes.iter().map(|n| node_h(n, f64::from(w))).sum::<f64>() + if matches!(nodes.first(), Some(Node::Grab)) { 20. } else { 14. }) as f32 }
 
-struct Panel { view: *mut AnyObject, frame: Bounds<Pixels>, nodes: Vec<Node>, dark: Option<bool>, shown: bool }
+struct Panel { view: *mut AnyObject, scroll: Option<*mut AnyObject>, frame: Bounds<Pixels>, nodes: Vec<Node>, dark: Option<bool>, shown: bool }
 thread_local! { static PANEL: RefCell<Option<Panel>> = const { RefCell::new(None) }; }
 thread_local! { static SEEN: Cell<bool> = const { Cell::new(false) }; }
 
@@ -175,7 +189,7 @@ fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, window: &Window) {
             }
             let _: () = msg_send![view, setHidden: true];
             let _: () = msg_send![parent, addSubview: view];
-            *slot = Some(Panel { view, frame: Bounds::default(), nodes: vec![], dark: None, shown: false });
+            *slot = Some(Panel { view, scroll: None, frame: Bounds::default(), nodes: vec![], dark: None, shown: false });
         }
         let Some(panel) = slot.as_mut() else { return; };
         if panel.dark != Some(dark) {
@@ -201,6 +215,8 @@ fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, window: &Window) {
         }
         if fresh || panel.frame.size.width != frame.size.width || panel.nodes != nodes {
             let content: *mut AnyObject = msg_send![panel.view, contentView];
+            let same_page = !fresh && panel.nodes.first() == nodes.first();
+            let offset = panel.scroll.filter(|_| same_page).map_or(CGPoint::new(0., 0.), |scroll| msg_send![scroll, contentOffset]);
             // 页和页之间内容淡着换。
             if !fresh && panel.nodes.first() != nodes.first() {
                 let fade: *mut AnyObject = msg_send![AnyClass::get(c"CATransition").unwrap(), animation];
@@ -213,7 +229,7 @@ fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, window: &Window) {
             let n: usize = msg_send![kids, count];
             for i in 0..n { let kid: *mut AnyObject = msg_send![kids, objectAtIndex: i]; let _: () = msg_send![kid, removeFromSuperview]; }
             let _: () = msg_send![kids, release];
-            build(content, &nodes, f64::from(frame.size.width));
+            panel.scroll = build(content, &nodes, f64::from(frame.size.width), offset);
             panel.nodes = nodes;
         }
         panel.frame = frame;
@@ -232,6 +248,10 @@ unsafe impl objc2::Encode for CGAffineTransform {
 #[repr(C)]
 struct CGColor { _private: [u8; 0] }
 unsafe impl RefEncode for CGColor { const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGColor", &[])); }
+
+#[repr(C)]
+struct CGPath { _private: [u8; 0] }
+unsafe impl RefEncode for CGPath { const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGPath", &[])); }
 
 unsafe fn ui(name: &std::ffi::CStr) -> *mut AnyObject { unsafe { msg_send![AnyClass::get(c"UIColor").unwrap(), performSelector: objc2::runtime::Sel::register(name)] } }
 unsafe fn cg(color: *mut AnyObject) -> *const CGColor { unsafe { msg_send![color, CGColor] } }
@@ -351,6 +371,26 @@ unsafe fn fill(parent: *mut AnyObject, frame: CGRect, f: &Fill, radius: f64) -> 
         }
     }
 }
+/// 胶带样张的撕口，纸边直接透出玻璃的底色。
+unsafe fn torn_edges(view: *mut AnyObject, size: CGSize) {
+    unsafe {
+        let (w, h) = (size.width, size.height);
+        let path: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPath];
+        let _: () = msg_send![path, moveToPoint: CGPoint::new(3., 0.)];
+        for (x, y) in [(w - 3., 0.), (w, h * 0.16), (w - 3.5, h * 0.35), (w - 1., h * 0.56), (w - 4., h * 0.72),
+            (w, h * 0.89), (w - 2.5, h), (2., h), (0., h * 0.87), (3.5, h * 0.66), (1., h * 0.45), (4., h * 0.25), (0.5, h * 0.12)] {
+            let _: () = msg_send![path, addLineToPoint: CGPoint::new(x, y)];
+        }
+        let _: () = msg_send![path, closePath];
+        let cg: *const CGPath = msg_send![path, CGPath];
+        let mask: *mut AnyObject = msg_send![AnyClass::get(c"CAShapeLayer").unwrap(), layer];
+        let _: () = msg_send![mask, setFrame: CGRect::new(CGPoint::new(0., 0.), size)];
+        let _: () = msg_send![mask, setPath: cg];
+        let layer: *mut AnyObject = msg_send![view, layer];
+        let _: () = msg_send![layer, setMask: mask];
+    }
+}
+
 /// 选中的描边：比那一块大一圈的空心框。
 unsafe fn ring(parent: *mut AnyObject, frame: CGRect, radius: f64, color: *mut AnyObject, grow: f64, width: f64) {
     unsafe {
@@ -362,12 +402,13 @@ unsafe fn ring(parent: *mut AnyObject, frame: CGRect, radius: f64, color: *mut A
     }
 }
 
-unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64) {
+unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint) -> Option<*mut AnyObject> {
     unsafe {
         let pad = f64::from(PAD);
         let inner = w - pad * 2.;
         let (primary, secondary) = (ui(c"labelColor"), ui(c"secondaryLabelColor"));
         let well = ui(c"tertiarySystemFillColor");
+        let mut scroll = None;
         let mut y = if matches!(nodes.first(), Some(Node::Grab)) { 6. } else { 0. };
         for node in nodes {
             let h = node_h(node, w);
@@ -412,8 +453,18 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64) {
                             round(pill, 18.);
                         }
                         let ink = if on { if crate::theme::dark() { ui(c"blackColor") } else { ui(c"whiteColor") } } else { secondary };
-                        if let Some(name) = symbols.get(i) { icon(content, frame, name, 15., ink); }
-                        else if let Some(title) = titles.get(i) { label(content, frame, title, font(15., 0.23, ""), ink, 1); }
+                        match (symbols.get(i), titles.get(i)) {
+                            (Some(name), Some(title)) if on => {
+                                // 图标在前、文字在后，两样合起来居中。字宽按字数估：中文一个 15，别的 8.5。
+                                let tw: f64 = title.chars().map(|c| if c.is_ascii() { 8.5 } else { 15. }).sum();
+                                let x = frame.origin.x + (cell - tw - 22.) / 2.;
+                                icon(content, rect(x, y + 13., 18., 36.), name, 14., ink);
+                                label(content, rect(x + 22., y + 13., tw + 4., 36.), title, font(15., 0.23, ""), ink, 0);
+                            }
+                            (Some(name), _) => { icon(content, frame, name, 15., ink); }
+                            (None, Some(title)) => { label(content, frame, title, font(15., 0.23, ""), ink, 1); }
+                            _ => {}
+                        }
                         tap(content, frame, format!("{act}{i}"));
                     }
                 }
@@ -635,16 +686,52 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64) {
                         tap(content, frame, format!("{act}{i}"));
                     }
                 }
-                Node::Actions(items) => {
-                    let (tw, th) = ((inner - 10.) / 3., thumb_h(w));
+                Node::Strips { items, cols } => {
+                    let cols = (*cols).max(1);
+                    let (cw, rh) = ((inner - 8. * (cols - 1) as f64) / cols as f64, strip_h(cols));
+                    let th = if cols == 1 { 34. } else { 30. };
+                    for (i, strip) in items.iter().enumerate() {
+                        let cell = rect(pad + (cw + 8.) * (i % cols) as f64, y + rh * (i / cols) as f64, cw, rh - 2.);
+                        if strip.picked {
+                            let base = plain(content, cell);
+                            let _: () = msg_send![base, setBackgroundColor: well];
+                            round(base, 12.);
+                        }
+                        let swatch = rect(cell.origin.x + 8., cell.origin.y + 6., cw - 16., th);
+                        torn_edges(fill(content, swatch, &strip.fill, 0.), swatch.size);
+                        label(content, rect(cell.origin.x + 4., cell.origin.y + 6. + th + 4., cw - 8., 16.), &strip.title, font(12., 0.23, ""), if strip.picked { super::glass::ui_color(crate::theme::Theme::primary()) } else { secondary }, if cols == 1 { 1 } else { 0 });
+                        let button = tap(content, cell, strip.act.clone());
+                        let _: () = msg_send![button, setAccessibilityLabel: ns_string(&strip.title)];
+                        let _: () = msg_send![button, setSelected: strip.picked];
+                    }
+                }
+                Node::Scroll { nodes, .. } => {
+                    let view: *mut AnyObject = msg_send![AnyClass::get(c"UIScrollView").unwrap(), new];
+                    let full = f64::from(height(nodes, w as f32));
+                    let _: () = msg_send![view, setFrame: rect(0., y, w, h)];
+                    // 2 = UIScrollViewContentInsetAdjustmentNever：面板已经在安全区里。
+                    let _: () = msg_send![view, setContentInsetAdjustmentBehavior: 2isize];
+                    let _: () = msg_send![view, setContentSize: CGSize::new(w, full)];
+                    let _: () = msg_send![view, setClipsToBounds: true];
+                    let _ = build(view, nodes, w, CGPoint::new(0., 0.));
+                    let _: () = msg_send![content, addSubview: view];
+                    let _: () = msg_send![view, setContentOffset: CGPoint::new(0., offset.y.clamp(0., (full - h).max(0.)))];
+                    let _: () = msg_send![view, release];
+                    scroll = Some(view);
+                }
+                Node::Actions(items) | Node::Wide(items) => {
+                    let n = if matches!(node, Node::Wide(_)) { items.len().max(1) } else { 3 };
+                    let (tw, th) = ((inner - 5. * (n - 1) as f64) / n as f64, thumb_h(w));
                     for (i, (name, title, act)) in items.iter().enumerate() {
                         let frame = rect(pad + (tw + 5.) * i as f64, y, tw, th);
                         let base = plain(content, frame);
                         let _: () = msg_send![base, setBackgroundColor: well];
                         round(base, 10.);
                         icon(content, rect(frame.origin.x, y + th / 2. - 26., tw, 26.), name, 18., secondary);
-                        label(content, rect(frame.origin.x + 4., y + th / 2. + 4., tw - 8., 18.), title, font(13., 0.23, ""), secondary, 1);
-                        tap(content, frame, act.clone());
+                        let caption = label(content, rect(frame.origin.x + 4., y + th / 2. + 4., tw - 8., 18.), title, font(13., 0.23, ""), secondary, 1);
+                        let button = tap(content, frame, act.clone());
+                        let _: () = msg_send![caption, setIsAccessibilityElement: false];
+                        let _: () = msg_send![button, setAccessibilityLabel: ns_string(title)];
                     }
                 }
                 Node::Dots { fills, picked, act } => {
@@ -738,6 +825,7 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64) {
             }
             y += h;
         }
+        scroll
     }
 }
 
