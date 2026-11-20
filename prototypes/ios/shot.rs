@@ -677,6 +677,18 @@ pub fn from_card(id: &str) {
     FACE.with(|f| *f.borrow_mut() = Some((id.to_string(), r, face)));
     let under: Option<Retained<AnyObject>> = metal().and_then(|m| unsafe { msg_send![m, snapshotViewAfterScreenUpdates: false] });
     if let Some(u) = &under { unsafe { let _: () = msg_send![&**u, setUserInteractionEnabled: false]; } }
+    // 先把首页的样子盖在 Metal 上面、马上提交：真机上文档的第一帧可能在 `open_zoom` 缩小、遮罩之前就上了屏，
+    // 整屏的文档闪一下（录屏 2026-11-21 07-01-53）。`open_zoom` 再把它挪到 Metal 下面垫着；
+    // 万一没换成页（比如被「先保存」拦下），过一会儿自己拿掉。
+    if let (Some(u), Some(metal), Some(sup)) = (&under, metal(), superview()) {
+        unsafe {
+            let frame: CGRect = msg_send![metal, frame];
+            let _: () = msg_send![&**u, setFrame: frame];
+            let _: () = msg_send![sup, insertSubview: &**u, aboveSubview: metal];
+            let _: () = msg_send![AnyClass::get(c"CATransaction").unwrap(), flush];
+            let _: () = msg_send![&**u, performSelector: objc2::sel!(removeFromSuperview), withObject: std::ptr::null_mut::<AnyObject>(), afterDelay: 0.9f64];
+        }
+    }
     UNDER.with(|u| *u.borrow_mut() = under);
     OPENING.with(|o| o.set(true));
 }
