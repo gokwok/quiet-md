@@ -25,7 +25,7 @@ serde_json = "1.0.154"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.13.3"
 uuid = { version = "1.28.0", features = ["v4"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 raw-window-handle = "0.6"
 objc2 = "0.6.5"
 block2 = "0.6.2"

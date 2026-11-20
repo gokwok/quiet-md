@@ -6,7 +6,7 @@ use gpui::*;
 use objc2::{ClassType, define_class, msg_send};
 use objc2::runtime::{AnyClass, AnyObject, NSObject};
 
-use super::panel::{Art, Card, Fill, Node, Strip, Tile, Trailing};
+use super::panel::{Art, Card, Fill, Material, Node, PhotoTile, Strip, Tile, Trailing};
 use super::style::{hex, to_hex};
 use super::washi;
 use crate::app::{View, Workspace};
@@ -14,14 +14,27 @@ use crate::settings::tr;
 use crate::store::{Backdrop, DividerStyle, DocStyle};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Page { Main, Text, Font, Paper, Background, Divider, Pattern, Gallery, Washi }
+pub enum Page { Main, Text, Font, Paper, Background, PhotoLibrary, Divider, Pattern, Gallery, Washi }
+
+#[path = "background_gallery.rs"]
+mod background_gallery;
 
 thread_local! { static PAGE: Cell<Option<Page>> = const { Cell::new(None) }; }
 // 背景页停在哪一段（没有背景时也能停在别的段上挑）。
 thread_local! { static TAB: Cell<Option<usize>> = const { Cell::new(None) }; }
+// 同一轮设置里，切回某种背景时继续用刚才选的值。
+thread_local! {
+    static BACKGROUNDS: RefCell<[Option<Backdrop>; 3]> = const { RefCell::new([None, None, None]) };
+    static SUGGESTIONS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+}
 
 pub fn is_open() -> bool { PAGE.with(|p| p.get()).is_some() }
-pub fn open() { PAGE.with(|p| p.set(Some(Page::Main))); TAB.with(|t| t.set(None)); }
+pub fn open() {
+    PAGE.with(|p| p.set(Some(Page::Main)));
+    TAB.with(|t| t.set(None));
+    BACKGROUNDS.with(|drafts| *drafts.borrow_mut() = [None, None, None]);
+    SUGGESTIONS.with(|photos| photos.borrow_mut().clear());
+}
 pub fn close() { PAGE.with(|p| p.set(None)); }
 
 fn washi_strips(tapes: &[washi::Tape], pattern: &str, cols: usize) -> Node {
@@ -92,7 +105,7 @@ fn style_name(style: &DocStyle) -> String {
 
 /// 自己存下来的样式：名字和样式，放在文档库旁的 styles.json 里。
 fn saved_path() -> std::path::PathBuf { crate::store::Store::root_dir().join("styles.json") }
-/// 图库里摆出来的那几套：最近存的六套（面板不滚动，再多就顶出屏幕了）。
+/// 图库里摆出来的那几套：最近存的六套。
 fn shown() -> Vec<(String, DocStyle)> { let mut all = saved(); all.reverse(); all.truncate(6); all }
 fn saved() -> Vec<(String, DocStyle)> { std::fs::read(saved_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() }
 fn save_all(all: &[(String, DocStyle)]) -> std::io::Result<()> { std::fs::write(saved_path(), serde_json::to_vec_pretty(all).map_err(std::io::Error::other)?) }
@@ -103,38 +116,89 @@ fn same(a: &str, v: u32) -> bool { a.eq_ignore_ascii_case(&h(v)) }
 
 /// 文字和纸的对比度太低（WCAG 的比值不到 2.5）：标题栏给个警告，不替使用者改色。
 fn low_contrast() -> bool {
-    let lum = |c: Hsla| { let c = Rgba::from(c); let f = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }; 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b) };
-    let (a, b) = (lum(crate::editor_theme::Theme::text()), lum(crate::editor_theme::Theme::bg_body()));
-    (a.max(b) + 0.05) / (a.min(b) + 0.05) < 2.5
+    super::style::contrast(crate::editor_theme::Theme::text(), crate::editor_theme::Theme::bg_body()) < 2.5
 }
 
 fn backdrop_fill(b: &Backdrop) -> Option<Fill> {
     Some(match b {
         Backdrop::Color { color } => Fill::Color(hex(color)?),
         Backdrop::Gradient { from, to, dir } => Fill::Gradient(hex(from)?, hex(to)?, *dir),
-        Backdrop::Image { src, .. } => Fill::Image(super::style::image_path(src)?),
+        Backdrop::Image { src, blur } => {
+            let path = super::style::image_path(src)?;
+            Fill::Image(if *blur { super::style::blurred(&path).unwrap_or(path) } else { path })
+        }
     })
 }
 
+fn style_card(name: String, style: &DocStyle) -> Card {
+    use super::panel::MiniDivider;
+    let paper = style.paper.as_deref().and_then(hex).unwrap_or_else(|| crate::themes::base_token("bg_body"));
+    let ink = style.text.as_deref().and_then(hex).unwrap_or_else(|| crate::themes::base_token("text"));
+    let divider = match &style.divider {
+        Some(DividerStyle::Tape { pattern, color }) => super::style::tape_image(pattern, color.as_deref().unwrap_or(super::style::TAPE), true).map(MiniDivider::Tape),
+        Some(DividerStyle::Doodle) => super::style::doodle_image(&to_hex(ink)).map(MiniDivider::Doodle),
+        None => None,
+    }.unwrap_or(MiniDivider::Line);
+    let design = FONTS.iter().find(|f| Some(f.0) == style.font.as_deref()).map_or("", |f| f.0);
+    Card { fill: style.background.as_ref().and_then(backdrop_fill), paper, ink, design, name, faded: style.faded, divider }
+}
+
+fn background_tab(background: &Option<Backdrop>) -> usize {
+    match background { None => 0, Some(Backdrop::Color { .. }) => 1, Some(Backdrop::Gradient { .. }) => 2, Some(Backdrop::Image { .. }) => 3 }
+}
+
+fn suggested_backgrounds(background: &Option<Backdrop>) -> Vec<PhotoTile> {
+    let selected = if let Some(Backdrop::Image { src, .. }) = background { Some(src.as_str()) } else { None };
+    let mut sources: Vec<String> = selected.into_iter().map(str::to_string).collect();
+    let suggestions = SUGGESTIONS.with(|photos| {
+        let photos = photos.borrow();
+        if photos.is_empty() { super::style::PHOTO_BACKGROUNDS.iter().map(|photo| photo.id).collect() } else { photos.clone() }
+    });
+    for id in suggestions {
+        let src = format!("builtin:{id}");
+        if !sources.contains(&src) { sources.push(src); }
+    }
+    sources.into_iter().filter_map(|src| {
+        let path = super::style::image_path(&src)?;
+        let title = src.strip_prefix("builtin:").and_then(super::style::photo_background).map_or_else(
+            || if src.starts_with("file:") { tr("当前照片", "Current photo").into() } else { src.trim_start_matches("builtin:").to_string() },
+            |photo| tr(photo.zh, photo.en).into(),
+        );
+        Some(PhotoTile { path, title, credit: None, picked: selected == Some(src.as_str()), act: format!("bg-image:{src}") })
+    }).take(6).collect()
+}
+
+fn shuffle_suggestions() {
+    let mut photos: Vec<_> = super::style::PHOTO_BACKGROUNDS.iter().map(|p| p.id).chain(super::style::BUILTIN).collect();
+    for (i, random) in uuid::Uuid::new_v4().as_bytes().iter().enumerate().take(photos.len()).skip(1) {
+        photos.swap(i, usize::from(*random) % (i + 1));
+    }
+    SUGGESTIONS.with(|v| *v.borrow_mut() = photos);
+}
+
 fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
-    use crate::editor_theme::Theme;
     let back = "page:main".to_string();
     match page {
         Page::Main => {
             let font = FONTS.iter().find(|f| Some(f.0) == style.font.as_deref()).unwrap_or(&FONTS[0]);
             let cover = w.editor.as_ref().and_then(|e| e.read(cx).core.doc.cover.as_ref().map(|c| c.src.clone()));
+            let current = style_card(style_name(style), style);
+            // 后面露出不同风格的页边，前面永远是当前文档。
+            let others = presets().into_iter()
+                .filter(|(id, _, _)| matches!(*id, "ocean" | "blossom" | "lilac") && Some(*id) != style.preset.as_deref())
+                .take(2).map(|(_, name, preset)| style_card(name.into(), &preset)).collect();
             vec![Node::Grab, Node::Tiles(vec![
                 vec![
-                    Tile { span: 1, title: tr("文本颜色", "Text color").into(), art: Art::Ink(Theme::text()), act: "page:text".into() },
+                    Tile { span: 1, title: tr("文本颜色", "Text color").into(), art: Art::Ink { ink: current.ink, paper: current.paper }, act: "page:text".into() },
                     Tile { span: 2, title: tr("字体", "Font").into(), art: Art::Font(font.3.into(), font.0), act: "page:font".into() },
                 ],
                 vec![
                     Tile { span: 1, title: tr("封面", "Cover").into(), art: Art::Cover(cover), act: "cover".into() },
-                    Tile { span: 1, title: tr("背景", "Background").into(), art: Art::Fill(style.background.as_ref().and_then(backdrop_fill)), act: "page:background".into() },
-                    Tile { span: 1, title: tr("纸", "Paper").into(), art: Art::Paper(Theme::bg_body()), act: "page:paper".into() },
+                    Tile { span: 1, title: tr("背景", "Background").into(), art: Art::Fill(current.fill.clone()), act: "page:background".into() },
+                    Tile { span: 1, title: tr("纸", "Paper").into(), art: Art::Paper { paper: current.paper, ink: current.ink }, act: "page:paper".into() },
                 ],
                 vec![
-                    Tile { span: 2, title: tr("样式", "Style").into(), art: Art::Stack(style.background.as_ref().and_then(backdrop_fill), Theme::bg_body(), Theme::text(), style_name(style)), act: "page:gallery".into() },
+                    Tile { span: 2, title: tr("样式", "Style").into(), art: Art::Stack { current, others }, act: "page:gallery".into() },
                     Tile { span: 1, title: tr("分隔符", "Divider").into(), art: match &style.divider {
                         None => Art::Rules(None),
                         Some(DividerStyle::Tape { pattern, color }) => Art::Rules(super::style::tape_image(pattern, color.as_deref().unwrap_or(super::style::TAPE), true).map(Fill::Image)),
@@ -205,33 +269,34 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
             ]
         }
         Page::Gallery => {
-            let card = |name: &str, s: &DocStyle| Card {
-                // 没有背景的：纸色压暗一点当底，上面那张小纸才看得出来。
-                fill: s.background.as_ref().and_then(backdrop_fill).unwrap_or_else(|| { let p = s.paper.as_deref().and_then(hex).unwrap_or(crate::themes::base_token("bg_body")); Fill::Color(Hsla { l: (p.l - 0.1).max(0.), ..p }) }),
-                paper: s.paper.as_deref().and_then(hex).unwrap_or(crate::themes::base_token("bg_body")),
-                ink: s.text.as_deref().and_then(hex).unwrap_or(crate::themes::base_token("text")),
-                name: name.to_string(),
-            };
             let mine = shown();
-            let mut v = vec![Node::Header { title: tr("样式图库", "Style gallery").into(), warn: false, reset: None, close: back }];
+            let mut content = vec![];
             if !mine.is_empty() {
-                v.push(Node::Caption(tr("你的样式", "Your styles").into()));
-                v.push(Node::Cards { items: mine.iter().map(|(n, s)| card(n, s)).collect(), picked: mine.iter().position(|(n, _)| style.preset.as_deref().and_then(|p| p.strip_prefix("saved:")) == Some(n.as_str())), act: "gallery-mine:".into() });
+                content.push(Node::Caption(tr("你的样式", "Your styles").into()));
+                content.push(Node::Cards { items: mine.iter().map(|(n, s)| style_card(n.clone(), s)).collect(), picked: mine.iter().position(|(n, _)| style.preset.as_deref().and_then(|p| p.strip_prefix("saved:")) == Some(n.as_str())), act: "gallery-mine:".into() });
             }
             let all = presets();
-            v.push(Node::Caption(tr("内置样式", "Built-in styles").into()));
-            v.push(Node::Cards { items: all.iter().map(|(_, n, s)| card(n, s)).collect(), picked: all.iter().position(|(id, _, s)| if s.is_plain() { style.is_plain() } else { style.preset.as_deref() == Some(*id) }), act: "gallery:".into() });
-            let mut actions = vec![];
-            if !style.is_plain() && !style.preset.as_deref().is_some_and(|p| p.starts_with("saved:")) { actions.push(("square.and.arrow.down", tr("保存", "Save").into(), "gallery-save".into())); }
-            if style.preset.as_deref().is_some_and(|p| p.starts_with("saved:")) { actions.push(("trash", tr("删除这个样式", "Delete style").into(), "gallery-delete".into())); }
-            if !actions.is_empty() { v.push(Node::Actions(actions)); }
+            content.push(Node::Caption(tr("内置样式", "Built-in styles").into()));
+            content.push(Node::Cards { items: all.iter().map(|(_, n, s)| style_card((*n).into(), s)).collect(), picked: all.iter().position(|(id, _, s)| if s.is_plain() { style.is_plain() } else { style.preset.as_deref() == Some(*id) }), act: "gallery:".into() });
+            let action = if style.preset.as_deref().is_some_and(|p| p.starts_with("saved:")) { Some((tr("删除这个样式", "Delete style").into(), "gallery-delete")) }
+                else { (!style.is_plain()).then(|| (tr("保存", "Save").into(), "gallery-save")) };
+            let mut v = vec![
+                Node::Header { title: tr("样式图库", "Style gallery").into(), warn: false, reset: None, close: back },
+                Node::StyleFooter { title: tr("当前样式", "Current style").into(), card: style_card(style_name(style), style), action },
+            ];
+            let (_, safe, viewport) = super::layout();
+            let width = f32::from(viewport.width - px(26.));
+            let available = f32::from(viewport.height - safe.top - safe.bottom.max(px(34.))) - 8.;
+            let max_height = available.min(f32::from(viewport.height) * 0.76) - super::panel::height(&v, width);
+            v.insert(1, Node::Scroll { nodes: content, max_height: f64::from(max_height.max(1.)) });
             v
         }
+        Page::PhotoLibrary => background_gallery::nodes(),
         Page::Background => {
-            let tab = TAB.with(|t| t.get()).unwrap_or(match &style.background { None => 0, Some(Backdrop::Color { .. }) => 1, Some(Backdrop::Gradient { .. }) => 2, Some(Backdrop::Image { .. }) => 3 });
+            let tab = TAB.with(|t| t.get()).unwrap_or_else(|| background_tab(&style.background));
             let mut v = vec![
                 Node::Header { title: tr("背景", "Background").into(), warn: false, reset: style.background.is_some().then(|| "bg-tab:0".to_string()), close: back },
-                Node::Segments { symbols: vec!["rectangle.slash", "square.fill", "square.bottomhalf.filled", "photo"], titles: vec![], picked: tab, act: "bg-tab:".into() },
+                Node::BackgroundModes { titles: [("无", "None"), ("纯色", "Solid"), ("渐变", "Gradient"), ("照片", "Photo")].map(|(zh, en)| tr(zh, en).into()), picked: tab },
             ];
             let effect = |v: &mut Vec<Node>| {
                 v.push(Node::Caption(tr("效果", "Effect").into()));
@@ -247,8 +312,7 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 2 => {
                     let (from, to, dir) = match &style.background { Some(Backdrop::Gradient { from, to, dir }) => (hex(from).unwrap_or(c(GRADIENT[0].0)), hex(to).unwrap_or(c(GRADIENT[0].1)), *dir), _ => (c(GRADIENT[0].0), c(GRADIENT[0].1), 0) };
                     let picked = GRADIENT.iter().position(|g| to_hex(from) == h(g.0) && to_hex(to) == h(g.1));
-                    // 色点里的渐变一律横着画，方向另有一行。
-                    v.push(Node::Swatches { fills: GRADIENT.iter().map(|g| Fill::Gradient(c(g.0), c(g.1), 1)).collect(), picked, act: "bg-gradient:".into(), custom: None });
+                    v.push(Node::Swatches { fills: GRADIENT.iter().map(|g| Fill::Gradient(c(g.0), c(g.1), dir)).collect(), picked, act: "bg-gradient:".into(), custom: None });
                     v.push(Node::Caption(tr("渐变", "Gradient").into()));
                     v.push(Node::Row { label: tr("起始颜色", "Start color").into(), trailing: Trailing::Chip(Fill::Color(from), "custom:from".into()) });
                     v.push(Node::Row { label: tr("结束颜色", "End color").into(), trailing: Trailing::Chip(Fill::Color(to), "custom:to".into()) });
@@ -259,13 +323,24 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 3 => {
                     let now = match &style.background { Some(Backdrop::Image { src, .. }) => Some(src.as_str()), _ => None };
                     let blur = matches!(&style.background, Some(Backdrop::Image { blur: true, .. }));
-                    v.push(Node::Thumbs { fills: super::style::BUILTIN.iter().filter_map(|n| super::style::image_path(&format!("builtin:{n}")).map(Fill::Image)).collect(), picked: now.and_then(|s| super::style::BUILTIN.iter().position(|n| s.strip_prefix("builtin:") == Some(*n))), act: "bg-image:".into() });
-                    v.push(Node::Actions(vec![("arrow.clockwise", tr("随机", "Random").into(), "bg-random".into()), ("photo.on.rectangle", tr("相册", "Photos").into(), "bg-photos".into())]));
+                    v.push(Node::Photos { items: suggested_backgrounds(&style.background), library: false });
+                    v.push(Node::Actions(vec![("arrow.clockwise", tr("随机", "Random").into(), "bg-random".into()),
+                        ("globe", tr("在线图库", "Online library").into(), "bg-library".into()),
+                        ("photo.on.rectangle", tr("相册", "Photos").into(), "bg-photos".into())]));
+                    if let Some(credit) = now.and_then(background_gallery::credit) { v.push(Node::Caption(credit)); }
                     v.push(Node::Caption(tr("效果", "Effect").into()));
                     v.push(Node::Row { label: tr("模糊图像", "Blur image").into(), trailing: Trailing::Switch(blur, "bg-blur".into()) });
                     v.push(Node::Choice { labels: vec![tr("沉浸式", "Immersive").into(), tr("淡化", "Faded").into()], picked: style.faded as usize, act: "faded:".into() });
                 }
                 _ => v.push(Node::Empty("rectangle.on.rectangle.angled", tr("添加背景使其更美观", "Add a background to make it prettier").into())),
+            }
+            let (_, safe, viewport) = super::layout();
+            let width = f32::from(viewport.width - px(26.));
+            let available = f32::from(viewport.height - safe.top - safe.bottom.max(px(34.))) - 12.;
+            if super::panel::height(&v, width) > available {
+                let content = v.split_off(2);
+                let max = available - super::panel::height(&v, width);
+                v.push(Node::Scroll { nodes: content, max_height: f64::from(max.max(1.)) });
             }
             v
         }
@@ -281,24 +356,52 @@ pub fn element(w: &Workspace, cx: &mut Context<Workspace>) -> Option<AnyElement>
     let (_, _, viewport) = super::layout();
     let width = viewport.width - px(26.);
     let height = px(super::panel::height(&nodes, f32::from(width)));
+    let material = match page {
+        Page::Main | Page::Gallery | Page::Background | Page::PhotoLibrary => {
+            let paper = crate::editor_theme::Theme::bg_body();
+            let dark = crate::theme::dark();
+            // 玻璃保留纸后面的颜色，纸色薄层压住穿过面板的高饱和图案。
+            Material { tint: Some(paper.opacity(if dark { 0.30 } else { 0.12 })), wash: Some(paper.opacity(if dark { 0.25 } else { 0.07 })) }
+        }
+        _ => Material::default(),
+    };
     Some(div().id("style-panel").absolute().left(px(13.)).bottom(super::insets().bottom.max(px(34.)) + px(1.)).w(width).h(height).occlude()
-        .child(super::panel::slot(nodes)).into_any_element())
+        .child(super::panel::slot(nodes, material)).into_any_element())
 }
 
 /// 改这篇文档的样式：存进索引，改了手上的那份，让正文重画。
 fn edit(w: &mut Workspace, cx: &mut Context<Workspace>, f: impl FnOnce(&mut DocStyle)) {
-    let Some(id) = w.current.clone() else { return; };
-    let Some(ix) = w.entries.iter().position(|e| e.id == id) else { return; };
+    update_style(w, cx, f);
+}
+
+fn update_style(w: &mut Workspace, cx: &mut Context<Workspace>, f: impl FnOnce(&mut DocStyle)) -> bool {
+    let Some(id) = w.current.clone() else { return false; };
+    let Some(ix) = w.entries.iter().position(|e| e.id == id) else { return false; };
     let mut style = w.entries[ix].meta.style.clone().unwrap_or_default();
     let before = style.clone();
     f(&mut style);
+    let background_changed = style.background != before.background || style.faded != before.faded;
     // 从图库里套来的样式，手动改过一处就不算那一套了。
     if style != before && style.preset == before.preset { style.preset = None; }
     let style = (!style.is_plain()).then_some(style);
-    if let Err(e) = w.store.set_style(&id, style.clone()) { return w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx); }
+    if let Err(e) = w.store.set_style(&id, style.clone()) {
+        w.show_toast_kind(crate::ui::ToastKind::Error, &e.to_string(), cx);
+        return false;
+    }
     w.entries[ix].meta.style = style;
+    if background_changed && matches!(PAGE.with(|p| p.get()), Some(Page::Background | Page::PhotoLibrary)) {
+        super::glass::selection_haptic();
+    }
     if let Some(editor) = w.editor.clone() { editor.update(cx, |_, cx| cx.notify()); }
     cx.notify();
+    true
+}
+
+fn set_photo(src: String, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
+    update_style(w, cx, |s| {
+        let blur = matches!(&s.background, Some(Backdrop::Image { blur: true, .. }));
+        s.background = Some(Backdrop::Image { src, blur });
+    })
 }
 
 /// 面板里点了什么。动作是「名字:参数」。
@@ -308,7 +411,10 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
     match name {
         "page" => {
             let previous = PAGE.with(|p| p.replace(Some(match arg { "text" => Page::Text, "font" => Page::Font, "paper" => Page::Paper, "background" => Page::Background, "divider" => Page::Divider, "pattern" => Page::Pattern, "gallery" => Page::Gallery, "washi" => Page::Washi, _ => Page::Main })));
-            TAB.with(|t| t.set((previous == Some(Page::Washi) && arg == "pattern").then_some(1)));
+            TAB.with(|t| t.set(match (previous, arg) {
+                (Some(Page::PhotoLibrary), "background") => Some(3),
+                _ => None,
+            }));
             cx.notify();
         }
         "text" => edit(w, cx, |s| s.text = ix.checked_sub(1).and_then(|i| TEXT.get(i)).map(|v| h(*v))),
@@ -316,40 +422,61 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
         "font" => edit(w, cx, |s| s.font = FONTS.get(ix).filter(|f| !f.0.is_empty()).map(|f| f.0.to_string())),
         "faded" => edit(w, cx, |s| s.faded = ix == 1),
         // 换到哪一段就用上那一类的背景（原来就是这一类的不动）；第一段是去掉背景。
-        "bg-tab" => {
-            TAB.with(|t| t.set(Some(ix)));
-            edit(w, cx, |s| match (ix, &s.background) {
-                (0, _) => { s.background = None; s.faded = false; }
-                (1, Some(Backdrop::Color { .. })) | (2, Some(Backdrop::Gradient { .. })) | (3, Some(Backdrop::Image { .. })) => {}
-                (1, _) => s.background = Some(Backdrop::Color { color: h(SOLID[0]) }),
-                (2, _) => s.background = Some(Backdrop::Gradient { from: h(GRADIENT[0].0), to: h(GRADIENT[0].1), dir: 0 }),
-                (3, _) => s.background = super::style::BUILTIN.first().map(|n| Backdrop::Image { src: format!("builtin:{n}"), blur: false }),
-                _ => {}
+        "bg-tab" if ix < 4 => {
+            let committed = update_style(w, cx, |s| {
+                let before = background_tab(&s.background);
+                if before == ix { return; }
+                s.background = BACKGROUNDS.with(|d| {
+                    let mut drafts = d.borrow_mut();
+                    if let Some(prev) = before.checked_sub(1) { drafts[prev] = s.background.clone(); }
+                    ix.checked_sub(1).and_then(|i| drafts[i].clone())
+                }).or_else(|| match ix {
+                    1 => Some(Backdrop::Color { color: h(SOLID[0]) }),
+                    2 => Some(Backdrop::Gradient { from: h(GRADIENT[0].0), to: h(GRADIENT[0].1), dir: 0 }),
+                    3 => Some(Backdrop::Image { src: format!("builtin:{}", super::style::PHOTO_BACKGROUNDS[0].id), blur: false }),
+                    _ => None,
+                });
+                if ix == 0 { s.faded = false; }
             });
+            if committed { TAB.with(|t| t.set(Some(ix))); }
         }
         "bg-color" => edit(w, cx, |s| if let Some(v) = SOLID.get(ix) { s.background = Some(Backdrop::Color { color: h(*v) }); }),
         "bg-gradient" => edit(w, cx, |s| if let Some(g) = GRADIENT.get(ix) {
             let dir = match &s.background { Some(Backdrop::Gradient { dir, .. }) => *dir, _ => 0 };
             s.background = Some(Backdrop::Gradient { from: h(g.0), to: h(g.1), dir });
         }),
-        "bg-dir" => edit(w, cx, |s| if let Some(Backdrop::Gradient { dir, .. }) = &mut s.background { *dir = ix as u8; }),
-        "bg-image" => edit(w, cx, |s| if let Some(n) = super::style::BUILTIN.get(ix) {
-            let blur = matches!(&s.background, Some(Backdrop::Image { blur: true, .. }));
-            s.background = Some(Backdrop::Image { src: format!("builtin:{n}"), blur });
-        }),
-        "bg-random" => { let n = super::style::BUILTIN.len(); if n > 0 { let i = crate::time::now() as usize % n; action(&format!("bg-image:{i}"), w, window, cx); } }
+        "bg-dir" if ix < DIRS.len() => edit(w, cx, |s| if let Some(Backdrop::Gradient { dir, .. }) = &mut s.background { *dir = ix as u8; }),
+        "bg-image" => if let Some(name) = arg.strip_prefix("builtin:")
+            && (super::style::photo_background(name).is_some() || super::style::BUILTIN.contains(&name)) { set_photo(arg.into(), w, cx); },
+        "bg-random" => { shuffle_suggestions(); super::glass::haptic(); cx.notify(); }
+        "bg-library" => {
+            PAGE.with(|p| p.set(Some(Page::PhotoLibrary)));
+            background_gallery::load("", w, window, cx);
+        }
+        "bg-search" => background_gallery::prompt(),
+        "bg-retry" => background_gallery::retry(w, window, cx),
+        "bg-use-photo" => if let Ok(id) = arg.parse() { background_gallery::apply(id, w, window, cx); },
         "bg-blur" => edit(w, cx, |s| if let Some(Backdrop::Image { blur, .. }) = &mut s.background { *blur = !*blur; }),
         "bg-photos" => {
+            let document = w.current.clone();
+            let root = crate::store::Store::root_dir();
             let rx = super::prompt_for_images(cx, PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
             cx.spawn_in(window, async move |this, cx| {
                 let Ok(Ok(Some(paths))) = rx.await else { return; };
                 let Some(from) = paths.into_iter().next() else { return; };
                 let _ = this.update_in(cx, |w, _, cx| {
+                    if w.current != document || crate::store::Store::root_dir() != root
+                        || PAGE.with(|p| p.get()) != Some(Page::Background)
+                        || !matches!(super::style::of(w).and_then(|s| s.background), Some(Backdrop::Image { .. })) { return; }
                     let ext = from.extension().and_then(|s| s.to_str()).unwrap_or("jpg").to_ascii_lowercase();
                     let file = format!("{}.{ext}", uuid::Uuid::new_v4());
                     let dir = super::style::photos_dir();
-                    if std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&from, dir.join(&file))).is_err() { return w.show_toast_kind(crate::ui::ToastKind::Error, tr("没能存下这张图片", "Couldn’t save the image"), cx); }
-                    edit(w, cx, |s| { let blur = matches!(&s.background, Some(Backdrop::Image { blur: true, .. })); s.background = Some(Backdrop::Image { src: format!("file:{file}"), blur }); });
+                    let target = dir.join(&file);
+                    if std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&from, &target)).is_err() {
+                        let _ = std::fs::remove_file(target);
+                        return w.show_toast_kind(crate::ui::ToastKind::Error, tr("没能存下这张图片", "Couldn’t save the image"), cx);
+                    }
+                    if !set_photo(format!("file:{file}"), w, cx) { let _ = std::fs::remove_file(target); }
                 });
             }).detach();
         }
@@ -485,7 +612,11 @@ fn pick_color(target: &str, w: &Workspace) {
         let sheet: *mut AnyObject = msg_send![picker, sheetPresentationController];
         if !sheet.is_null() && let Some(detent) = AnyClass::get(c"UISheetPresentationControllerDetent") {
             let medium: *mut AnyObject = msg_send![detent, mediumDetent];
-            let detents: *mut AnyObject = msg_send![AnyClass::get(c"NSArray").unwrap(), arrayWithObject: medium];
+            let detents: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), arrayWithObject: medium];
+            if matches!(target, "bg" | "from" | "to") {
+                let large: *mut AnyObject = msg_send![detent, largeDetent];
+                let _: () = msg_send![detents, addObject: large];
+            }
             let _: () = msg_send![sheet, setDetents: detents];
             // 不压暗上面的正文，改色时看得清。
             let _: () = msg_send![sheet, setLargestUndimmedDetentIdentifier: ns_string("com.apple.UIKit.medium")];

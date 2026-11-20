@@ -12,6 +12,9 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
+#[path = "style_cards.rs"]
+mod style_cards;
+
 /// 一块的填充：纯色、两色渐变（方向同 `store::Backdrop::Gradient`）、图片文件。
 #[derive(Clone, PartialEq, Debug)]
 pub enum Fill { Color(Hsla), Gradient(Hsla, Hsla, u8), Image(String) }
@@ -31,8 +34,8 @@ pub enum Trailing {
 pub struct Tile { pub span: u8, pub title: String, pub art: Art, pub act: String }
 #[derive(Clone, PartialEq, Debug)]
 pub enum Art {
-    /// 「文本颜色」：深色的一格，字是当前的文字颜色。
-    Ink(Hsla),
+    /// 「文本颜色」：由纸色衬着当前文字色的笔尖。
+    Ink { ink: Hsla, paper: Hsla },
     /// 字体：大字是字体的名字，用它自己的字体写；下面一行小字。
     Font(String, &'static str),
     /// 封面：一张缩略图在上，名字在下；没有封面时是个图标。
@@ -42,16 +45,19 @@ pub enum Art {
     /// 名字在左上角，右下一个图标（样式、分隔符）。
     Symbol(&'static str),
     /// 纸：整格是纸的颜色，右下角折起一个角。
-    Paper(Hsla),
-    /// 样式：右边一叠小卡片，最上面那张是现在的样式（背景，纸，字，名字）。
-    Stack(Option<Fill>, Hsla, Hsla, String),
+    Paper { paper: Hsla, ink: Hsla },
+    /// 样式：当前文档在前，其他样式露出一小段页边。
+    Stack { current: Card, others: Vec<Card> },
     /// 分隔符：下面三条由细到粗的线；胶带时是一条胶带。
     Rules(Option<Fill>),
 }
 
-/// 样式图库里的一张卡片。
+/// 样式的缩略页，主面板和图库共用。
 #[derive(Clone, PartialEq, Debug)]
-pub struct Card { pub fill: Fill, pub paper: Hsla, pub ink: Hsla, pub name: String }
+pub struct Card { pub fill: Option<Fill>, pub paper: Hsla, pub ink: Hsla, pub name: String, pub design: &'static str, pub faded: bool, pub divider: MiniDivider }
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum MiniDivider { Line, Tape(String), Doodle(String) }
 
 /// 格式面板（`format.rs`）的一格：长什么样，点了交出什么，选没选中，能不能点，有没有一层浅底，占几份宽。
 #[derive(Clone, PartialEq, Debug)]
@@ -80,6 +86,9 @@ pub enum Look {
 pub struct Strip { pub fill: Fill, pub title: String, pub picked: bool, pub act: String }
 
 #[derive(Clone, PartialEq, Debug)]
+pub struct PhotoTile { pub path: String, pub title: String, pub credit: Option<String>, pub picked: bool, pub act: String }
+
+#[derive(Clone, PartialEq, Debug)]
 pub enum Node {
     /// 主面板顶上的小横条。
     Grab,
@@ -88,6 +97,7 @@ pub enum Node {
     /// 一条分段：图标（SF Symbols）或文字，当前那一段是深色的胶囊。点了交出 `act` + 序号。
     /// 图标和文字都给了：选中那段图标后面跟着文字，别的段只有图标（照 Craft 的分隔符样式）。
     Segments { symbols: Vec<&'static str>, titles: Vec<String>, picked: usize, act: String },
+    BackgroundModes { titles: [String; 4], picked: usize },
     /// 色点，一排六个。点了交出 `act` + 序号；`custom` 是最后那颗彩虹圈（动作，是否选中，圈里的颜色）。
     Swatches { fills: Vec<Fill>, picked: Option<usize>, act: String, custom: Option<(String, bool, Hsla)> },
     Caption(String),
@@ -97,16 +107,21 @@ pub enum Node {
     Tiles(Vec<Vec<Tile>>),
     /// 缩略图，一排三张，选中的描边。点了交出 `act` + 序号。
     Thumbs { fills: Vec<Fill>, picked: Option<usize>, act: String },
-    /// 样式的卡片，一排三张：背景上压一张小纸，纸上写名字；下面再写一遍。选中的描边。
+    Photos { items: Vec<PhotoTile>, library: bool },
+    SearchPhotos { prompt: String, query: String },
+    StyleFooter { title: String, card: Card, action: Option<(String, &'static str)> },
+    /// 样式的卡片。手机两列，较宽的面板三列。
     Cards { items: Vec<Card>, picked: Option<usize>, act: String },
     /// 一排带图标的方格按钮（图标，标题，动作）。
     Actions(Vec<(&'static str, String, String)>),
     /// 同样的按钮，几个平分一整行（和纸胶带的「上传」「和纸图库」）。
     Wide(Vec<(&'static str, String, String)>),
-    /// 一条条胶带，下面写名字；一行 `cols` 条，选中的垫一块底。
+    /// 一条条胶带，下面写名字；一行 `cols` 条，选中的加蓝色描边。
     Strips { items: Vec<Strip>, cols: usize },
     /// 标题下方滚动的内容，面板高度受窗口限制。
     Scroll { nodes: Vec<Node>, max_height: f64 },
+    /// 加载、搜索和出结果时保持同一高度。
+    FixedScroll { nodes: Vec<Node>, height: f64 },
     /// 空着时的一句话。
     Empty(&'static str, String),
     /// 一排小色点（格式面板的颜色），一排八颗；`None` 是「无」：空圈上一道斜线。点了交出 `act` + 序号。
@@ -127,16 +142,27 @@ fn node_h(node: &Node, w: f64) -> f64 {
         Node::Grab => 4.,
         Node::Header { .. } => 64.,
         Node::Segments { .. } => 13. + 36. + 10.,
+        Node::BackgroundModes { .. } => 68.,
         Node::Swatches { fills, custom, .. } => rows(fills.len() + custom.is_some() as usize, 6) * PITCH + 4.,
         Node::Caption(_) => 30.,
         Node::Row { .. } => 50.,
         Node::Choice { .. } => 44. + 6.,
         Node::Tiles(rows) => rows.len() as f64 * (TILE + GAP) - GAP + 8.,
         Node::Thumbs { fills, .. } => rows(fills.len(), 3) * (thumb_h(w) + 5.),
-        Node::Cards { items, .. } => rows(items.len(), 3) * (thumb_h(w) + 26.),
+        Node::Photos { items, library } => {
+            let (cols, _, _, pitch) = photo_grid(w, *library);
+            rows(items.len(), cols) * pitch
+        }
+        Node::SearchPhotos { .. } => 57.,
+        Node::StyleFooter { .. } => 68.,
+        Node::Cards { items, .. } => {
+            let (cols, _, preview) = style_grid(w);
+            rows(items.len(), cols) * (preview + 33.)
+        }
         Node::Actions(_) | Node::Wide(_) => thumb_h(w) + 5.,
         Node::Strips { items, cols, .. } => rows(items.len(), (*cols).max(1)) * strip_h(*cols),
         Node::Scroll { nodes, max_height } => f64::from(height(nodes, w as f32)).min(*max_height),
+        Node::FixedScroll { height, .. } => *height,
         Node::Empty(..) => 110.,
         Node::Cells { h, .. } => *h,
         Node::Dots { fills, .. } => rows(fills.len(), 8) * 48. + 6.,
@@ -145,12 +171,29 @@ fn node_h(node: &Node, w: f64) -> f64 {
 /// 胶带一行多高：上下留白、胶带、名字。一列的胶带粗一些。
 fn strip_h(cols: usize) -> f64 { 6. + if cols <= 1 { 34. } else { 30. } + 4. + 16. + 8. }
 fn thumb_h(w: f64) -> f64 { ((w - PAD as f64 * 2. - 10.) / 3. * 0.68).round() }
+fn photo_grid(w: f64, library: bool) -> (usize, f64, f64, f64) {
+    let cols = if library { 2 } else { 3 };
+    let cw = (w - f64::from(PAD) * 2. - (cols - 1) as f64 * 8.) / cols as f64;
+    let ch = (cw * if library { 0.66 } else { 0.62 }).clamp(42., 160.);
+    (cols, cw, ch, ch + if library { 31. } else { 8. })
+}
+fn style_grid(w: f64) -> (usize, f64, f64) {
+    let cols = if w < 540. { 2 } else { 3 };
+    let card = (w - f64::from(PAD) * 2. - 12. * (cols - 1) as f64) / cols as f64;
+    (cols, card, (card * 0.96).min(250.))
+}
 /// 这一列内容要多高（宽 `w` 时），占位按它留。
 pub fn height(nodes: &[Node], w: f32) -> f32 { (nodes.iter().map(|n| node_h(n, f64::from(w))).sum::<f64>() + if matches!(nodes.first(), Some(Node::Grab)) { 20. } else { 14. }) as f32 }
 
-struct Panel { view: *mut AnyObject, scroll: Option<*mut AnyObject>, frame: Bounds<Pixels>, nodes: Vec<Node>, dark: Option<bool>, shown: bool }
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct Material { pub tint: Option<Hsla>, pub wash: Option<Hsla> }
+
+struct Panel { view: *mut AnyObject, scroll: Option<*mut AnyObject>, frame: Bounds<Pixels>, nodes: Vec<Node>, dark: Option<bool>, material: Material, shown: bool }
 thread_local! { static PANEL: RefCell<Option<Panel>> = const { RefCell::new(None) }; }
 thread_local! { static SEEN: Cell<bool> = const { Cell::new(false) }; }
+
+#[link(name = "UIKit", kind = "framework")]
+unsafe extern "C" { fn UIAccessibilityIsReduceTransparencyEnabled() -> objc2::runtime::Bool; }
 
 /// 每帧开头调用：这一帧没有占位就收起。
 pub fn begin(window: &Window) {
@@ -165,23 +208,31 @@ pub fn begin(window: &Window) {
 }
 
 /// 放在 GPUI 元素里的占位：面板摆在这个元素的位置上，内容是 `nodes`。
-pub fn slot(nodes: Vec<Node>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(bounds, nodes.clone(), window), |_, _, _, _| {}).absolute().inset_0()
+pub fn slot(nodes: Vec<Node>, material: Material) -> impl IntoElement {
+    canvas(move |bounds, window, _| place(bounds, nodes.clone(), material, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
-fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, window: &Window) {
+fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, material: Material, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
     let parent = super::shot::overlay(handle.ui_view.as_ptr() as *mut AnyObject);
     SEEN.with(|s| s.set(true));
     let dark = crate::theme::dark();
     PANEL.with(|p| unsafe {
+        let material = if UIAccessibilityIsReduceTransparencyEnabled().as_bool() { Material::default() } else { material };
         let mut slot = p.borrow_mut();
+        let Some(glass_class) = AnyClass::get(c"UIGlassEffect") else { return; };
+        let glass = || {
+            let effect: *mut AnyObject = msg_send![glass_class, effectWithStyle: 0isize];
+            if let Some(tint) = material.tint {
+                let _: () = msg_send![effect, setTintColor: super::glass::ui_color(tint)];
+            }
+            effect
+        };
         if slot.is_none() {
-            let (Some(effect_view), Some(glass)) = (AnyClass::get(c"UIVisualEffectView"), AnyClass::get(c"UIGlassEffect")) else { return; };
+            let Some(effect_view) = AnyClass::get(c"UIVisualEffectView") else { return; };
             let view: *mut AnyObject = msg_send![effect_view, alloc];
-            let effect: *mut AnyObject = msg_send![glass, effectWithStyle: 0isize];
-            let view: *mut AnyObject = msg_send![view, initWithEffect: effect];
+            let view: *mut AnyObject = msg_send![view, initWithEffect: glass()];
             if let (Some(corners), Some(corner)) = (AnyClass::get(c"UICornerConfiguration"), AnyClass::get(c"UICornerRadius")) {
                 let fixed: *mut AnyObject = msg_send![corner, fixedRadius: 30f64];
                 let config: *mut AnyObject = msg_send![corners, configurationWithUniformRadius: fixed];
@@ -189,9 +240,13 @@ fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, window: &Window) {
             }
             let _: () = msg_send![view, setHidden: true];
             let _: () = msg_send![parent, addSubview: view];
-            *slot = Some(Panel { view, scroll: None, frame: Bounds::default(), nodes: vec![], dark: None, shown: false });
+            *slot = Some(Panel { view, scroll: None, frame: Bounds::default(), nodes: vec![], dark: Some(dark), material, shown: false });
+            let _: () = msg_send![view, setOverrideUserInterfaceStyle: if dark { 2isize } else { 1isize }];
         }
         let Some(panel) = slot.as_mut() else { return; };
+        if panel.material.tint != material.tint {
+            let _: () = msg_send![panel.view, setEffect: glass()];
+        }
         if panel.dark != Some(dark) {
             // 深浅色跟应用的设置，不跟系统。
             let _: () = msg_send![panel.view, setOverrideUserInterfaceStyle: if dark { 2isize } else { 1isize }];
@@ -213,8 +268,9 @@ fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, window: &Window) {
             // 换页时卡片跟着内容变高变矮（4 << 16 = CurveEaseOut 的近似：系统默认的缓动）。
             let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.28f64, animations: &*body];
         }
-        if fresh || panel.frame.size.width != frame.size.width || panel.nodes != nodes {
+        if fresh || panel.frame.size != frame.size || panel.nodes != nodes || panel.material.wash != material.wash {
             let content: *mut AnyObject = msg_send![panel.view, contentView];
+            let _: () = msg_send![content, setClipsToBounds: true];
             let same_page = !fresh && panel.nodes.first() == nodes.first();
             let offset = panel.scroll.filter(|_| same_page).map_or(CGPoint::new(0., 0.), |scroll| msg_send![scroll, contentOffset]);
             // 页和页之间内容淡着换。
@@ -229,9 +285,13 @@ fn place(frame: Bounds<Pixels>, nodes: Vec<Node>, window: &Window) {
             let n: usize = msg_send![kids, count];
             for i in 0..n { let kid: *mut AnyObject = msg_send![kids, objectAtIndex: i]; let _: () = msg_send![kid, removeFromSuperview]; }
             let _: () = msg_send![kids, release];
+            if let Some(wash) = material.wash {
+                fill(content, self::rect(0., 0., rect.size.width, rect.size.height), &Fill::Color(wash), 30.);
+            }
             panel.scroll = build(content, &nodes, f64::from(frame.size.width), offset);
             panel.nodes = nodes;
         }
+        panel.material = material;
         panel.frame = frame;
     });
 }
@@ -331,6 +391,15 @@ unsafe fn tap(parent: *mut AnyObject, frame: CGRect, act: String) -> *mut AnyObj
         b
     }
 }
+
+unsafe fn named_tap(parent: *mut AnyObject, frame: CGRect, title: &str, act: String) -> *mut AnyObject {
+    unsafe {
+        let button = tap(parent, frame, act.clone());
+        let _: () = msg_send![button, setAccessibilityIdentifier: ns_string(&act)];
+        let _: () = msg_send![button, setAccessibilityLabel: ns_string(title)];
+        button
+    }
+}
 /// 把一块填上：颜色、渐变或图片，按 `radius` 剪圆角。
 unsafe fn fill(parent: *mut AnyObject, frame: CGRect, f: &Fill, radius: f64) -> *mut AnyObject {
     unsafe {
@@ -342,19 +411,8 @@ unsafe fn fill(parent: *mut AnyObject, frame: CGRect, f: &Fill, radius: f64) -> 
                 v
             }
             Fill::Gradient(a, b, dir) => {
-                let v = plain(parent, frame);
-                let layer: *mut AnyObject = msg_send![AnyClass::get(c"CAGradientLayer").unwrap(), layer];
-                let colors: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
-                for c in [a, b] { let _: () = msg_send![colors, addObject: cg(super::glass::ui_color(*c)) as *mut AnyObject]; }
-                let _: () = msg_send![layer, setColors: colors];
                 let (from, to) = match dir { 1 => ((0., 0.5), (1., 0.5)), 2 => ((0., 0.), (1., 1.)), 3 => ((0., 1.), (1., 0.)), _ => ((0.5, 0.), (0.5, 1.)) };
-                let _: () = msg_send![layer, setStartPoint: CGPoint::new(from.0, from.1)];
-                let _: () = msg_send![layer, setEndPoint: CGPoint::new(to.0, to.1)];
-                let _: () = msg_send![layer, setFrame: rect(0., 0., frame.size.width, frame.size.height)];
-                let host: *mut AnyObject = msg_send![v, layer];
-                let _: () = msg_send![host, addSublayer: layer];
-                round(v, radius);
-                v
+                gradient(parent, frame, &[*a, *b], from, to, radius)
             }
             Fill::Image(path) => {
                 let v: *mut AnyObject = msg_send![AnyClass::get(c"UIImageView").unwrap(), new];
@@ -371,6 +429,24 @@ unsafe fn fill(parent: *mut AnyObject, frame: CGRect, f: &Fill, radius: f64) -> 
         }
     }
 }
+
+unsafe fn gradient(parent: *mut AnyObject, frame: CGRect, colors: &[Hsla], from: (f64, f64), to: (f64, f64), radius: f64) -> *mut AnyObject {
+    unsafe {
+        let view = plain(parent, frame);
+        let layer: *mut AnyObject = msg_send![AnyClass::get(c"CAGradientLayer").unwrap(), layer];
+        let stops: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
+        for color in colors { let _: () = msg_send![stops, addObject: cg(super::glass::ui_color(*color)) as *mut AnyObject]; }
+        let _: () = msg_send![layer, setColors: stops];
+        let _: () = msg_send![layer, setStartPoint: CGPoint::new(from.0, from.1)];
+        let _: () = msg_send![layer, setEndPoint: CGPoint::new(to.0, to.1)];
+        let _: () = msg_send![layer, setFrame: rect(0., 0., frame.size.width, frame.size.height)];
+        let host: *mut AnyObject = msg_send![view, layer];
+        let _: () = msg_send![host, addSublayer: layer];
+        round(view, radius);
+        view
+    }
+}
+
 /// 胶带样张的撕口，纸边直接透出玻璃的底色。
 unsafe fn torn_edges(view: *mut AnyObject, size: CGSize) {
     unsafe {
@@ -382,10 +458,15 @@ unsafe fn torn_edges(view: *mut AnyObject, size: CGSize) {
             let _: () = msg_send![path, addLineToPoint: CGPoint::new(x, y)];
         }
         let _: () = msg_send![path, closePath];
-        let cg: *const CGPath = msg_send![path, CGPath];
+        mask_path(view, size, msg_send![path, CGPath]);
+    }
+}
+
+unsafe fn mask_path(view: *mut AnyObject, size: CGSize, path: *const CGPath) {
+    unsafe {
         let mask: *mut AnyObject = msg_send![AnyClass::get(c"CAShapeLayer").unwrap(), layer];
         let _: () = msg_send![mask, setFrame: CGRect::new(CGPoint::new(0., 0.), size)];
-        let _: () = msg_send![mask, setPath: cg];
+        let _: () = msg_send![mask, setPath: path];
         let layer: *mut AnyObject = msg_send![view, layer];
         let _: () = msg_send![layer, setMask: mask];
     }
@@ -428,7 +509,17 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                     let _: () = msg_send![dot, setBackgroundColor: well];
                     round(dot, 13.);
                     icon(content, rect(x, y + 19., 26., 26.), "xmark", 11., secondary);
-                    tap(content, rect(x - 9., y + 10., 44., 44.), close.clone());
+                    let close_button = tap(content, rect(x - 9., y + 10., 44., 44.), close.clone());
+                    if close == "page:pattern" {
+                        let _: () = msg_send![close_button, setAccessibilityIdentifier: ns_string("quiet.washi.back")];
+                        let _: () = msg_send![close_button, setAccessibilityLabel: ns_string(crate::settings::tr("返回图案", "Back to patterns"))];
+                    } else if close == "page:main" {
+                        let _: () = msg_send![close_button, setAccessibilityIdentifier: ns_string("quiet.style.back")];
+                        let _: () = msg_send![close_button, setAccessibilityLabel: ns_string(crate::settings::tr("返回样式", "Back to style"))];
+                    } else if close == "page:background" {
+                        let _: () = msg_send![close_button, setAccessibilityIdentifier: ns_string("quiet.background.back")];
+                        let _: () = msg_send![close_button, setAccessibilityLabel: ns_string(crate::settings::tr("返回背景", "Back to background"))];
+                    }
                     if let Some(reset) = reset {
                         x -= 40.;
                         icon(content, rect(x, y + 19., 26., 26.), "arrow.counterclockwise", 15., secondary);
@@ -444,15 +535,19 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                     let _: () = msg_send![track, setBackgroundColor: well];
                     round(track, 18.);
                     let cell = inner / n as f64;
+                    let pattern = act == "pat-tab:";
                     for i in 0..n {
                         let on = i == *picked;
                         let frame = rect(pad + cell * i as f64, y + 13., cell, 36.);
                         if on {
-                            let pill = plain(content, frame);
-                            let _: () = msg_send![pill, setBackgroundColor: ui(c"labelColor")];
+                            let inset = if pattern { 2. } else { 0. };
+                            let pill = plain(content, rect(frame.origin.x + inset, frame.origin.y + inset, cell - 2. * inset, 36. - 2. * inset));
+                            let surface = if pattern { ui(c"systemBackgroundColor") } else { primary };
+                            let _: () = msg_send![pill, setBackgroundColor: surface];
                             round(pill, 18.);
                         }
-                        let ink = if on { if crate::theme::dark() { ui(c"blackColor") } else { ui(c"whiteColor") } } else { secondary };
+                        let ink = if on && pattern { primary }
+                            else if on { if crate::theme::dark() { ui(c"blackColor") } else { ui(c"whiteColor") } } else { secondary };
                         match (symbols.get(i), titles.get(i)) {
                             (Some(name), Some(title)) if on => {
                                 // 图标在前、文字在后，两样合起来居中。字宽按字数估：中文一个 15，别的 8.5。
@@ -468,18 +563,55 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                         tap(content, frame, format!("{act}{i}"));
                     }
                 }
+                Node::BackgroundModes { titles, picked } => {
+                    use crate::theme::Theme;
+                    let width = (inner - 18.) / 4.;
+                    let accent = super::glass::ui_color(Theme::primary());
+                    let base = rect(pad, y + 10., inner, 47.);
+                    fill(content, base, &Fill::Color(Theme::fill_hover()), 15.);
+                    for (i, symbol) in ["rectangle.slash", "square.fill", "square.bottomhalf.filled", "photo"].into_iter().enumerate() {
+                        let frame = rect(pad + 3. + (width + 4.) * i as f64, y + 13., width, 41.);
+                        let on = i == *picked;
+                        if on {
+                            fill(content, frame, &Fill::Color(Theme::primary().opacity(0.12)), 12.);
+                            ring(content, frame, 12., accent, 0., 0.65);
+                        }
+                        let ink = if on { accent } else { secondary };
+                        icon(content, rect(frame.origin.x, y + 15., width, 20.), symbol, 14., ink);
+                        let text = label(content, rect(frame.origin.x + 2., y + 34., width - 4., 17.), &titles[i], font(11., 0.24, ""), ink, 1);
+                        let _: () = msg_send![text, setIsAccessibilityElement: false];
+                        let button = named_tap(content, frame, &titles[i], format!("bg-tab:{i}"));
+                        let _: () = msg_send![button, setSelected: on];
+                    }
+                }
                 Node::Swatches { fills, picked, act, custom } => {
-                    let step = (inner - SWATCH) / 5.;
-                    let at = |i: usize| rect(pad + step * (i % 6) as f64, y + (i / 6) as f64 * PITCH + 8., SWATCH, SWATCH);
+                    let background = act.starts_with("bg-");
+                    let side = SWATCH.min((inner / 6. - 4.).max(1.));
+                    let step = (inner - side) / 5.;
+                    let radius = if background { 12. } else { side / 2. };
+                    let at = |i: usize| rect(pad + step * (i % 6) as f64, y + (i / 6) as f64 * PITCH + 8., side, side);
                     for (i, f) in fills.iter().enumerate() {
                         let frame = at(i);
                         let on = *picked == Some(i);
                         // 选中的缩一圈，外面套一个同色的环。
-                        let dot = if on { rect(frame.origin.x + 5., frame.origin.y + 5., SWATCH - 10., SWATCH - 10.) } else { frame };
-                        fill(content, dot, f, dot.size.width / 2.);
-                        if on { let tint = match f { Fill::Color(c) | Fill::Gradient(c, ..) => super::glass::ui_color(*c), Fill::Image(_) => primary }; ring(content, frame, SWATCH / 2., tint, 0., 2.5); }
-                        else { ring(content, frame, SWATCH / 2., ui(c"separatorColor"), 0., 1. / 3.); }
-                        tap(content, frame, format!("{act}{i}"));
+                        let inset = if on { if background { 3. } else { 5. } } else { 0. };
+                        let dot = rect(frame.origin.x + inset, frame.origin.y + inset, side - 2. * inset, side - 2. * inset);
+                        fill(content, dot, f, radius - inset);
+                        if on {
+                            let tint = if background { super::glass::ui_color(crate::theme::Theme::primary()) }
+                                else { match f { Fill::Color(c) | Fill::Gradient(c, ..) => super::glass::ui_color(*c), Fill::Image(_) => primary } };
+                            ring(content, frame, radius, tint, 0., if background { 1.5 } else { 2.5 });
+                        } else { ring(content, frame, radius, ui(c"separatorColor"), 0., 0.5); }
+                        let key = format!("{act}{i}");
+                        if background {
+                            let label = match f {
+                                Fill::Color(c) => super::style::to_hex(*c),
+                                Fill::Gradient(a, b, _) => format!("{} → {}", super::style::to_hex(*a), super::style::to_hex(*b)),
+                                Fill::Image(_) => String::new(),
+                            };
+                            let button = named_tap(content, frame, &label, key);
+                            let _: () = msg_send![button, setSelected: on];
+                        } else { tap(content, frame, key); }
                     }
                     if let Some((act, on, color)) = custom {
                         let frame = at(fills.len());
@@ -495,16 +627,17 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                         let _: () = msg_send![layer, setColors: colors];
                         let _: () = msg_send![layer, setStartPoint: CGPoint::new(0.5, 0.5)];
                         let _: () = msg_send![layer, setEndPoint: CGPoint::new(0.5, 0.)];
-                        let _: () = msg_send![layer, setFrame: rect(0., 0., SWATCH, SWATCH)];
+                        let _: () = msg_send![layer, setFrame: rect(0., 0., side, side)];
                         let host: *mut AnyObject = msg_send![wheel, layer];
                         let _: () = msg_send![host, addSublayer: layer];
-                        round(wheel, SWATCH / 2.);
+                        round(wheel, radius);
                         let inset = 4.;
-                        let core = rect(frame.origin.x + inset, frame.origin.y + inset, SWATCH - inset * 2., SWATCH - inset * 2.);
-                        fill(content, core, &Fill::Color(if *on { *color } else { crate::theme::Theme::bg_body() }), core.size.width / 2.);
+                        let core = rect(frame.origin.x + inset, frame.origin.y + inset, side - inset * 2., side - inset * 2.);
+                        fill(content, core, &Fill::Color(if *on { *color } else { crate::theme::Theme::bg_body() }), radius - inset);
                         let ink = if *on && color.l > 0.6 { ui(c"blackColor") } else { primary };
                         icon(content, core, "chevron.down", 12., ink);
-                        tap(content, frame, act.clone());
+                        let button = named_tap(content, frame, crate::settings::tr("自选颜色", "Custom color"), act.clone());
+                        let _: () = msg_send![button, setSelected: *on];
                     }
                 }
                 Node::Caption(text) => { label(content, rect(pad, y + 8., inner, 18.), text, font(13., 0., ""), secondary, 0); }
@@ -514,7 +647,7 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                         Trailing::Chip(f, act) => {
                             let frame = rect(w - pad - 54., y + 4., 54., 42.);
                             fill(content, frame, f, 9.);
-                            tap(content, frame, act.clone());
+                            named_tap(content, frame, text, act.clone());
                         }
                         Trailing::Switch(on, act) => {
                             let s: *mut AnyObject = msg_send![AnyClass::get(c"UISwitch").unwrap(), new];
@@ -526,7 +659,8 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                             let _: () = msg_send![content, addSubview: s];
                             let frame: CGRect = msg_send![s, frame];
                             let _: () = msg_send![s, release];
-                            tap(content, frame, act.clone());
+                            let button = named_tap(content, frame, text, act.clone());
+                            let _: () = msg_send![button, setAccessibilityValue: ns_string(if *on { "1" } else { "0" })];
                         }
                         Trailing::Menu(current, options) => {
                             let config: *mut AnyObject = msg_send![AnyClass::get(c"UIButtonConfiguration").unwrap(), grayButtonConfiguration];
@@ -550,22 +684,29 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                             let menu: *mut AnyObject = msg_send![AnyClass::get(c"UIMenu").unwrap(), menuWithTitle: ns_string(""), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), options: 0usize, children: items];
                             let _: () = msg_send![b, setMenu: menu];
                             let _: () = msg_send![b, setShowsMenuAsPrimaryAction: true];
+                            let _: () = msg_send![b, setAccessibilityLabel: ns_string(text)];
+                            let _: () = msg_send![b, setAccessibilityValue: ns_string(current)];
                             let _: () = msg_send![content, addSubview: b];
                         }
                     }
                 }
                 Node::Choice { labels, picked, act } => {
-                    // 实测：前一颗占六成。
                     let widths = [(inner - 8.) * 0.6, (inner - 8.) * 0.4];
+                    let accent = crate::theme::Theme::primary();
+                    let tint = accent.opacity(if crate::theme::dark() { 0.18 } else { 0.10 });
                     let mut x = pad;
                     for (i, text) in labels.iter().take(2).enumerate() {
+                        let selected = i == *picked;
                         let frame = rect(x, y, widths[i], 44.);
                         let pill = plain(content, frame);
                         let _: () = msg_send![pill, setBackgroundColor: well];
                         round(pill, 22.);
-                        let ink = if i == *picked { super::glass::ui_color(crate::theme::Theme::primary()) } else { secondary };
-                        label(content, frame, text, font(17., if i == *picked { 0.23 } else { 0. }, ""), ink, 1);
-                        tap(content, frame, format!("{act}{i}"));
+                        if selected { fill(content, frame, &Fill::Color(tint), 22.); }
+                        let ink = if selected { super::glass::ui_color(accent) } else { secondary };
+                        let caption = label(content, frame, text, font(17., if selected { 0.30 } else { 0. }, ""), ink, 1);
+                        let _: () = msg_send![caption, setIsAccessibilityElement: false];
+                        let button = named_tap(content, frame, text, format!("{act}{i}"));
+                        let _: () = msg_send![button, setSelected: selected];
                         x += widths[i] + 8.;
                     }
                 }
@@ -582,45 +723,12 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                             round(base, 16.);
                             let corner = rect(x + 12., ty + 8., tw - 24., 22.);
                             match &tile.art {
-                                Art::Ink(c) => {
-                                    // 笔尖从格子底下探出来一截（裁在格子里）。
-                                    let _: () = msg_send![base, setBackgroundColor: ui(c"systemBackgroundColor")];
-                                    label(base, rect(6., 22., tw - 12., 30.), &tile.title, font(20., 0.3, ""), super::glass::ui_color(*c), 1);
-                                    icon(base, rect(0., TILE - 58., tw, 80.), "pencil.tip", 62., super::glass::ui_color(*c));
-                                }
-                                Art::Paper(c) => {
-                                    let _: () = msg_send![base, setBackgroundColor: super::glass::ui_color(*c)];
-                                    let dark = c.l < 0.5;
-                                    label(base, rect(12., 8., tw - 24., 22.), &tile.title, font(14., 0.23, ""), if dark { ui(c"whiteColor") } else { ui(c"darkGrayColor") }, 0);
-                                    // 折起来的角：一块比纸亮一点的圆角方片压在右下，带一点影子。
-                                    let fold = plain(base, rect(tw - 44., TILE - 44., 64., 64.));
-                                    let _: () = msg_send![fold, setBackgroundColor: super::glass::ui_color(Hsla { l: if dark { c.l + 0.09 } else { (c.l - 0.05).max(0.) }, ..*c })];
-                                    let layer: *mut AnyObject = msg_send![fold, layer];
-                                    let _: () = msg_send![layer, setCornerRadius: 20f64];
-                                    let _: () = msg_send![layer, setShadowOpacity: 0.28f32];
-                                    let _: () = msg_send![layer, setShadowRadius: 7f64];
-                                    let _: () = msg_send![layer, setShadowOffset: CGSize::new(-2., -2.)];
-                                }
-                                Art::Stack(f, paper, ink, name) => {
-                                    label(base, rect(12., 8., tw - 24., 22.), &tile.title, font(14., 0.23, ""), secondary, 0);
-                                    // 后面两张只露出右边一条，越往后越矮。
-                                    let (cw, ch) = (78., 112.);
-                                    let (cx0, cy0) = (tw - cw - 62., 30.);
-                                    for (dx, dy, alpha) in [(34., 16., 0.35), (17., 8., 0.6)] {
-                                        let back = plain(base, rect(cx0 + dx, cy0 + dy, cw, ch));
-                                        let color: *mut AnyObject = msg_send![ui(c"whiteColor"), colorWithAlphaComponent: alpha];
-                                        let _: () = msg_send![back, setBackgroundColor: color];
-                                        round(back, 9.);
-                                    }
-                                    let front = plain(base, rect(cx0, cy0, cw, ch));
-                                    let _: () = msg_send![front, setBackgroundColor: super::glass::ui_color(*paper)];
-                                    round(front, 9.);
-                                    let layer: *mut AnyObject = msg_send![front, layer];
-                                    let _: () = msg_send![layer, setBorderWidth: 0.5f64];
-                                    let _: () = msg_send![layer, setBorderColor: cg(ui(c"separatorColor"))];
-                                    let text = label(front, rect(8., 7., cw - 16., 30.), name, font(10., 0.4, ""), super::glass::ui_color(*ink), 0);
-                                    let _: () = msg_send![text, setNumberOfLines: 2isize];
-                                    if let Some(f) = f { fill(front, rect(0., 44., cw, 26.), f, 0.); }
+                                Art::Ink { ink, paper } => style_cards::ink_tile(base, tw, &tile.title, *paper, *ink),
+                                Art::Paper { paper, ink } => style_cards::paper_tile(base, tw, &tile.title, *paper, *ink),
+                                Art::Stack { current, others } => {
+                                    let title = label(base, rect(12., 8., tw - 24., 22.), &tile.title, font(14., 0.23, ""), primary, 0);
+                                    let _: () = msg_send![title, setIsAccessibilityElement: false];
+                                    style_cards::stack(base, tw, current, others);
                                 }
                                 Art::Rules(f) => {
                                     label(base, rect(12., 8., tw - 24., 22.), &tile.title, font(14., 0.23, ""), secondary, 0);
@@ -656,7 +764,12 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                                     icon(content, rect(x + tw - 64., ty + TILE - 60., 52., 48.), name, 30., secondary);
                                 }
                             }
-                            tap(content, frame, tile.act.clone());
+                            let button = tap(content, frame, tile.act.clone());
+                            if tile.act == "page:background" || matches!(tile.art, Art::Ink { .. } | Art::Paper { .. } | Art::Stack { .. }) {
+                                let _: () = msg_send![button, setAccessibilityIdentifier: ns_string(&tile.act)];
+                                let _: () = msg_send![button, setAccessibilityLabel: ns_string(&tile.title)];
+                                if let Art::Stack { current, .. } = &tile.art { let _: () = msg_send![button, setAccessibilityValue: ns_string(&current.name)]; }
+                            }
                             x += tw + GAP;
                         }
                         ty += TILE + GAP;
@@ -671,19 +784,81 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                         tap(content, frame, format!("{act}{i}"));
                     }
                 }
+                Node::Photos { items, library } => {
+                    let (cols, cw, ch, pitch) = photo_grid(w, *library);
+                    let accent = super::glass::ui_color(crate::theme::Theme::primary());
+                    for (i, photo) in items.iter().enumerate() {
+                        let frame = rect(pad + (cw + 8.) * (i % cols) as f64, y + pitch * (i / cols) as f64, cw, ch);
+                        fill(content, frame, &Fill::Image(photo.path.clone()), 11.);
+                        ring(content, frame, 11., if photo.picked { accent } else { ui(c"separatorColor") }, 0., if photo.picked { 1.7 } else { 0.5 });
+                        if photo.picked {
+                            let tick = rect(frame.origin.x + cw - 23., frame.origin.y + 4., 19., 19.);
+                            let dot = plain(content, tick);
+                            let _: () = msg_send![dot, setBackgroundColor: accent];
+                            round(dot, 9.5);
+                            icon(content, tick, "checkmark", 9., ui(c"whiteColor"));
+                        }
+                        let button = named_tap(content, rect(frame.origin.x, frame.origin.y, cw, pitch - 3.), &photo.title, photo.act.clone());
+                        let _: () = msg_send![button, setSelected: photo.picked];
+                        if let Some(credit) = &photo.credit {
+                            let caption = label(content, rect(frame.origin.x + 2., frame.origin.y + ch + 2., cw - 4., 22.), credit, font(11., 0., ""), secondary, 0);
+                            let _: () = msg_send![caption, setIsAccessibilityElement: false];
+                            let _: () = msg_send![button, setAccessibilityHint: ns_string(credit)];
+                        }
+                    }
+                }
+                Node::SearchPhotos { prompt, query } => {
+                    let frame = rect(pad, y + 6., inner, 43.);
+                    fill(content, frame, &Fill::Color(crate::theme::Theme::fill_hover_strong()), 12.);
+                    icon(content, rect(pad + 8., y + 6., 22., 43.), "magnifyingglass", 15., secondary);
+                    let text = label(content, rect(pad + 36., y + 6., inner - 48., 43.), if query.is_empty() { prompt } else { query }, font(15., 0., ""), secondary, 0);
+                    let _: () = msg_send![text, setIsAccessibilityElement: false];
+                    let button = named_tap(content, frame, prompt, "bg-search".into());
+                    let _: () = msg_send![button, setAccessibilityValue: ns_string(query)];
+                }
+                Node::StyleFooter { title, card, action } => {
+                    use crate::theme::Theme;
+                    fill(content, rect(0., y, w, h + 14.), &Fill::Color(Theme::fill_hover()), 0.);
+                    let rule = plain(content, rect(pad, y, inner, 0.5));
+                    let _: () = msg_send![rule, setBackgroundColor: ui(c"separatorColor")];
+                    style_cards::preview(content, rect(pad, y + 11., 47., 47.), card, style_cards::Preview::Badge);
+                    let button_w = action.as_ref().map_or(0., |(_, act)| if *act == "gallery-delete" { 110. } else { 76. });
+                    let lw = (inner - 61. - button_w - 10.).max(20.);
+                    label(content, rect(pad + 58., y + 11., lw, 18.), title, font(11., 0.23, ""), secondary, 0);
+                    label(content, rect(pad + 58., y + 28., lw, 27.), &card.name, font(17., 0.33, ""), primary, 0);
+                    if let Some((title, act)) = action {
+                        let delete = *act == "gallery-delete";
+                        let frame = rect(w - pad - button_w, y + 13., button_w, 44.);
+                        fill(content, rect(frame.origin.x, frame.origin.y + 2., button_w, 40.),
+                            &Fill::Color(if delete { Theme::danger_cell() } else { Theme::text() }), 20.);
+                        let ink = super::glass::ui_color(if delete { Theme::danger() } else { Theme::bg_body() });
+                        let text = label(content, frame, title, font(14., 0.31, ""), ink, 1);
+                        let _: () = msg_send![text, setIsAccessibilityElement: false];
+                        let button = tap(content, frame, (*act).into());
+                        let _: () = msg_send![button, setAccessibilityLabel: ns_string(title)];
+                        let _: () = msg_send![button, setAccessibilityIdentifier: ns_string(act)];
+                    }
+                }
                 Node::Cards { items, picked, act } => {
-                    let (tw, th) = ((inner - 10.) / 3., thumb_h(w));
+                    let (cols, tw, th) = style_grid(w);
+                    let accent = super::glass::ui_color(crate::theme::Theme::primary());
                     for (i, card) in items.iter().enumerate() {
-                        let frame = rect(pad + (tw + 5.) * (i % 3) as f64, y + (th + 26.) * (i / 3) as f64, tw, th);
-                        fill(content, frame, &card.fill, 10.);
-                        let sheet = plain(content, rect(frame.origin.x + tw * 0.3, frame.origin.y + th * 0.2, tw * 0.4, th * 0.8));
-                        let _: () = msg_send![sheet, setBackgroundColor: super::glass::ui_color(card.paper)];
-                        round(sheet, 5.);
-                        label(content, rect(frame.origin.x + tw * 0.3 + 4., frame.origin.y + th * 0.2 + 5., tw * 0.4 - 8., 10.), &card.name, font(7., 0.4, ""), super::glass::ui_color(card.ink), 0);
+                        let frame = rect(pad + (tw + 12.) * (i % cols) as f64, y + (th + 33.) * (i / cols) as f64, tw, th);
+                        style_cards::preview(content, frame, card, style_cards::Preview::Gallery);
                         let on = *picked == Some(i);
-                        if on { ring(content, frame, 10., super::glass::ui_color(crate::theme::Theme::primary()), 0., 2.); }
-                        label(content, rect(frame.origin.x, frame.origin.y + th + 3., tw, 16.), &card.name, font(12., 0.23, ""), if on { super::glass::ui_color(crate::theme::Theme::primary()) } else { secondary }, 0);
-                        tap(content, frame, format!("{act}{i}"));
+                        if on {
+                            ring(content, frame, 14., accent, 0., 1.5);
+                            let check = rect(frame.origin.x + tw - 29., frame.origin.y + 7., 22., 22.);
+                            let dot = plain(content, check);
+                            let _: () = msg_send![dot, setBackgroundColor: accent];
+                            round(dot, 11.);
+                            icon(content, check, "checkmark", 10., ui(c"whiteColor"));
+                        }
+                        let text = label(content, rect(frame.origin.x + 2., frame.origin.y + th + 5., tw - 4., 21.), &card.name, font(14., 0.23, ""), if on { accent } else { primary }, 0);
+                        let _: () = msg_send![text, setIsAccessibilityElement: false];
+                        let button = tap(content, rect(frame.origin.x, frame.origin.y, tw, th + 28.), format!("{act}{i}"));
+                        let _: () = msg_send![button, setAccessibilityLabel: ns_string(&card.name)];
+                        let _: () = msg_send![button, setSelected: on];
                     }
                 }
                 Node::Strips { items, cols } => {
@@ -705,7 +880,7 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                         let _: () = msg_send![button, setSelected: strip.picked];
                     }
                 }
-                Node::Scroll { nodes, .. } => {
+                Node::Scroll { nodes, .. } | Node::FixedScroll { nodes, .. } => {
                     let view: *mut AnyObject = msg_send![AnyClass::get(c"UIScrollView").unwrap(), new];
                     let full = f64::from(height(nodes, w as f32));
                     let _: () = msg_send![view, setFrame: rect(0., y, w, h)];
@@ -729,9 +904,8 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                         round(base, 10.);
                         icon(content, rect(frame.origin.x, y + th / 2. - 26., tw, 26.), name, 18., secondary);
                         let caption = label(content, rect(frame.origin.x + 4., y + th / 2. + 4., tw - 8., 18.), title, font(13., 0.23, ""), secondary, 1);
-                        let button = tap(content, frame, act.clone());
                         let _: () = msg_send![caption, setIsAccessibilityElement: false];
-                        let _: () = msg_send![button, setAccessibilityLabel: ns_string(title)];
+                        named_tap(content, frame, title, act.clone());
                     }
                 }
                 Node::Dots { fills, picked, act } => {

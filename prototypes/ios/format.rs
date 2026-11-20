@@ -300,5 +300,5 @@ pub fn element(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -> O
     let bottom = super::insets().bottom.max(px(34.)) + px(1.);
     HEIGHT.with(|h| h.set(f32::from(height + bottom) - f32::from(super::insets().bottom) + 8.));
     Some(div().id("format-panel").absolute().left(px(13.)).bottom(bottom).w(width).h(height).occlude()
-        .child(super::panel::slot(nodes)).into_any_element())
+        .child(super::panel::slot(nodes, Default::default())).into_any_element())
 }

@@ -32,6 +32,16 @@ pub fn to_hex(c: Hsla) -> String {
     format!("#{:02X}{:02X}{:02X}", b(c.r), b(c.g), b(c.b))
 }
 
+pub(super) fn contrast(a: Hsla, b: Hsla) -> f32 {
+    let luminance = |color: Hsla| {
+        let c = Rgba::from(color);
+        let linear = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+        0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b)
+    };
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
 /// 字体的名字 → 系统里的字体族。
 pub fn family(name: &str) -> Option<&'static str> {
     match name { "serif" => Some(".AppleSystemUIFontSerif"), "mono" => Some(crate::themes::SYSTEM_MONO), "rounded" => Some(".AppleSystemUIFontRounded"), _ => None }
@@ -103,18 +113,26 @@ pub fn current() -> Option<DocStyle> { CUR.with(|c| c.borrow().clone()) }
 /// 有背景：纸两侧内缩，上沿让到顶栏下面，背景从四周露出来。
 pub fn banded() -> bool { CUR.with(|c| c.borrow().as_ref().is_some_and(|s| s.background.is_some())) }
 
+// 淡化保留照片的层次和渐变的色差。正文、顶栏和缩略页用同样的纸色比例。
+pub(super) const FADED_PAPER_OPACITY: f32 = 0.36;
+
 /// 有背景时顶栏上的字（标题、文件夹）用什么颜色：背景上沿深就用白的，浅就用深的。没有背景时照主题。
 pub fn chrome_ink() -> Option<(Hsla, Hsla)> {
     let style = current()?;
     let top = match style.background.as_ref()? {
         Backdrop::Color { color } => hex(color)?,
         Backdrop::Gradient { from, to, dir } => if *dir == 0 || *dir == 2 { hex(from)? } else { let (a, b) = (Rgba::from(hex(from)?), Rgba::from(hex(to)?)); Rgba { r: (a.r + b.r) / 2., g: (a.g + b.g) / 2., b: (a.b + b.b) / 2., a: 1. }.into() },
-        // 图片不去读像素：内置的照配方的底色，自己挑的照片当深色。
-        Backdrop::Image { src, .. } => src.strip_prefix("builtin:").and_then(recipe).map(|r| rgb(r.0).into()).unwrap_or(black()),
+        Backdrop::Image { src, .. } => {
+            let built_in = src.strip_prefix("builtin:").and_then(|name| photo_background(name).map(|p| p.top).or_else(|| recipe(name).map(|r| r.0)));
+            built_in.map(|value| rgb(value).into()).or_else(|| sampled_top(&image_path(src)?)).unwrap_or(black())
+        }
     };
     let c = Rgba::from(top);
     let mut l = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
-    if style.faded { let p = Rgba::from(crate::editor_theme::Theme::bg_body()); l = l * 0.4 + (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) * 0.6; }
+    if style.faded {
+        let p = Rgba::from(crate::editor_theme::Theme::bg_body());
+        l = l * (1. - FADED_PAPER_OPACITY) + (0.299 * p.r + 0.587 * p.g + 0.114 * p.b) * FADED_PAPER_OPACITY;
+    }
     Some(if l < 0.55 { (white(), white().opacity(0.7)) } else { (rgb(0x202225).into(), Hsla::from(rgb(0x202225)).opacity(0.6)) })
 }
 
@@ -148,13 +166,35 @@ pub fn backdrop_of(style: &DocStyle) -> Option<AnyElement> {
             fill.child(img(std::path::PathBuf::from(path)).size_full().object_fit(ObjectFit::Cover))
         }
     };
-    Some(fill.when(style.faded, |d| d.child(div().absolute().inset_0().bg(crate::editor_theme::Theme::bg_body().opacity(0.6)))).into_any_element())
+    let paper = style.paper.as_deref().and_then(hex).unwrap_or_else(crate::editor_theme::Theme::bg_body);
+    Some(fill.when(style.faded, |d| d.child(div().absolute().inset_0().bg(paper.opacity(FADED_PAPER_OPACITY)))).into_any_element())
 }
 
 // ---- 背景图片
 
 /// 内置的背景：程序画的几张柔光色块（自己配的，不是照搬的图片），第一次用到时画出来放在缓存目录里。
 pub const BUILTIN: [&str; 9] = ["dusk", "peach", "ocean", "lagoon", "mist", "lilac", "linen", "moss", "ink"];
+
+pub(super) struct PhotoBackdrop { pub id: &'static str, pub zh: &'static str, pub en: &'static str, top: u32, image: &'static [u8] }
+macro_rules! photo {
+    ($id:literal, $zh:literal, $en:literal, $top:literal) => {
+        PhotoBackdrop { id: $id, zh: $zh, en: $en, top: $top, image: include_bytes!(concat!("backdrops/", $id, ".jpg")) }
+    };
+}
+
+// Margin 原创照片。颜色是各图顶部七分之一的取样，用来选择文档顶栏的字色。
+pub(super) const PHOTO_BACKGROUNDS: [PhotoBackdrop; 6] = [
+    photo!("reed-shore", "芦岸晨光", "Reed shore", 0xe2c7b4),
+    photo!("tea-shadow", "茶影", "Tea shadow", 0x7b6b56),
+    photo!("basalt-coast", "玄武海岸", "Basalt coast", 0xb9c5d7),
+    photo!("paper-study", "书桌素纸", "Paper study", 0x81684d),
+    photo!("fern-rain", "雨后蕨叶", "Ferns after rain", 0x697544),
+    photo!("violet-ridge", "暮紫山脊", "Violet ridge", 0xc3bdcf),
+];
+
+pub(super) fn photo_background(name: &str) -> Option<&'static PhotoBackdrop> {
+    PHOTO_BACKGROUNDS.iter().find(|p| p.id == name)
+}
 
 /// 一张内置背景：底色，几团光（颜色，圆心 x、y，半径，浓度；位置和半径按画幅的比例），颗粒有多重。
 type Recipe = (u32, &'static [(u32, f32, f32, f32, f32)], i32);
@@ -180,6 +220,18 @@ pub fn image_path(src: &str) -> Option<String> {
     // 自己挑的照片：文件在文档库的 backdrops 目录里，索引里只记文件名（iOS 上沙盒的路径每次安装都变）。
     if let Some(file) = src.strip_prefix("file:") { let path = photos_dir().join(file); return path.exists().then(|| path.to_string_lossy().to_string()); }
     let name = src.strip_prefix("builtin:")?;
+    if let Some(photo) = photo_background(name) {
+        let path = cache_dir().join(format!("{name}-1.jpg"));
+        if !path.is_file() {
+            std::fs::create_dir_all(cache_dir()).ok()?;
+            let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+            if std::fs::write(&temp, photo.image).and_then(|()| std::fs::rename(&temp, &path)).is_err() {
+                let _ = std::fs::remove_file(temp);
+                return None;
+            }
+        }
+        return Some(path.to_string_lossy().to_string());
+    }
     let path = cache_dir().join(format!("{name}-3.png"));
     if !path.exists() {
         use resvg::tiny_skia::*;
@@ -212,41 +264,66 @@ pub fn image_path(src: &str) -> Option<String> {
     Some(path.to_string_lossy().to_string())
 }
 
-/// 模糊过的那一张：让系统缩成很小的一张存下来，画的时候再拉大，就是糊的。GPUI 自己没有模糊。
-fn blurred(path: &str) -> Option<String> {
+/// UIKit 解码会处理系统相册里照片的方向和颜色空间。
+fn scaled_photo(path: &str, short: f64, long: f64) -> Option<image::DynamicImage> {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
-    use std::hash::{Hash, Hasher};
     #[link(name = "UIKit", kind = "framework")]
     unsafe extern "C" { fn UIImagePNGRepresentation(image: *mut AnyObject) -> *mut AnyObject; }
+    unsafe {
+        let cpath = std::ffi::CString::new(path).ok()?;
+        let ns: *mut AnyObject = msg_send![AnyClass::get(c"NSString")?, stringWithUTF8String: cpath.as_ptr()];
+        let image: *mut AnyObject = msg_send![AnyClass::get(c"UIImage")?, imageWithContentsOfFile: ns];
+        if image.is_null() { return None; }
+        let size: objc2_core_foundation::CGSize = msg_send![image, size];
+        if size.width < 1. || size.height < 1. { return None; }
+        let k = (short / size.width.min(size.height)).min(long / size.width.max(size.height)).min(1.);
+        let small = objc2_core_foundation::CGSize::new((size.width * k).round().max(1.), (size.height * k).round().max(1.));
+        let format: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRendererFormat")?, preferredFormat];
+        let _: () = msg_send![format, setScale: 1f64];
+        let renderer: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRenderer")?, alloc];
+        let renderer: *mut AnyObject = msg_send![renderer, initWithSize: small, format: format];
+        let addr = image as usize;
+        let draw = block2::RcBlock::new(move |_context: *mut AnyObject| { let _: () = msg_send![addr as *mut AnyObject, drawInRect: objc2_core_foundation::CGRect::new(objc2_core_foundation::CGPoint::new(0., 0.), small)]; });
+        let shrunk: *mut AnyObject = msg_send![renderer, imageWithActions: &*draw];
+        let _: () = msg_send![renderer, release];
+        let data = UIImagePNGRepresentation(shrunk);
+        if data.is_null() { return None; }
+        let bytes: *const std::ffi::c_void = msg_send![data, bytes];
+        let len: usize = msg_send![data, length];
+        image::load_from_memory_with_format(std::slice::from_raw_parts(bytes as *const u8, len), image::ImageFormat::Png).ok()
+    }
+}
+
+fn sampled_top(path: &str) -> Option<Hsla> {
+    thread_local! { static SAMPLE: RefCell<Option<(String, Option<Hsla>)>> = const { RefCell::new(None) }; }
+    SAMPLE.with(|cache| {
+        if let Some((_, color)) = cache.borrow().as_ref().filter(|(last, _)| last == path) { return *color; }
+        let color = scaled_photo(path, 32., 96.).map(|photo| {
+            let top = photo.crop_imm(0, 0, photo.width(), (photo.height() / 7).max(1));
+            let [r, g, b] = top.resize_exact(1, 1, image::imageops::FilterType::Triangle).to_rgb8().get_pixel(0, 0).0;
+            rgb(u32::from_be_bytes([0, r, g, b])).into()
+        });
+        *cache.borrow_mut() = Some((path.into(), color));
+        color
+    })
+}
+
+/// 高斯模糊的缓存保留原画幅。关闭模糊就直接显示原图。
+pub(super) fn blurred(path: &str) -> Option<String> {
+    use std::hash::{Hash, Hasher};
     let mut hasher = std::hash::DefaultHasher::new();
     path.hash(&mut hasher);
-    let out = cache_dir().join(format!("blur-{:016x}.png", hasher.finish()));
-    if !out.exists() {
+    let out = cache_dir().join(format!("blur-2-{:016x}.png", hasher.finish()));
+    if !out.is_file() {
         std::fs::create_dir_all(cache_dir()).ok()?;
-        unsafe {
-            let cpath = std::ffi::CString::new(path).ok()?;
-            let ns: *mut AnyObject = msg_send![AnyClass::get(c"NSString")?, stringWithUTF8String: cpath.as_ptr()];
-            let image: *mut AnyObject = msg_send![AnyClass::get(c"UIImage")?, imageWithContentsOfFile: ns];
-            if image.is_null() { return None; }
-            let size: objc2_core_foundation::CGSize = msg_send![image, size];
-            if size.width < 1. || size.height < 1. { return None; }
-            // 短边 24 个像素（scale 1 的画布）。
-            let k = 24. / size.width.min(size.height);
-            let small = objc2_core_foundation::CGSize::new((size.width * k).round(), (size.height * k).round());
-            let format: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRendererFormat")?, preferredFormat];
-            let _: () = msg_send![format, setScale: 1f64];
-            let renderer: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRenderer")?, alloc];
-            let renderer: *mut AnyObject = msg_send![renderer, initWithSize: small, format: format];
-            let addr = image as usize;
-            let draw = block2::RcBlock::new(move |_context: *mut AnyObject| { let _: () = msg_send![addr as *mut AnyObject, drawInRect: objc2_core_foundation::CGRect::new(objc2_core_foundation::CGPoint::new(0., 0.), small)]; });
-            let shrunk: *mut AnyObject = msg_send![renderer, imageWithActions: &*draw];
-            let _: () = msg_send![renderer, release];
-            let data = UIImagePNGRepresentation(shrunk);
-            if data.is_null() { return None; }
-            let bytes: *const std::ffi::c_void = msg_send![data, bytes];
-            let len: usize = msg_send![data, length];
-            std::fs::write(&out, std::slice::from_raw_parts(bytes as *const u8, len)).ok()?;
+        // 给滤镜留足采样点，同时控制全景长图的缓存大小。
+        let source = scaled_photo(path, 320., 1200.)?;
+        let radius = (source.width().min(source.height()) as f32 * 0.0175).max(0.5);
+        let temp = out.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        if source.blur(radius).save_with_format(&temp, image::ImageFormat::Png).is_err() || std::fs::rename(&temp, &out).is_err() {
+            let _ = std::fs::remove_file(temp);
+            return None;
         }
     }
     Some(out.to_string_lossy().to_string())
@@ -538,7 +615,7 @@ fn draw_motif(pm: &mut resvg::tiny_skia::Pixmap, motif: Motif, base: u32, ink: u
 }
 
 /// 涂鸦：一笔手画似的波浪线，用给的颜色。
-fn doodle_image(color: &str) -> Option<String> {
+pub(super) fn doodle_image(color: &str) -> Option<String> {
     use resvg::tiny_skia::*;
     let path = cache_dir().join(format!("doodle-{}-1.png", color.trim_start_matches('#')));
     if path.exists() { return Some(path.to_string_lossy().to_string()); }

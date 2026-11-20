@@ -212,7 +212,7 @@ pub(super) fn valid_key(key: &str) -> bool { !key.is_empty() && key.bytes().all(
 
 /// 对话框里输入框的种类：密钥（圆点遮住）、网址（网址键盘），都不自动大写、不自动更正；或者普通的一行字。
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum Field { Text, Secret, Url }
+pub(super) enum Field { Text, Search, Secret, Url }
 
 pub(super) fn prompt(title: &str, body: Option<&str>, placeholder: &str, value: &str, field: Field, remove: Option<&str>, complete: impl Fn(Option<String>) + 'static) -> bool {
     unsafe {
@@ -228,7 +228,7 @@ pub(super) fn prompt(title: &str, body: Option<&str>, placeholder: &str, value: 
             let _: () = msg_send![field, setPlaceholder: ns_string(placeholder)];
             let _: () = msg_send![field, setText: ns_string(value)];
             let _: () = msg_send![field, setSecureTextEntry: kind == Field::Secret];
-            if kind != Field::Text {
+            if matches!(kind, Field::Secret | Field::Url) {
                 // UIKeyboardTypeURL = 3；不自动大写、不自动更正、不查拼写。这几个输入特性在输入框上是转发实现的，
                 // objc2 调试构建的方法检查找不到，直接走 objc_msgSend。
                 let set: unsafe extern "C" fn(*mut AnyObject, objc2::runtime::Sel, isize) = std::mem::transmute(objc2::ffi::objc_msgSend as *const ());
@@ -260,7 +260,7 @@ pub(super) fn prompt(title: &str, body: Option<&str>, placeholder: &str, value: 
             let value = if chars.is_null() { String::new() } else { CStr::from_ptr(chars).to_string_lossy().trim().to_owned() };
             complete(Some(value));
         });
-        let ok = add(tr("保存", "Save"), 0, Some(&save));
+        let ok = add(if kind == Field::Search { tr("搜索", "Search") } else { tr("保存", "Save") }, 0, Some(&save));
         let _: () = msg_send![alert, setPreferredAction: ok];
         let _: () = msg_send![alert, setOverrideUserInterfaceStyle: if crate::theme::dark() { 2isize } else { 1isize }];
         let none: Option<&block2::Block<dyn Fn()>> = None;

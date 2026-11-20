@@ -135,6 +135,17 @@ pub fn haptic() {
     }
 }
 
+/// 切到另一个选项时的轻触感。
+pub(super) fn selection_haptic() {
+    if !crate::settings::prefs().haptics { return; }
+    let Some(class) = AnyClass::get(c"UISelectionFeedbackGenerator") else { return; };
+    unsafe {
+        let generator: *mut AnyObject = msg_send![class, new];
+        let _: () = msg_send![generator, selectionChanged];
+        let _: () = msg_send![generator, release];
+    }
+}
+
 unsafe fn ns_string(s: &str) -> *mut AnyObject {
     let c = std::ffi::CString::new(s).unwrap_or_default();
     unsafe { msg_send![AnyClass::get(c"NSString").unwrap(), stringWithUTF8String: c.as_ptr()] }
