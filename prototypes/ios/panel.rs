@@ -617,9 +617,16 @@ unsafe fn fill(parent: *mut AnyObject, frame: CGRect, f: &Fill, radius: f64) -> 
             Fill::Tape(path) => {
                 let v = plain(parent, frame);
                 round(v, radius);
-                let image: *mut AnyObject = msg_send![AnyClass::get(c"UIImage").unwrap(), imageWithContentsOfFile: ns_string(path)];
+                let class = AnyClass::get(c"UIImage").unwrap();
+                let mut image: *mut AnyObject = msg_send![class, imageWithContentsOfFile: ns_string(path)];
                 if !image.is_null() {
-                    let size: CGSize = msg_send![image, size];
+                    let mut size: CGSize = msg_send![image, size];
+                    if frame.size.width * size.height > frame.size.height * size.width
+                        && let Some(wrapped) = super::washi::repeat_texture(std::path::Path::new(path))
+                    {
+                        let continuous: *mut AnyObject = msg_send![class, imageWithContentsOfFile: ns_string(&wrapped.to_string_lossy())];
+                        if !continuous.is_null() { image = continuous; size = msg_send![image, size]; }
+                    }
                     let spans = super::washi::tile_spans(frame.size.width, frame.size.height, size.width, size.height);
                     for (x, width) in spans { image_view(v, rect(x, 0., width, frame.size.height), image, 0); }
                 }

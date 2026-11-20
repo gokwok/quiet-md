@@ -2,6 +2,19 @@
 //! 同一张纸纹用在图库、图案页和正文，等比缩放到胶带高度后向右续接。
 
 use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+
+fn cache_dir() -> PathBuf { std::env::temp_dir().join("quiet-md-washi-v5") }
+
+fn cache_file(path: &Path, write: impl FnOnce(&Path) -> Option<()>) -> Option<()> {
+    if path.is_file() { return Some(()); }
+    fs::create_dir_all(path.parent()?).ok()?;
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = write(&temp).and_then(|()| fs::rename(&temp, path).ok());
+    if result.is_none() { let _ = fs::remove_file(temp); }
+    result
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct Tape {
@@ -13,17 +26,89 @@ pub(super) struct Tape {
 
 impl Tape {
     pub fn path(&self) -> Option<String> {
-        let dir = std::env::temp_dir().join("quiet-md-washi-v3");
-        let path = dir.join(format!("{}.jpg", self.id));
-        if !path.is_file() {
-            fs::create_dir_all(dir).ok()?;
-            let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-            if fs::write(&temp, self.art).and_then(|()| fs::rename(&temp, &path)).is_err() {
-                let _ = fs::remove_file(temp);
-                return None;
-            }
-        }
+        let path = cache_dir().join(format!("{}.jpg", self.id));
+        cache_file(&path, |temp| fs::write(temp, self.art).ok())?;
         Some(path.to_string_lossy().into_owned())
+    }
+}
+
+/// 长胶带用同一幅纸纹。只有超出原画时才准备一份可续接的缓存，供 UIKit 和 GPUI 共用。
+pub(super) fn repeat_texture(path: &Path) -> Option<PathBuf> {
+    let mut key = std::hash::DefaultHasher::new();
+    path.hash(&mut key);
+    let cached = cache_dir().join(format!("wrap-{:016x}.png", key.finish()));
+    cache_file(&cached, |temp| {
+        let mut reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+        if !matches!(reader.format(), Some(image::ImageFormat::Jpeg | image::ImageFormat::Png)) { return None; }
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(32 * 1024 * 1024);
+        reader.limits(limits);
+        use image::ImageDecoder;
+        let mut decoder = reader.into_decoder().ok()?;
+        let (w, h) = decoder.dimensions();
+        if u64::from(w) * u64::from(h) > 8_000_000 { return None; }
+        let orientation = decoder.orientation().ok()?;
+        let mut art = image::DynamicImage::from_decoder(decoder).ok()?;
+        art.apply_orientation(orientation);
+        let mut art = art.into_rgba8();
+        if let Some(width) = repeat_width(path).filter(|&width| width < art.width()) {
+            // 在纹样相位对齐的地方续接，例如保住棋盘格的间距和完整的号码。
+            let height = art.height();
+            art = image::imageops::crop_imm(&art, 0, 0, width, height).to_image();
+        } else {
+            soften_join(&mut art);
+        }
+        art.save_with_format(temp, image::ImageFormat::Png).ok()
+    })?;
+    Some(cached)
+}
+
+/// 逐款核对后确认的内置纹样循环宽度，单位为原图像素。
+fn repeat_width(path: &Path) -> Option<u32> {
+    if path.parent()? != cache_dir() { return None; }
+    Some(match path.file_stem()?.to_str()? {
+        "mint-pixels" => 543,
+        "blueberry-basket" => 678,
+        "lavender-dream" => 767,
+        "olive-cloth" => 619,
+        "sunny-seville" => 739,
+        "old-town-tile" => 750,
+        "skate-dog" => 620,
+        "edible-plushi" => 634,
+        "le-mans" => 699,
+        "finish-line" => 600,
+        "want" => 720,
+        _ => return None,
+    })
+}
+
+/// 保留图案的起点，在末端极窄的一段把色彩收进下一轮的纹理，消除首尾间的色阶跳变。
+fn soften_join(art: &mut image::RgbaImage) {
+    let (width, height) = art.dimensions();
+    let feather = (height / 6).clamp(2, 40).min(width / 4);
+    if feather < 2 { return; }
+    // 两端本身已能直接对接的纸纹不需要过渡。
+    let already_continuous = (0..height).all(|y| {
+        let (left, right) = (art.get_pixel(0, y), art.get_pixel(width - 1, y));
+        left.0.iter().zip(right.0).all(|(a, b)| a.abs_diff(b) < 8)
+    });
+    if already_continuous { return; }
+    for y in 0..height {
+        for offset in 0..feather {
+            let x = width - feather + offset;
+            let t = offset as f32 / (feather - 1) as f32;
+            let weight = t * t * (3. - 2. * t);
+            let left = *art.get_pixel(feather - 1 - offset, y);
+            let right = art.get_pixel_mut(x, y);
+            let (a, b) = (f32::from(right[3]) * (1. - weight), f32::from(left[3]) * weight);
+            let alpha = a + b;
+            if alpha > 0. {
+                for (value, next) in right.0[..3].iter_mut().zip(left.0) {
+                    *value = ((f32::from(*value) * a + f32::from(next) * b) / alpha).round() as u8;
+                }
+            }
+            right[3] = alpha.round() as u8;
+        }
     }
 }
 
@@ -49,7 +134,7 @@ macro_rules! tape {
 }
 
 const CHILDHOOD: Tape = tape!("childhood", "Childhood", 0xfbcf3a);
-const GROOVY_WATER: Tape = tape!("groovy-water", "Groovy Water", 0x2e74ca);
+const GROOVY_WATER: Tape = Tape { id: "groovy-water", name: "Groovy Water", tint: 0x2e74ca, art: include_bytes!("washi/groovy-water-long.jpg") };
 const PEACHY_PEACH: Tape = tape!("peachy-peach", "Peachy Peach", 0xfa8367);
 
 pub(super) const SUGGESTED: [Tape; 3] = [PEACHY_PEACH, GROOVY_WATER, CHILDHOOD];
@@ -112,7 +197,7 @@ pub(super) const GALLERY: &[Tape] = &[
     tape!("purr-statement", "Purr Statement", 0xbc793d),
     tape!("pattern-cats", "Pattern Cats", 0xa28e47),
     tape!("foliage-season", "Foliage Season", 0xb54c38),
-    Tape { id: "zoo-wash", name: "Zoo Wash", tint: 0xab7756, art: include_bytes!("washi/zoo-wash-repeat.jpg") },
+    Tape { id: "zoo-wash", name: "Zoo Wash", tint: 0xab7756, art: include_bytes!("washi/zoo-wash-long.jpg") },
     tape!("to-pug-or-not-to-pug", "To Pug, or Not to Pug", 0xb9ada2),
     tape!("unamused-dogs", "Unamused Dogs", 0xc5fc18),
     tape!("skate-dog", "Skate Dog", 0x9f6e59),

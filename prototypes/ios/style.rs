@@ -491,12 +491,8 @@ pub fn rule_glyphs() -> RuleGlyphs {
     }
 }
 
-pub(super) fn tape_repeats(pattern: &str) -> bool {
-    pattern.strip_prefix("image:").is_some_and(|id| id.starts_with("file:") || super::washi::get(id).is_some())
-}
-
-/// 图片胶带返回同一份原图。程序画的花纹按样张或正文高度缓存。
-pub fn tape_image(pattern: &str, color: &str, height: Option<u32>) -> Option<String> {
+/// 图库、图案页和正文都从同一张纸纹的左端开始铺。
+pub fn tape_image(pattern: &str, color: &str) -> Option<String> {
     use resvg::tiny_skia::*;
     let image = pattern.strip_prefix("image:");
     if let Some(name) = image {
@@ -504,10 +500,11 @@ pub fn tape_image(pattern: &str, color: &str, height: Option<u32>) -> Option<Str
         if let Some(file) = name.strip_prefix("file:") { let p = photos_dir().join(file); return p.exists().then(|| p.to_string_lossy().to_string()); }
         if let Some(tape) = super::washi::get(name) { return tape.path(); }
     }
-    let path = cache_dir().join(format!("tape-{}-{}-{}-6.png", pattern.replace(':', "_"), color.trim_start_matches('#'), height.unwrap_or_default()));
+    let color = if image.is_some() { "" } else { color.trim_start_matches('#') };
+    let path = cache_dir().join(format!("tape-{}-{}-8.png", pattern.replace(':', "_"), color));
     if path.exists() { return Some(path.to_string_lossy().to_string()); }
-    // 3x 画布。正文按胶带实际高度画，花纹的大小不跟胶带一起放大。
-    let (w, h, u) = height.map_or((360, 240, 3.), |h| (2160, h * 3, 1.7));
+    // 小样上也要看得清纹样。把纸纹连续绘到整行细胶带也够用的长度。
+    let (w, h, u) = (3600, 120, 2.7);
     let (wf, hf) = (w as f32, h as f32);
     let mut pm = Pixmap::new(w, h)?;
     let all = Rect::from_xywh(0., 0., wf, hf)?;
@@ -521,7 +518,7 @@ pub fn tape_image(pattern: &str, color: &str, height: Option<u32>) -> Option<Str
         let shader = LinearGradient::new(Point::from_xy(0., 0.), Point::from_xy(120. * u, 0.), vec![GradientStop::new(0., rgba(a, 255)), GradientStop::new(0.5, rgba(b, 255)), GradientStop::new(1., rgba(c, 255))], SpreadMode::Reflect, Transform::identity())?;
         pm.fill_rect(all, &Paint { shader, ..Default::default() }, Transform::identity(), None);
     } else {
-        let base = u32::from_str_radix(color.trim_start_matches('#'), 16).ok()?;
+        let base = u32::from_str_radix(color, 16).ok()?;
         pm.fill(rgba(base, 255));
         let (light, dark) = (solid(Color::from_rgba8(255, 255, 255, 96)), solid(Color::from_rgba8(0, 0, 0, 60)));
         let stroke = |width: f32| Stroke { width: width * u, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
@@ -839,22 +836,27 @@ fn tape_size(rule: Rule) -> (Option<f32>, u32) {
 }
 
 /// 一条胶带：图案按高度铺开，两端和图库使用同样的撕边轮廓。
-fn tape(path: String, repeat: bool, w: Option<f32>, h: f32, paper: Hsla) -> Div {
+fn tape(path: String, w: Option<f32>, h: f32, paper: Hsla) -> Div {
     let path = std::path::PathBuf::from(path);
-    let art = if repeat {
-        let source = Resource::from(path);
-        canvas(move |_, window, cx| window.use_asset::<ImgResourceLoader>(&source, cx), |bounds, loaded, window, _| {
-            let Some(Ok(image)) = loaded else { return; };
-            let size = image.size(0);
-            let spans = super::washi::tile_spans(f64::from(f32::from(bounds.size.width)), f64::from(f32::from(bounds.size.height)), f64::from(size.width.0), f64::from(size.height.0));
-            for (x, width) in spans {
-                let tile = Bounds::new(point(bounds.left() + px(x as f32), bounds.top()), gpui::size(px(width as f32), bounds.size.height));
-                let _ = window.paint_image(bounds, tile, Corners::default(), image.clone(), 0, false);
-            }
-        }).absolute().inset_0().into_any_element()
-    } else {
-        img(path).size_full().object_fit(ObjectFit::Cover).into_any_element()
-    };
+    let source = Resource::from(path.clone());
+    let art = canvas(move |bounds, window, cx| {
+        let image = window.use_asset::<ImgResourceLoader>(&source, cx)?.ok()?;
+        let size = image.size(0);
+        if f32::from(bounds.size.width) * size.height.0 as f32 > f32::from(bounds.size.height) * size.width.0 as f32
+            && let Some(wrapped) = super::washi::repeat_texture(&path)
+        {
+            return window.use_asset::<ImgResourceLoader>(&Resource::from(wrapped), cx)?.ok().or(Some(image));
+        }
+        Some(image)
+    }, |bounds, loaded, window, _| {
+        let Some(image) = loaded else { return; };
+        let size = image.size(0);
+        let spans = super::washi::tile_spans(f64::from(f32::from(bounds.size.width)), f64::from(f32::from(bounds.size.height)), f64::from(size.width.0), f64::from(size.height.0));
+        for (x, width) in spans {
+            let tile = Bounds::new(point(bounds.left() + px(x as f32), bounds.top()), gpui::size(px(width as f32), bounds.size.height));
+            let _ = window.paint_image(bounds, tile, Corners::default(), image.clone(), 0, false);
+        }
+    }).absolute().inset_0();
     div().relative().h(px(h)).flex_none().overflow_hidden().map(|d| match w { Some(w) => d.w(px(w)).max_w_full(), None => d.w_full() })
         .child(art)
         .child(canvas(|_, _, _| {}, move |b, _, window, _| {
@@ -877,8 +879,8 @@ pub fn divider(rule: Rule) -> Option<AnyElement> {
     Some(match style.divider.as_ref()? {
         DividerStyle::Tape { pattern, color } => {
             let (w, h) = tape_size(rule);
-            let path = tape_image(pattern, color.as_deref().unwrap_or(TAPE), Some(h))?;
-            div().py(px(if rule == Rule::Plain { 6. } else { 10. })).w_full().flex().items_center().justify_center().child(tape(path, tape_repeats(pattern), w, h as f32, paper)).into_any_element()
+            let path = tape_image(pattern, color.as_deref().unwrap_or(TAPE))?;
+            div().py(px(if rule == Rule::Plain { 6. } else { 10. })).w_full().flex().items_center().justify_center().child(tape(path, w, h as f32, paper)).into_any_element()
         }
         DividerStyle::Doodle => {
             let kind = match rule { Rule::Dots => Doodle::Curl, Rule::Dotted => Doodle::Loop, Rule::Line => Doodle::Chain, Rule::Thick => Doodle::Scribble, _ => Doodle::Wave };

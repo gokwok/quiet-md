@@ -42,8 +42,7 @@ pub fn open() {
 pub fn close() { PAGE.with(|p| p.set(None)); }
 
 fn tape_preview(pattern: &str, color: &str) -> Option<Fill> {
-    let path = super::style::tape_image(pattern, color, None)?;
-    Some(if super::style::tape_repeats(pattern) { Fill::Tape(path) } else { Fill::Image(path) })
+    super::style::tape_image(pattern, color).map(Fill::Tape)
 }
 
 fn washi_strips(tapes: &[washi::Tape], pattern: &str, cols: usize) -> Node {
@@ -305,7 +304,7 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 Node::Segments { symbols: vec!["circle.grid.3x3.fill", "photo"], titles: vec![], picked: tab, act: "pat-tab:".into() },
             ];
             if tab == 0 {
-                v.push(Node::Thumbs { fills: super::style::PATTERNS.iter().filter_map(|p| super::style::tape_image(p, &color, None).map(Fill::Image)).collect(), picked: super::style::PATTERNS.iter().position(|p| *p == pattern), act: "pat:".into() });
+                v.push(Node::Thumbs { fills: super::style::PATTERNS.iter().filter_map(|p| tape_preview(p, &color)).collect(), picked: super::style::PATTERNS.iter().position(|p| *p == pattern), act: "pat:".into() });
                 let picked = TAPE.iter().position(|v| same(&color, *v));
                 v.push(Node::Swatches { fills: TAPE.iter().map(|v| Fill::Color(c(*v))).collect(), picked, act: "pat-color:".into(), custom: Some(("custom:tape".into(), picked.is_none(), hex(&color).unwrap_or(c(TAPE[0])))) });
             } else {
