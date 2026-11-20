@@ -30,7 +30,13 @@ iOS 自己的代码在本目录，补丁里只留挂接点：
 | `menu.rs` | 系统的弹出菜单：在 GPUI 元素的位置盖一个透明的原生按钮，挂上 `UIMenu`，菜单项被点后回到工作区 |
 | `editmenu.rs` | 系统的编辑菜单（`UIEditMenuInteraction`）：对着选区弹出，项被点后回到编辑器 |
 | `voice.rs` | 选中文字配音：编辑菜单里「配音」选角色，向 ElevenLabs 要带逐字时间的音频，存在文档库 `assets/voice/`；段落下一行播放，放的时候整段浅底、念到的那句深一档。角色或这段的「…」可开语气标签、改台词语言：先让快速模型写台本（加标签或译成中文、英语、日语）再念，台本可展开看，点台本收起。选中块底部工具条的「配音」是同一个入口，配选中的整块；块里有引号里的对话时，角色上面可选「整段」或「仅对话」（只配引号里的话）（旁白作为台本的上下文）。角色菜单带头像。几段可以同时生成；同一段又要生成时旧的那次作废（结果不写、请求停掉）；生成完只在前台、没有别的在放、这段还在当前文档里时自动放 |
-| `background.rs` | 生成配音切到后台也接着做：有活时拿着 UIKit 后台任务（约 30 秒）；iOS 26 起再叠一个 `BGContinuedProcessingTask`（系统在灵动岛、锁屏显示进度，可停止），几段合用一个、进度相加。系统停掉它时没做完的按「生成失败」处理，点那一行重试。模拟器上系统不给这种任务，只有 UIKit 那个 |
+| `background.rs` | 生成配音与 AI 写作切到后台也接着做：有活时拿着 UIKit 后台任务（约 30 秒）；iOS 26 起再叠一个 `BGContinuedProcessingTask`（系统在灵动岛、锁屏显示进度，可停止），几段合用一个、进度相加。系统停掉它时没做完的按「生成失败」处理，点那一行重试。模拟器上系统不给这种任务，只有 UIKit 那个 |
+| `assist.rs`、`assist_card.rs` | 文档内 AI 写作助手：照 `fdl_ai::tavern` 预设流式续写并就地预览（原生玻璃输入卡片），确认后经 `Core::insert_generated` 一步撤销写入，原文与要求记入 `assets/gen/` |
+| `assistant.rs`、`assistant_roles.rs`、`assistant_preview.rs` | 设置 › 助手设置 › 语音：ElevenLabs API Key（钥匙串）、模型卡片、音色库搜索与试听（`AVAudioPlayer`）、语音角色拖拽排序与头像（`avatars/`） |
+| `assistant_text.rs`、`assistant_llm.rs` | 设置 › 助手设置 › 文本：多服务商 OpenAI 兼容文本模型配置与连接测试，及基于 `async-openai` + 单线程 tokio 的流式客户端 |
+| `assistant_writing.rs`、`assistant_sheet.rs` | 设置 › 助手设置 › 写作：酒馆预设、条目、正则、助手与人设管理（存于空间 `tavern/`），以及系统 `UITextView` 长文本编辑页 |
+| `general.rs`、`lock.rs`、`about.rs` | 设置 › 常规子页（外观、语言、安全）、面容 ID / 设备密码锁屏遮罩（`LocalAuthentication`），以及「关于 Margin」与开源许可页（`licences.txt`，由 `licences.sh` 生成） |
+| `format.rs`、`starpick.rs`、`pick.rs`、`tilt.rs` | 键盘上方「格式」原生玻璃面板、首页「收藏文档」半屏面板、浏览页横滑选卡片，以及空间头像倾斜缓存图 |
 | `touch.rs` | 什么时候出编辑菜单、里面有哪几项；块右侧的拖动标记和长按提起整块；块选中时的动作栏和选择圆圈；表格的单元格选择（作为 `editor` 的子模块编译） |
 | `port.patch` | 上游 GPUI 的 API 差异，加上各处的手机版式分支 |
 
