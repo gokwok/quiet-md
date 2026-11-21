@@ -128,11 +128,62 @@ fn presets() -> Vec<(&'static str, &'static str, DocStyle)> {
     ]
 }
 
+/// 署了名的一套样式：名字，显示的名字，样式，配的封面（名字和图；只在文档还没有封面时加上）。
+type Authored = (&'static str, &'static str, DocStyle, Option<(&'static str, &'static [u8])>);
+/// 署了名的样式集：图库里每位作者一组（照 Craft「CRAFT 的样式」），排在内置样式前面。以后别的作者照样再加一组：
+/// 组名，底栏的署名，样式。
+fn collections() -> Vec<(&'static str, &'static str, Vec<Authored>)> {
+    vec![(tr("Claude 的样式", "Claude's styles"), tr("由 Claude 设计", "Designed by Claude"), claude_presets())]
+}
+/// 按名字找内置或署了名的一套，连同底栏的署名。
+fn find_preset(id: &str) -> Option<(&'static str, DocStyle, &'static str)> {
+    presets().into_iter().find(|(p, ..)| *p == id).map(|(_, n, s)| (n, s, tr("内置样式", "Built-in style")))
+        .or_else(|| collections().into_iter().find_map(|(_, by, set)| set.into_iter().find(|(p, ..)| *p == id).map(|(_, n, s, _)| (n, s, by))))
+}
+
+/// Claude 设计的十二套（和 Fable 一起定的方案）。背景、胶带、封面都是 `claude/draw.py` 画的；每套用一种不同的手法
+/// （孔版网点、等高线、蓝晒、墨流、水磨石、放射光、青海波、示波器、构成、票根、五线谱、莫尔纹），四套深色、四套彩色的纸。
+/// 张扬的都在纸外面和分隔符上，字和纸的对比都在 8:1 以上，长文照样读得下去。
+fn claude_presets() -> Vec<Authored> {
+    let c = |id: &str, text: u32, paper: u32, font: &str, faded: bool, divider: Option<DividerStyle>| DocStyle {
+        text: Some(h(text)), paper: Some(h(paper)), font: (!font.is_empty()).then(|| font.to_string()),
+        background: Some(Backdrop::Image { src: format!("builtin:claude-{id}"), blur: false }), faded, divider, preset: Some(format!("claude-{id}")),
+    };
+    let washi = |id: &str| Some(DividerStyle::Tape { pattern: format!("image:claude-{id}"), color: None });
+    macro_rules! cover { ($id:literal) => { Some(($id, include_bytes!(concat!("claude/covers/", $id, ".jpg")).as_slice())) }; }
+    vec![
+        // 孔版：双色孔版印的校样，粉、黄、蓝三版叠印，套得微微错位，网点和颗粒都留着。
+        ("claude-riso", tr("孔版", "Riso Press"), c("riso", 0x1b2a8f, 0xfff3e0, "", false, washi("riso")), cover!("riso")),
+        // 等高线：夜里的测绘图，墨绿底上荧光黄绿的等高线，山顶插一面橙旗；胶带是标尺。
+        ("claude-contour", tr("等高线", "Contour"), c("contour", 0xf4ffd6, 0x0e3b2e, "mono", false, washi("contour")), cover!("contour")),
+        // 蓝晒：普鲁士蓝的晒图纸上压过蕨叶，叶影是白的，曝光深浅不一；纸是标本签。
+        ("claude-cyanotype", tr("蓝晒", "Cyanotype"), c("cyanotype", 0x173f75, 0xf4f0e6, "mono", false, washi("cyanotype")), cover!("cyanotype")),
+        // 墨流：水面上漂的墨，黑、骨白，一道朱红；分隔线是一笔手画。
+        ("claude-suminagashi", tr("墨流", "Suminagashi"), c("suminagashi", 0xf2ead8, 0x14161c, "serif", false, Some(DividerStyle::Doodle)), None),
+        // 水磨石：粉色水泥里嵌着糖果色的石子，胶带换成薄荷底。
+        ("claude-terrazzo", tr("水磨石", "Terrazzo"), c("terrazzo", 0x5a1f3d, 0xfff6ec, "rounded", false, washi("terrazzo")), None),
+        // 日冕：马戏海报里的太阳，番茄红和粉的光芒，纸是一整张明黄。
+        ("claude-sunburst", tr("日冕", "Sunburst"), c("sunburst", 0x2a0e00, 0xffd400, "rounded", false, washi("sunburst")), cover!("sunburst")),
+        // 青海波：靛蓝的波纹一层压一层，海上一轮朱红的太阳。
+        ("claude-tideline", tr("青海波", "Tideline"), c("tideline", 0x0b2a5b, 0xf3eedd, "serif", false, washi("tideline")), cover!("tideline")),
+        // 荧屏：暗室里开着的示波器，绿色的李萨如图形和扫描线；整张淡化，字是荧光绿。
+        ("claude-phosphor", tr("荧屏", "Phosphor"), c("phosphor", 0x7cff6b, 0x07140b, "mono", true, washi("phosphor")), cover!("phosphor")),
+        // 构成：红、蓝、黄和黑的几何积木，米色纸。
+        ("claude-primary", tr("构成", "Primary"), c("primary", 0x111111, 0xf2ebdd, "", false, washi("primary")), cover!("primary")),
+        // 票根：台球桌的绿呢上一张泡泡糖粉的纸，胶带是一卷入场券。
+        ("claude-ticket", tr("票根", "Ticket Stub"), c("ticket", 0x3b0a14, 0xff9ec4, "serif", false, washi("ticket")), None),
+        // 夜曲：酒红的夜里飘着金色的五线谱；分隔线是一道连音线似的手画。
+        ("claude-nocturne", tr("夜曲", "Nocturne"), c("nocturne", 0xffe9a8, 0x3a0d12, "serif", false, Some(DividerStyle::Doodle)), None),
+        // 莫尔：两组同心圈在品红底上相撞，出了干涉纹；纸是电光青。
+        ("claude-moire", tr("莫尔", "Interference"), c("moire", 0x001b3a, 0x3fe0ff, "", false, washi("moire")), None),
+    ]
+}
+
 /// 现在这套样式叫什么（主面板「样式」那一格里写的）。
 fn style_name(style: &DocStyle) -> String {
     if style.is_plain() { return tr("原样", "Original").into(); }
     match style.preset.as_deref() {
-        Some(p) => p.strip_prefix("saved:").map(str::to_string).or_else(|| presets().into_iter().find(|(id, ..)| *id == p).map(|(_, n, _)| n.to_string())).unwrap_or_else(|| tr("自定义样式", "Custom style").into()),
+        Some(p) => p.strip_prefix("saved:").map(str::to_string).or_else(|| find_preset(p).map(|(n, ..)| n.to_string())).unwrap_or_else(|| tr("自定义样式", "Custom style").into()),
         None => tr("自定义样式", "Custom style").into(),
     }
 }
@@ -331,6 +382,8 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 Node::Header { title: tr("和纸胶带", "Washi tape").into(), warn: false, reset: None, close: "page:pattern".into() },
                 Node::Scroll { nodes: vec![
                     washi_strips(washi::GALLERY, pattern, 2),
+                    Node::Caption(tr("Claude 的胶带", "Claude's tapes").into()),
+                    washi_strips(washi::CLAUDE, pattern, 2),
                     Node::Caption(tr("经典胶带", "Classic tapes").into()),
                     classic_washi_strips(pattern),
                 ], max_height },
@@ -343,6 +396,11 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 content.push(Node::Caption(tr("你的样式", "Your styles").into()));
                 content.push(Node::Cards { items: mine.iter().map(|(n, s)| super::panel::Card { menu: style_menu(&format!("s:{n}")), ..style_card(n.clone(), s) }).collect(), picked: mine.iter().position(|(n, _)| style.preset.as_deref().and_then(|p| p.strip_prefix("saved:")) == Some(n.as_str())), act: "gallery-mine:".into() });
             }
+            // 署了名的几组放在内置样式前面，卡片上带着配的封面。
+            for (k, (title, _, set)) in collections().into_iter().enumerate() {
+                content.push(Node::Caption(title.into()));
+                content.push(Node::Cards { items: set.iter().map(|(id, n, s, cover)| super::panel::Card { menu: style_menu(&format!("p:{id}")), cover: cover.and_then(|(name, bytes)| authored_cover(name, bytes)), ..style_card((*n).into(), s) }).collect(), picked: set.iter().position(|(id, ..)| style.preset.as_deref() == Some(*id)), act: format!("gallery-by{k}:") });
+            }
             let all = presets();
             content.push(Node::Caption(tr("内置样式", "Built-in styles").into()));
             content.push(Node::Cards { items: all.iter().map(|(id, n, s)| super::panel::Card { menu: style_menu(&format!("p:{id}")), ..style_card((*n).into(), s) }).collect(), picked: all.iter().position(|(id, _, s)| if s.is_plain() { style.is_plain() } else { style.preset.as_deref() == Some(*id) }), act: "gallery:".into() });
@@ -354,7 +412,8 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
             let mut v = vec![
                 Node::Header { title: tr("样式图库", "Style gallery").into(), warn: false, reset: None, close: back },
                 Node::StyleFooter { name: style_name(style), note: if style.preset.as_deref().is_some_and(|p| p.starts_with("saved:")) { tr("由你创建", "Created by you") }
-                    else if style.is_plain() || style.preset.as_deref().is_some_and(|p| presets().iter().any(|(id, ..)| *id == p)) { tr("内置样式", "Built-in style") }
+                    else if style.is_plain() { tr("内置样式", "Built-in style") }
+                    else if let Some((_, _, by)) = style.preset.as_deref().and_then(find_preset) { by }
                     else { tr("还没有保存", "Not saved yet") }.to_string() + if default_note { tr(" · 默认样式", " · Default") } else { "" }, action, menu },
             ];
             let (_, safe, viewport) = super::layout();
@@ -496,6 +555,13 @@ fn set_photo(src: String, w: &mut Workspace, cx: &mut Context<Workspace>) -> boo
 
 /// 封面页下面那六张自带封面（每个系列挑几张）。
 const COVERS: [&str; 6] = ["landscape-1", "aurora-2", "gradient-3", "geometry-1", "landscape-4", "aurora-5"];
+
+/// 署了名的样式配的封面：缩略图要文件路径，第一次用时写到临时目录。
+fn authored_cover(name: &str, bytes: &[u8]) -> Option<String> {
+    let path = std::env::temp_dir().join("quiet-covers").join(format!("by-{name}.jpg"));
+    if !path.is_file() { std::fs::create_dir_all(path.parent()?).ok()?; std::fs::write(&path, bytes).ok()?; }
+    Some(path.to_string_lossy().into_owned())
+}
 
 /// 自带封面编在二进制里；缩略图要文件路径，第一次用时写到临时目录。
 fn cover_thumb(name: &str) -> Option<String> {
@@ -656,6 +722,11 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
             });
         }),
         "gallery" => if let Some((_, _, preset)) = presets().into_iter().nth(ix) { edit(w, cx, |s| *s = preset); },
+        // 署了名的：套上样式；配了封面、文档又还没有封面的，顺手加上（不换掉别人自己挑的封面）。
+        n if n.starts_with("gallery-by") => if let Some((_, _, preset, cover)) = n["gallery-by".len()..].parse::<usize>().ok().and_then(|k| collections().into_iter().nth(k)).and_then(|(.., set)| set.into_iter().nth(ix)) {
+            edit(w, cx, |s| *s = preset);
+            if let Some((_, bytes)) = cover && let Some(editor) = w.editor.clone() && !editor.read(cx).has_cover() { editor.update(cx, |e, cx| { e.set_cover_image(Some((bytes, "jpg")), cx); }); }
+        },
         "gallery-mine" => if let Some((n, mut style)) = shown().into_iter().nth(ix) { style.preset = Some(format!("saved:{n}")); edit(w, cx, |s| *s = style); },
         // 照 Craft（IMG_9347）：先弹「保存样式」让人起名；空着就用「自定义样式」，重名时在后面加数字。
         "gallery-save" => {
@@ -678,7 +749,7 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
             let key = arg;
             let style = if key == "p:original" { None } else if let Some(n) = key.strip_prefix("s:") {
                 saved().into_iter().find(|(m, _)| m == n).map(|(_, mut s)| { s.preset = Some(format!("saved:{n}")); s })
-            } else { presets().into_iter().find(|(id, ..)| key.strip_prefix("p:") == Some(*id)).map(|(.., s)| s) };
+            } else { key.strip_prefix("p:").and_then(find_preset).map(|(_, s, _)| s) };
             let done = match style { None => std::fs::remove_file(default_path()).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }),
                 Some(s) => serde_json::to_vec_pretty(&s).map_err(std::io::Error::other).and_then(|b| std::fs::write(default_path(), b)) };
             match done {

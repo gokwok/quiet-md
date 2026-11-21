@@ -239,4 +239,23 @@ pub(super) const GALLERY: &[Tape] = &[
     tape!("new-years-resolutions", "New Year's Resolutions", 0x2f2d2a),
 ];
 
-pub(super) fn get(id: &str) -> Option<&'static Tape> { GALLERY.iter().find(|tape| tape.id == id) }
+/// Claude 的样式的胶带：`claude/draw.py` 画的，花纹周期都整除 800。名字前面加 claude-，色值取各自的主色。
+macro_rules! claude_tape {
+    ($id:literal, $name:literal, $tint:literal) => {
+        Tape { id: concat!("claude-", $id), name: $name, tint: $tint, art: include_bytes!(concat!("claude/washi/", $id, ".jpg")) }
+    };
+}
+pub(super) const CLAUDE: &[Tape] = &[
+    claude_tape!("riso", "Riso Press", 0xff4f7b),
+    claude_tape!("contour", "Contour", 0xff6a2b),
+    claude_tape!("cyanotype", "Cyanotype", 0x1b4a86),
+    claude_tape!("terrazzo", "Terrazzo", 0x1f3fd0),
+    claude_tape!("sunburst", "Sunburst", 0xff3d2e),
+    claude_tape!("tideline", "Tideline", 0xe8402a),
+    claude_tape!("phosphor", "Phosphor", 0x7cff6b),
+    claude_tape!("primary", "Primary", 0xe4201b),
+    claude_tape!("ticket", "Ticket Stub", 0xe4201b),
+    claude_tape!("moire", "Interference", 0xff2e93),
+];
+
+pub(super) fn get(id: &str) -> Option<&'static Tape> { GALLERY.iter().chain(CLAUDE).find(|tape| tape.id == id) }

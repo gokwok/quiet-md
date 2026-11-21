@@ -288,6 +288,10 @@ macro_rules! photo {
     ($id:literal, $zh:literal, $en:literal, $top:literal) => {
         PhotoBackdrop { id: $id, zh: $zh, en: $en, top: $top, image: include_bytes!(concat!("backdrops/", $id, ".jpg")) }
     };
+    // Claude 的样式的背景：`claude/draw.py` 画的，名字前面加 claude-。
+    (claude $id:literal, $zh:literal, $en:literal, $top:literal) => {
+        PhotoBackdrop { id: concat!("claude-", $id), zh: $zh, en: $en, top: $top, image: include_bytes!(concat!("claude/backdrops/", $id, ".jpg")) }
+    };
 }
 
 // Margin 原创照片。颜色是各图顶部七分之一的取样，用来选择文档顶栏的字色。
@@ -300,8 +304,24 @@ pub(super) const PHOTO_BACKGROUNDS: [PhotoBackdrop; 6] = [
     photo!("violet-ridge", "暮紫山脊", "Violet ridge", 0xc3bdcf),
 ];
 
+// `stylepanel::claude_presets` 用的十二张（不在背景图库里单独列出）。颜色同上，是顶部的取样，构成那张手调成浅色（顶上是米色底上的色块）。
+pub(super) const CLAUDE_BACKGROUNDS: [PhotoBackdrop; 12] = [
+    photo!(claude "riso", "孔版", "Riso Press", 0xd18b64),
+    photo!(claude "contour", "等高线", "Contour", 0x1e3c1c),
+    photo!(claude "cyanotype", "蓝晒", "Cyanotype", 0x5077a7),
+    photo!(claude "suminagashi", "墨流", "Suminagashi", 0x564845),
+    photo!(claude "terrazzo", "水磨石", "Terrazzo", 0xc9a5a7),
+    photo!(claude "sunburst", "日冕", "Sunburst", 0xef8787),
+    photo!(claude "tideline", "青海波", "Tideline", 0x2d2f57),
+    photo!(claude "phosphor", "荧屏", "Phosphor", 0x102510),
+    photo!(claude "primary", "构成", "Primary", 0xd8c8a8),
+    photo!(claude "ticket", "票根", "Ticket Stub", 0x036e45),
+    photo!(claude "nocturne", "夜曲", "Nocturne", 0x2a0f0d),
+    photo!(claude "moire", "莫尔", "Interference", 0x481943),
+];
+
 pub(super) fn photo_background(name: &str) -> Option<&'static PhotoBackdrop> {
-    PHOTO_BACKGROUNDS.iter().find(|p| p.id == name)
+    PHOTO_BACKGROUNDS.iter().chain(CLAUDE_BACKGROUNDS.iter()).find(|p| p.id == name)
 }
 
 /// 一张内置背景：底色，几团光（颜色，圆心 x、y，半径，浓度；位置和半径按画幅的比例），颗粒有多重。
