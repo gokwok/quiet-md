@@ -138,6 +138,7 @@ fn collections() -> Vec<(&'static str, &'static str, Vec<Authored>)> {
     vec![
         (tr("Astra 的样式", "Astra's styles"), tr("由 Astra 设计", "Designed by Astra"), super::astra::presets()),
         (tr("Claude 的样式", "Claude's styles"), tr("由 Claude 设计", "Designed by Claude"), claude_presets()),
+        (tr("Neon 的样式", "Neon's styles"), tr("由 Neon 设计", "Designed by Neon"), super::neon::presets()),
     ]
 }
 /// 按名字找内置或署了名的一套，连同底栏的署名。
@@ -391,6 +392,8 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                     washi_strips(super::astra::STYLES.iter().map(|s| &s.tape), pattern, 2),
                     Node::Caption(tr("Claude 的胶带", "Claude's tapes").into()),
                     washi_strips(washi::CLAUDE, pattern, 2),
+                    Node::Caption(tr("Neon 的胶带", "Neon's tapes").into()),
+                    washi_strips(super::neon::STYLES.iter().map(|s| &s.tape), pattern, 2),
                     Node::Caption(tr("经典胶带", "Classic tapes").into()),
                     classic_washi_strips(pattern),
                 ], max_height },

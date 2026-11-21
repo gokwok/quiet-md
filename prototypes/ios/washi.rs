@@ -258,4 +258,10 @@ pub(super) const CLAUDE: &[Tape] = &[
     claude_tape!("moire", "Interference", 0xff2e93),
 ];
 
-pub(super) fn get(id: &str) -> Option<&'static Tape> { GALLERY.iter().chain(super::astra::STYLES.iter().map(|s| &s.tape)).chain(CLAUDE).find(|tape| tape.id == id) }
+pub(super) fn get(id: &str) -> Option<&'static Tape> {
+    GALLERY.iter()
+        .chain(super::astra::STYLES.iter().map(|s| &s.tape))
+        .chain(super::neon::STYLES.iter().map(|s| &s.tape))
+        .chain(CLAUDE)
+        .find(|tape| tape.id == id)
+}

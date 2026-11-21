@@ -321,7 +321,11 @@ pub(super) const CLAUDE_BACKGROUNDS: [PhotoBackdrop; 12] = [
 ];
 
 pub(super) fn photo_background(name: &str) -> Option<&'static PhotoBackdrop> {
-    PHOTO_BACKGROUNDS.iter().chain(super::astra::STYLES.iter().map(|s| &s.background)).chain(CLAUDE_BACKGROUNDS.iter()).find(|p| p.id == name)
+    PHOTO_BACKGROUNDS.iter()
+        .chain(super::astra::STYLES.iter().map(|s| &s.background))
+        .chain(super::neon::STYLES.iter().map(|s| &s.background))
+        .chain(CLAUDE_BACKGROUNDS.iter())
+        .find(|p| p.id == name)
 }
 
 /// 一张内置背景：底色，几团光（颜色，圆心 x、y，半径，浓度；位置和半径按画幅的比例），颗粒有多重。

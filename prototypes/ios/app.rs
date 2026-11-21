@@ -32,6 +32,7 @@ pub mod customise;
 pub mod starpick;
 pub mod tilt;
 mod astra;
+mod neon;
 pub mod style;
 pub mod search;
 pub mod toast;
