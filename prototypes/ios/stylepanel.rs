@@ -45,9 +45,9 @@ fn tape_preview(pattern: &str, color: &str) -> Option<Fill> {
     super::style::tape_image(pattern, color).map(Fill::Tape)
 }
 
-fn washi_strips(tapes: &[washi::Tape], pattern: &str, cols: usize) -> Node {
+fn washi_strips<'a>(tapes: impl IntoIterator<Item = &'a washi::Tape>, pattern: &str, cols: usize) -> Node {
     let selected = pattern.strip_prefix("image:");
-    let items = tapes.iter().filter_map(|t| Some(Strip {
+    let items = tapes.into_iter().filter_map(|t| Some(Strip {
         fill: Fill::Tape(t.path()?),
         title: t.name.into(),
         picked: selected == Some(t.id),
@@ -129,11 +129,14 @@ fn presets() -> Vec<(&'static str, &'static str, DocStyle)> {
 }
 
 /// 署了名的一套样式：名字，显示的名字，样式，配的封面（名字和图；只在文档还没有封面时加上）。
-type Authored = (&'static str, &'static str, DocStyle, Option<(&'static str, &'static [u8])>);
-/// 署了名的样式集：图库里每位作者一组（照 Craft「CRAFT 的样式」），排在内置样式前面。以后别的作者照样再加一组：
+pub(super) type Authored = (&'static str, &'static str, DocStyle, Option<(&'static str, &'static [u8])>);
+/// 署了名的样式集：图库里每位作者一组（照 Craft「CRAFT 的样式」），排在内置样式后面：
 /// 组名，底栏的署名，样式。
 fn collections() -> Vec<(&'static str, &'static str, Vec<Authored>)> {
-    vec![(tr("Claude 的样式", "Claude's styles"), tr("由 Claude 设计", "Designed by Claude"), claude_presets())]
+    vec![
+        (tr("Astra 的样式", "Astra's styles"), tr("由 Astra 设计", "Designed by Astra"), super::astra::presets()),
+        (tr("Claude 的样式", "Claude's styles"), tr("由 Claude 设计", "Designed by Claude"), claude_presets()),
+    ]
 }
 /// 按名字找内置或署了名的一套，连同底栏的署名。
 fn find_preset(id: &str) -> Option<(&'static str, DocStyle, &'static str)> {
@@ -382,6 +385,8 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 Node::Header { title: tr("和纸胶带", "Washi tape").into(), warn: false, reset: None, close: "page:pattern".into() },
                 Node::Scroll { nodes: vec![
                     washi_strips(washi::GALLERY, pattern, 2),
+                    Node::Caption(tr("Astra 的胶带", "Astra's tapes").into()),
+                    washi_strips(super::astra::STYLES.iter().map(|s| &s.tape), pattern, 2),
                     Node::Caption(tr("Claude 的胶带", "Claude's tapes").into()),
                     washi_strips(washi::CLAUDE, pattern, 2),
                     Node::Caption(tr("经典胶带", "Classic tapes").into()),
@@ -396,14 +401,14 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
                 content.push(Node::Caption(tr("你的样式", "Your styles").into()));
                 content.push(Node::Cards { items: mine.iter().map(|(n, s)| super::panel::Card { menu: style_menu(&format!("s:{n}")), ..style_card(n.clone(), s) }).collect(), picked: mine.iter().position(|(n, _)| style.preset.as_deref().and_then(|p| p.strip_prefix("saved:")) == Some(n.as_str())), act: "gallery-mine:".into() });
             }
-            // 署了名的几组放在内置样式前面，卡片上带着配的封面。
+            let all = presets();
+            content.push(Node::Caption(tr("内置样式", "Built-in styles").into()));
+            content.push(Node::Cards { items: all.iter().map(|(id, n, s)| super::panel::Card { menu: style_menu(&format!("p:{id}")), ..style_card((*n).into(), s) }).collect(), picked: all.iter().position(|(id, _, s)| if s.is_plain() { style.is_plain() } else { style.preset.as_deref() == Some(*id) }), act: "gallery:".into() });
+            // 署了名的几组放在内置样式后面，卡片上带着配的封面。
             for (k, (title, _, set)) in collections().into_iter().enumerate() {
                 content.push(Node::Caption(title.into()));
                 content.push(Node::Cards { items: set.iter().map(|(id, n, s, cover)| super::panel::Card { menu: style_menu(&format!("p:{id}")), cover: cover.and_then(|(name, bytes)| authored_cover(name, bytes)), ..style_card((*n).into(), s) }).collect(), picked: set.iter().position(|(id, ..)| style.preset.as_deref() == Some(*id)), act: format!("gallery-by{k}:") });
             }
-            let all = presets();
-            content.push(Node::Caption(tr("内置样式", "Built-in styles").into()));
-            content.push(Node::Cards { items: all.iter().map(|(id, n, s)| super::panel::Card { menu: style_menu(&format!("p:{id}")), ..style_card((*n).into(), s) }).collect(), picked: all.iter().position(|(id, _, s)| if s.is_plain() { style.is_plain() } else { style.preset.as_deref() == Some(*id) }), act: "gallery:".into() });
             // 现在用的是哪一套：内置的、自己存的就给「…」菜单，改过还没存的给「保存」。
             let key = if style.is_plain() { Some("p:original".to_string()) } else { style.preset.as_deref().map(|p| p.strip_prefix("saved:").map_or_else(|| format!("p:{p}"), |n| format!("s:{n}"))) };
             let menu = key.as_deref().map(style_menu).unwrap_or_default();

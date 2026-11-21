@@ -30,6 +30,7 @@ pub mod crop;
 pub mod customise;
 pub mod starpick;
 pub mod tilt;
+mod astra;
 pub mod style;
 pub mod search;
 pub mod toast;

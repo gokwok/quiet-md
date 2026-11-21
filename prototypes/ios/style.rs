@@ -283,7 +283,7 @@ pub fn backdrop_of(style: &DocStyle) -> Option<AnyElement> {
 /// 内置的背景：程序画的几张柔光色块（自己配的，不是照搬的图片），第一次用到时画出来放在缓存目录里。
 pub const BUILTIN: [&str; 9] = ["dusk", "peach", "ocean", "lagoon", "mist", "lilac", "linen", "moss", "ink"];
 
-pub(super) struct PhotoBackdrop { pub id: &'static str, pub zh: &'static str, pub en: &'static str, top: u32, image: &'static [u8] }
+pub(super) struct PhotoBackdrop { pub id: &'static str, pub zh: &'static str, pub en: &'static str, pub(super) top: u32, pub(super) image: &'static [u8] }
 macro_rules! photo {
     ($id:literal, $zh:literal, $en:literal, $top:literal) => {
         PhotoBackdrop { id: $id, zh: $zh, en: $en, top: $top, image: include_bytes!(concat!("backdrops/", $id, ".jpg")) }
@@ -321,7 +321,7 @@ pub(super) const CLAUDE_BACKGROUNDS: [PhotoBackdrop; 12] = [
 ];
 
 pub(super) fn photo_background(name: &str) -> Option<&'static PhotoBackdrop> {
-    PHOTO_BACKGROUNDS.iter().chain(CLAUDE_BACKGROUNDS.iter()).find(|p| p.id == name)
+    PHOTO_BACKGROUNDS.iter().chain(super::astra::STYLES.iter().map(|s| &s.background)).chain(CLAUDE_BACKGROUNDS.iter()).find(|p| p.id == name)
 }
 
 /// 一张内置背景：底色，几团光（颜色，圆心 x、y，半径，浓度；位置和半径按画幅的比例），颗粒有多重。

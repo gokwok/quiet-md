@@ -21,7 +21,7 @@ pub(super) struct Tape {
     pub id: &'static str,
     pub name: &'static str,
     pub tint: u32,
-    art: &'static [u8],
+    pub(super) art: &'static [u8],
 }
 
 impl Tape {
@@ -258,4 +258,4 @@ pub(super) const CLAUDE: &[Tape] = &[
     claude_tape!("moire", "Interference", 0xff2e93),
 ];
 
-pub(super) fn get(id: &str) -> Option<&'static Tape> { GALLERY.iter().chain(CLAUDE).find(|tape| tape.id == id) }
+pub(super) fn get(id: &str) -> Option<&'static Tape> { GALLERY.iter().chain(super::astra::STYLES.iter().map(|s| &s.tape)).chain(CLAUDE).find(|tape| tape.id == id) }
