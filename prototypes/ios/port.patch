@@ -1128,7 +1128,8 @@
 -        let top = CAT_TOP + self.core.doc.cover.as_ref().map_or(0., |_| {
 +        let below_cover = self.core.doc.cover.as_ref().map_or(0., |_| {
              let at = self.list.logical_scroll_top();
-             if at.item_ix == 0 { (super::cover::cover_height(window) - f32::from(at.offset_in_item)).max(0.) } else { 0. }
+-            if at.item_ix == 0 { (super::cover::cover_height(window) - f32::from(at.offset_in_item)).max(0.) } else { 0. }
++            if at.item_ix == 0 { (self.cover_h(window) - f32::from(at.offset_in_item)).max(0.) } else { 0. }
          });
 +        // 悬浮的顶栏压在封面上：两者取高的那个，不叠加。
 +        let top = if compact { 4. + below_cover.max(crate::ios::doc_top()) } else { CAT_TOP + below_cover };
@@ -1199,7 +1200,24 @@
  
  const PANEL_W: f32 = 540.;
  
-@@ -89,10 +89,13 @@
+@@ -26,6 +26,8 @@
+     /// Window bounds of the 文档图标 and of 编辑封面 (last frame).
+     pub icon_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+     edit_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
++    /// 手机上封面这一帧在窗口里的位置：点它弹出的系统菜单对着它（`ios::coveredit`）。
++    frame: Rc<Cell<Option<Bounds<Pixels>>>>,
+     /// Image and box sizes of the drawn cover (last frame).
+     geo: Cell<Option<(f32, f32, f32, f32)>>,
+     pub drag: Option<CoverDrag>,
+@@ -38,6 +40,7 @@
+         CoverUi {
+             icon_bounds: Rc::default(),
+             edit_bounds: Rc::default(),
++            frame: Rc::default(),
+             geo: Cell::new(None),
+             drag: None,
+             gallery_scroll: ScrollHandle::new(),
+@@ -89,10 +92,13 @@
  
  /// 27vh, at most 400.
  pub fn cover_height(window: &Window) -> f32 {
@@ -1215,7 +1233,14 @@
      let path = format!("covers/{name}.jpg");
      crate::assets::FILES.iter().find(|(p, _)| *p == path).map(|(_, b)| *b)
  }
-@@ -201,7 +204,7 @@
+@@ -195,13 +201,14 @@
+             return;
+         }
+         self.core.checkpoint(super::core::EditKind::Other);
++        if let Some(c) = &cover { crate::ios::coveredit::remember(&c.src); }
+         self.core.doc.cover = cover;
+         self.core.dirty = false;
+         cx.emit(EditorEvent::Changed);
          cx.notify();
      }
  
@@ -1224,7 +1249,7 @@
          let Some(bytes) = preset_bytes(name) else { return };
          match super::image::store_image(bytes, "jpg") {
              Ok(p) => self.set_cover(Some(Cover { src: p.to_string_lossy().replace('\\', "/"), x: 0., y: 0. }), cx),
-@@ -210,17 +213,28 @@
+@@ -210,17 +217,42 @@
      }
  
      /// 随机: a random series, then a random cover in it.
@@ -1244,6 +1269,20 @@
 +        }
 +    }
 +    pub(crate) fn has_cover(&self) -> bool { self.core.doc.cover.is_some() }
++    /// 封面图片在文档库里的路径（`Cover::src`）。
++    pub(crate) fn cover_src(&self) -> Option<String> { self.core.doc.cover.as_ref().map(|c| c.src.clone()) }
++    /// 换成文档库里已有的一张（最近用过的封面、裁好的图）。
++    pub(crate) fn use_cover(&mut self, src: String, cx: &mut Context<Self>) { self.set_cover(Some(Cover { src, x: 0., y: 0. }), cx); }
++    /// 封面框这一帧的宽高（点）。
++    pub(crate) fn cover_box(&self) -> Option<(f32, f32)> { self.cover_ui.geo.get().map(|(_, _, w, h)| (w, h)) }
++    /// 封面的高：手机上裁成别的比例的（`ios::coveredit::aspect`）按那个比例，其余照 `cover_height`。
++    pub(crate) fn cover_h(&self, window: &Window) -> f32 {
++        if crate::ios::compact(window) && let Some(a) = self.core.doc.cover.as_ref().and_then(|c| crate::ios::coveredit::aspect(&c.src)) {
++            let cw = self.layout.ml + self.layout.content + self.layout.mr - if crate::ios::style::banded() { crate::ios::style::COVER_INSET * 2. } else { 0. };
++            if cw > 1. { return (cw / a).round().clamp(80., f32::from(window.viewport_size().height) * 0.7); }
++        }
++        cover_height(window)
++    }
 +
 +    pub(crate) fn add_cover(&mut self, cx: &mut Context<Self>) {
          self.open_cover_menu(Some(Menu::CoverPick { upload: false }), cx);
@@ -1256,17 +1295,19 @@
          cx.spawn_in(window, async move |this, cx| {
              if let Ok(Ok(Some(paths))) = rx.await
                  && let Some(p) = paths.into_iter().next()
-@@ -360,7 +374,8 @@
+@@ -359,8 +391,9 @@
+     /// The cover: the page-wide image above the header.
      pub(super) fn cover_el(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
          let c = self.core.doc.cover.as_ref()?;
-         let ch = cover_height(window);
+-        let ch = cover_height(window);
 -        let cw = self.layout.ml + self.layout.content + self.layout.mr;
++        let ch = self.cover_h(window);
 +        let inset = crate::ios::style::banded();
 +        let cw = self.layout.ml + self.layout.content + self.layout.mr - if inset { crate::ios::style::COVER_INSET * 2. } else { 0. };
          let drag = self.cover_ui.drag;
          let (rx, ry) = drag.map_or((c.x, c.y), |d| (d.x, d.y));
          let path = crate::store::image_path(&c.src);
-@@ -415,6 +430,8 @@
+@@ -415,13 +448,23 @@
                  // fill shows until the image loads.
                  .bg(Theme::bg_overlay())
                  .children(image)
@@ -1274,8 +1315,24 @@
 +                .when(inset, |d| d.child(div().absolute().inset(px(-6.)).border(px(6.)).border_color(Theme::bg_body()).rounded(px(16.))))
                  .children(tip)
                  .when(self.read_only, |d| d.child(div().absolute().inset_0()))
++                // 手机上点封面：弹出系统菜单（查看、裁剪、换图、移除），见 `ios::coveredit`。
++                .when(self.compact() && !self.read_only && drag.is_none(), |d| {
++                    let frame = self.cover_ui.frame.clone();
++                    d.child(canvas(move |b, _, _| frame.set(Some(b)), |_, _, _, _| {}).absolute().inset_0())
++                        .on_click(cx.listener(|e, _, window, _| if let Some(b) = e.cover_ui.frame.get() { crate::ios::coveredit::tap(b, window); }))
++                })
                  .when(drag.is_some(), |d| d.cursor(if self.cover_grabbed() { CursorStyle::ClosedHand } else { CursorStyle::OpenHand }))
-@@ -439,7 +456,7 @@
+                 .on_mouse_down(
+                     MouseButton::Left,
+-                    cx.listener(|e, ev: &MouseDownEvent, _, cx| {
++                    cx.listener(|e, ev: &MouseDownEvent, window, cx| {
+                         cx.stop_propagation();
++                        // 手机上点封面是弹菜单，不进编辑（拦下外层 track_focus 的自动聚焦，键盘不出来）。
++                        if e.compact() && e.cover_ui.drag.is_none() { window.prevent_default(); }
+                         e.menu = None;
+                         if let (Some(d), Some((iw, ih, cw, ch))) = (&mut e.cover_ui.drag, e.cover_ui.geo.get()) {
+                             let g = geometry(iw, ih, cw, ch, d.x, d.y);
+@@ -439,7 +482,7 @@
  
      fn cover_popover_at(&self, el: impl IntoElement) -> Option<AnyElement> {
          let a = self.cover_ui.edit_bounds.get()?;
@@ -1284,7 +1341,7 @@
          Some(at(self.rel(point(x, a.bottom() + px(4.))), corner, el))
      }
  
-@@ -471,8 +488,11 @@
+@@ -471,8 +514,11 @@
  
      /// 选择图片: 官方图库 / 本地上传, with 随机 and 移除 on the right.
      pub(super) fn cover_panel(&self, upload: bool, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1298,7 +1355,7 @@
          // Tabs: the chosen one semibold in the accent over a 2pt accent bar.
          let tab = |id: &'static str, label: &'static str, on: bool, to_upload: bool| {
              div()
-@@ -586,8 +606,8 @@
+@@ -586,8 +632,8 @@
                          div()
                              .id(("cover-thumb", si * 100 + i))
                              .relative()
@@ -1309,7 +1366,7 @@
                              .mx(px(6.))
                              .mb(px(10.))
                              .cursor_pointer()
-@@ -616,6 +636,8 @@
+@@ -616,6 +662,8 @@
                  .flex_1()
                  .min_h_0()
                  .mt(px(10.))
@@ -1318,7 +1375,7 @@
                  .overflow_y_scroll()
                  .track_scroll(&self.cover_ui.gallery_scroll)
                  .child(list)
-@@ -625,15 +647,16 @@
+@@ -625,15 +673,16 @@
          let el = panel()
              .id("cover-panel")
              .occlude()
@@ -3507,6 +3564,15 @@
          let overlays = self.render_overlays(window, cx);
          let lightbox = self.lightbox_el(window, cx);
          let toast = self.toast_el(window);
+@@ -1406,7 +1452,7 @@
+             window.request_animation_frame();
+         }
+         let focused = self.focus.is_focused(window);
+-        self.sync_items(focused, super::cover::cover_height(window));
++        self.sync_items(focused, self.cover_h(window));
+         let generation = self.core.generation;
+         let (units, eqnos) = match self.frame.generation == Some(generation) {
+             true => (self.frame.units.clone(), self.frame.eqnos.clone()),
 @@ -1466,7 +1512,7 @@
                      }
                  }

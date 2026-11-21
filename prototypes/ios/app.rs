@@ -27,6 +27,7 @@ pub mod panel;
 pub mod shot;
 pub mod spaces;
 pub mod crop;
+pub mod coveredit;
 pub mod customise;
 pub mod starpick;
 pub mod tilt;
@@ -791,6 +792,7 @@ pub fn blocks_removed(n: usize, cut: bool) {
 
 /// 系统菜单里的一项被点了（`menu.rs` 把它送回工作区）。
 pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    if coveredit::menu_action(id, w, window, cx) { return; }
     match id {
         "doc-catalogue" if w.view == View::Doc => {
             if let Some(editor) = &w.editor { editor.update(cx, |e, cx| e.toggle_catalogue(cx)); }

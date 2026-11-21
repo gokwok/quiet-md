@@ -10,6 +10,7 @@
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>NSFaceIDUsageDescription</key><string>用面容 ID 解锁 Margin。面容数据只由系统处理，Margin 不会读取或保存。</string>
+    <key>NSCameraUsageDescription</key><string>拍一张照片作为文档的封面。照片只存在你的文档库里。</string>
     <key>CFBundleIcons</key>
     <dict>
         <key>CFBundlePrimaryIcon</key><dict><key>CFBundleIconFiles</key><array><string>AppIcon60x60</string></array></dict>

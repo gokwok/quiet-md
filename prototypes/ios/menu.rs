@@ -131,6 +131,9 @@ fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, 
     });
 }
 
+/// 拼好的系统菜单，挂到别处的原生按钮上（点封面弹出的那个，`coveredit.rs`）。
+pub(super) fn native(title: &str, items: &[Item]) -> *mut AnyObject { unsafe { menu(title, std::ptr::null_mut(), items, false) } }
+
 /// 拼成系统的菜单。同一组的项收进一个「就地展开」的子菜单，系统在组和组之间画分隔线。
 /// `wait`：长按出的上下文菜单，点了的项等菜单收起的动画做完再执行（`ContextDelegate`）。
 unsafe fn menu(title: &str, image: *mut AnyObject, items: &[Item], wait: bool) -> *mut AnyObject {

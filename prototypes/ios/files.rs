@@ -300,6 +300,17 @@ pub fn open_image() -> Reply<Option<Vec<PathBuf>>> {
     reply
 }
 
+/// 直接从照片图库选一张（封面的「相册」），不先问从哪里选。
+pub fn open_photos() -> Reply<Option<Vec<PathBuf>>> { open_with(|| unsafe { present_photos() }) }
+/// 直接从「文件」里选一张图片（封面菜单的「浏览文件」）。
+pub fn open_image_file() -> Reply<Option<Vec<PathBuf>>> { open_with(|| unsafe { present_documents("public.image", false, true) }) }
+fn open_with(show: impl FnOnce() -> bool) -> Reply<Option<Vec<PathBuf>>> {
+    if busy() || !show() { return Reply::ready(None); }
+    let reply = Reply::pending();
+    PENDING.with(|p| *p.borrow_mut() = Some(Pending::Open { reply: reply.handle(), folders: false }));
+    reply
+}
+
 fn export_root() -> PathBuf { std::env::temp_dir().join("quiet-md-export") }
 
 /// 存文件的第一步：沙盒临时目录里的一个路径，文件名照 `name`。调用方写完后调 `export`。

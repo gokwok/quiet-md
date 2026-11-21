@@ -39,6 +39,8 @@ pub fn open() {
     BACKGROUNDS.with(|drafts| *drafts.borrow_mut() = [None, None, None]);
     SUGGESTIONS.with(|photos| photos.borrow_mut().clear());
 }
+/// 直接打开封面页（点封面弹出的菜单里「选择一张图片」）。
+pub fn open_cover() { open(); PAGE.with(|p| p.set(Some(Page::Cover))); }
 pub fn close() { PAGE.with(|p| p.set(None)); }
 
 fn tape_preview(pattern: &str, color: &str) -> Option<Fill> {
@@ -431,7 +433,14 @@ fn nodes(page: Page, style: &DocStyle, w: &Workspace, cx: &App) -> Vec<Node> {
         Page::PhotoLibrary => background_gallery::nodes(),
         Page::Cover => {
             let has = w.editor.as_ref().is_some_and(|e| e.read(cx).has_cover());
-            let items = COVERS.iter().filter_map(|name| Some(PhotoTile { path: cover_thumb(name)?, title: (*name).into(), credit: None, picked: false, act: format!("cover-preset:{name}") })).collect();
+            // 最近用过的封面在前（录屏里那六格），不够六格拿自带的补上；现在这张画蓝圈。
+            let now = w.editor.as_ref().and_then(|e| e.read(cx).cover_src()).map(|s| super::coveredit::shown_original(&s));
+            let recent = super::coveredit::recent();
+            let mut items: Vec<PhotoTile> = recent.iter().enumerate().map(|(i, (src, path))| PhotoTile { path: path.to_string_lossy().into_owned(), title: String::new().into(), credit: None, picked: now.as_deref() == Some(src.as_str()), act: format!("cover-recent:{i}") }).collect();
+            // 自带的那几张存进文档库时是同样的字节：已经在「最近」里的（按大小认）不再排一次。
+            let sizes: Vec<u64> = recent.iter().filter_map(|(_, p)| std::fs::metadata(p).ok().map(|m| m.len())).collect();
+            let more = COVERS.iter().filter(|n| !crate::editor::cover::preset_bytes(n).is_some_and(|b| sizes.contains(&(b.len() as u64))));
+            items.extend(more.take(6usize.saturating_sub(items.len())).filter_map(|name| Some(PhotoTile { path: cover_thumb(name)?, title: (*name).into(), credit: None, picked: false, act: format!("cover-preset:{name}") })));
             vec![
                 Node::Header { title: tr("选择一张图片", "Choose an image").into(), warn: false, reset: has.then(|| "cover-reset".to_string()), close: back },
                 Node::Actions(vec![("arrow.clockwise", tr("随机", "Random").into(), "cover-random".into()),
@@ -673,12 +682,16 @@ pub fn action(act: &str, w: &mut Workspace, window: &mut Window, cx: &mut Contex
         // 封面页（照 Craft 录屏 00:17）：随机、Unsplash、相册，下面六张自带的封面。
         "cover-random" => { super::glass::haptic(); if let Some(editor) = w.editor.clone() { editor.update(cx, |e, cx| e.random_cover(cx)); } cx.notify(); }
         "cover-preset" => if COVERS.contains(&arg) && let Some(editor) = w.editor.clone() { super::glass::selection_haptic(); editor.update(cx, |e, cx| e.apply_preset(arg, cx)); cx.notify(); },
+        "cover-recent" => if let Some((src, _)) = super::coveredit::recent().into_iter().nth(ix) && let Some(editor) = w.editor.clone() {
+            super::glass::selection_haptic(); editor.update(cx, |e, cx| e.use_cover(src, cx)); cx.notify();
+        },
         "cover-reset" => { super::glass::delete_haptic(); if let Some(editor) = w.editor.clone() { editor.update(cx, |e, cx| { e.set_cover_image(None, cx); }); } cx.notify(); }
         "cover-unsplash" if unsplash::available() => unsplash::open(unsplash::Target::Cover),
         "cover-unsplash" => w.show_toast_kind(crate::ui::ToastKind::Error, tr("这个版本没有配置 Unsplash", "Unsplash isn’t set up in this build"), cx),
         "cover-photos" => {
             let document = w.current.clone();
-            let rx = super::prompt_for_images(cx, PathPromptOptions { files: true, directories: false, multiple: false, prompt: None });
+            // 照录屏：「相册」直接是系统的照片选择器（「浏览文件」在点封面弹出的菜单里）。
+            let rx = super::files::open_photos();
             cx.spawn_in(window, async move |this, cx| {
                 let Ok(Ok(Some(paths))) = rx.await else { return; };
                 let Some(from) = paths.into_iter().next() else { return; };
