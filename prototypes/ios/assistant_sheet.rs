@@ -78,3 +78,85 @@ pub fn edit(title: &str, value: &str, mono: bool, done: impl Fn(String) + 'stati
         true
     }
 }
+
+/// 只读地看一段分好段的字（生成图的提示词）：同样的页面卡片，左边关掉，右边「拷贝」拷 `copy`。
+/// 每段一个灰色小标题，下面是内容（第一段是人写的话，用正文字；后面是标签，用等宽字；都可以选中拷贝一截）；小标题空的那段整段灰着（模型、尺寸这类附注）。
+pub fn show(title: &str, sections: &[(String, String)], copy: &str) -> bool {
+    unsafe {
+        let host = super::super::files::root_controller();
+        if host.is_null() { return false; }
+        let presented: *mut AnyObject = msg_send![host, presentedViewController];
+        if !presented.is_null() { return false; }
+
+        let body: *mut AnyObject = msg_send![class!(UIFont), monospacedSystemFontOfSize: 15f64, weight: 0f64];
+        let plain: *mut AnyObject = msg_send![class!(UIFont), systemFontOfSize: 17f64];
+        let head: *mut AnyObject = msg_send![class!(UIFont), systemFontOfSize: 13f64, weight: 0.3f64];
+        let note: *mut AnyObject = msg_send![class!(UIFont), systemFontOfSize: 13f64];
+        let ink: *mut AnyObject = msg_send![class!(UIColor), labelColor];
+        let grey: *mut AnyObject = msg_send![class!(UIColor), secondaryLabelColor];
+        let all: *mut AnyObject = msg_send![class!(NSMutableAttributedString), new];
+        let append = |s: &str, font: *mut AnyObject, color: *mut AnyObject| {
+            let attrs: *mut AnyObject = msg_send![class!(NSMutableDictionary), dictionary];
+            let _: () = msg_send![attrs, setObject: font, forKey: ns_string("NSFont")];
+            let _: () = msg_send![attrs, setObject: color, forKey: ns_string("NSColor")];
+            let piece: *mut AnyObject = msg_send![class!(NSAttributedString), alloc];
+            let piece: *mut AnyObject = msg_send![piece, initWithString: ns_string(s), attributes: attrs];
+            let _: () = msg_send![all, appendAttributedString: piece];
+            let _: () = msg_send![piece, release];
+        };
+        for (i, (h, t)) in sections.iter().enumerate() {
+            if i > 0 { append("\n\n", note, grey); }
+            if h.is_empty() { append(t.trim(), note, grey); continue; }
+            append(&format!("{h}\n"), head, grey);
+            append(t.trim(), if i == 0 { plain } else { body }, ink);
+        }
+
+        let text: *mut AnyObject = msg_send![class!(UITextView), new];
+        let _: () = msg_send![text, setEditable: false];
+        let _: () = msg_send![text, setAttributedText: all];
+        let _: () = msg_send![all, release];
+        let _: () = msg_send![text, setTextContainerInset: Insets { top: 16., left: 14., bottom: 32., right: 14. }];
+        let _: () = msg_send![text, setAlwaysBounceVertical: true];
+        let background: *mut AnyObject = msg_send![class!(UIColor), systemBackgroundColor];
+        let _: () = msg_send![text, setBackgroundColor: background];
+
+        let page: *mut AnyObject = msg_send![class!(UIViewController), new];
+        let _: () = msg_send![page, setView: text];
+        let _: () = msg_send![page, setTitle: ns_string(title)];
+        let nav: *mut AnyObject = msg_send![class!(UINavigationController), alloc];
+        let nav: *mut AnyObject = msg_send![nav, initWithRootViewController: page];
+        let _: () = msg_send![nav, setOverrideUserInterfaceStyle: if crate::theme::dark() { 2isize } else { 1isize }];
+
+        let close = block2::RcBlock::new(move |_: *mut AnyObject| {
+            let none: Option<&block2::Block<dyn Fn()>> = None;
+            let _: () = msg_send![nav, dismissViewControllerAnimated: true, completion: none];
+        });
+        let copy = copy.to_owned();
+        let copied = block2::RcBlock::new(move |_: *mut AnyObject| {
+            let board: *mut AnyObject = msg_send![class!(UIPasteboard), generalPasteboard];
+            let _: () = msg_send![board, setString: ns_string(&copy)];
+            super::super::glass::selection_haptic();
+        });
+        let none = std::ptr::null_mut::<AnyObject>();
+        let action = |title: &str, handler: &block2::Block<dyn Fn(*mut AnyObject)>| -> *mut AnyObject {
+            msg_send![class!(UIAction), actionWithTitle: ns_string(title), image: none, identifier: none, handler: handler]
+        };
+        let item: *mut AnyObject = msg_send![page, navigationItem];
+        // UIBarButtonSystemItemClose = 24。
+        let left: *mut AnyObject = msg_send![class!(UIBarButtonItem), alloc];
+        let left: *mut AnyObject = msg_send![left, initWithBarButtonSystemItem: 24isize, primaryAction: action("", &close)];
+        let right: *mut AnyObject = msg_send![class!(UIBarButtonItem), alloc];
+        let right: *mut AnyObject = msg_send![right, initWithPrimaryAction: action(crate::settings::tr("拷贝", "Copy"), &copied)];
+        let _: () = msg_send![item, setLeftBarButtonItem: left];
+        let _: () = msg_send![item, setRightBarButtonItem: right];
+        let _: () = msg_send![left, release];
+        let _: () = msg_send![right, release];
+
+        let none: Option<&block2::Block<dyn Fn()>> = None;
+        let _: () = msg_send![host, presentViewController: nav, animated: true, completion: none];
+        let _: () = msg_send![text, release];
+        let _: () = msg_send![page, release];
+        let _: () = msg_send![nav, release];
+        true
+    }
+}

@@ -772,6 +772,7 @@ Quiet.md 本体以 MIT 协议发布（见 [LICENSE](LICENSE)）。下面是随�
 | `assets/icons/folder.svg`、`assets/icons/disclosure.svg`、`assets/icons/import.svg`、`assets/icons/star-fill.svg`、`assets/icons/chart.svg`、`assets/icons/pulse.svg`、`assets/icons/lock.svg`、`assets/icons/chevron-up-down.svg`，以及文件夹图标 `assets/icons/heart.svg`、`assets/icons/briefcase.svg`、`assets/icons/music.svg`、`assets/icons/plane.svg`、`assets/icons/cart.svg`、`assets/icons/wallet.svg`、`assets/icons/mail.svg`、`assets/icons/chat.svg`、`assets/icons/flag.svg`、`assets/icons/coffee.svg`、`assets/icons/leaf.svg`、`assets/icons/gift.svg`、`assets/icons/moon.svg`、`assets/icons/cloud.svg`、`assets/icons/book-open.svg`、`assets/icons/flask.svg`，键盘上方工具条的 `assets/icons/slash-command.svg`、`assets/icons/more-vertical.svg`、`assets/icons/paste.svg`、`assets/icons/keyboard-down.svg`，分隔线样式板的 `assets/icons/rule-dots.svg`、`assets/icons/rule-dotted.svg`、`assets/icons/rule-page.svg`、`assets/icons/rule-line.svg`、`assets/icons/rule-thick.svg`，文档分隔符换成和纸胶带、涂鸦时那一套的 `assets/icons/washi-1.svg`～`washi-4.svg`、`assets/icons/doodle-1.svg`～`doodle-4.svg` | 本项目绘制，MIT；不属于上述 67 个 Nucleo 图标 |
 | `assets/branding/app-icon.png` | 本项目自有 |
 | `prototypes/ios/icons/`（iOS 应用图标「页边」三种底色） | 本项目绘制 |
+| `prototypes/ios/glyphs/`（iOS「/」菜单里「配图」的图标） | 本项目绘制，MIT |
 
 ## 封面与插画
 

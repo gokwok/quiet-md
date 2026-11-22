@@ -42,10 +42,10 @@ struct Work {
 
 /// 哪类活：决定灵动岛、锁屏上的标题。
 #[derive(Clone, Copy, PartialEq)]
-pub enum Kind { Voice, Assistant }
+pub enum Kind { Voice, Assistant, Image }
 
 impl Kind {
-    fn title(self) -> &'static str { match self { Kind::Voice => tr("配音", "Voice Over"), Kind::Assistant => tr("助手", "Assistant") } }
+    fn title(self) -> &'static str { match self { Kind::Voice => tr("配音", "Voice Over"), Kind::Assistant => tr("助手", "Assistant"), Kind::Image => tr("配图", "Illustration") } }
 }
 
 #[derive(Clone, Copy, PartialEq)]

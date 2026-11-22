@@ -77,7 +77,7 @@ fn haptic() { super::super::glass::haptic(); }
 fn preset_name(id: &str, p: &Preset) -> String { if id.is_empty() { tr("默认", "Default").into() } else { library::display_name(p, id) } }
 
 /// 页名是 `&'static str`：名字记一份，同一个名字不重复记。太长的截短。
-fn intern(s: &str) -> &'static str {
+pub(super) fn intern(s: &str) -> &'static str {
     let s = s.trim();
     let s = if s.chars().count() > 16 { format!("{}…", s.chars().take(15).collect::<String>()) } else { s.to_owned() };
     TITLES.with(|t| {
@@ -169,7 +169,7 @@ pub fn page(page: Page, scroll: &ScrollHandle, cx: &mut Context<Workspace>) -> A
 // ---- 共用的行
 
 /// 卡片里的一行：左边名称，右边灰字，能点的有箭头。
-fn line(id: impl Into<ElementId>, title: impl Into<SharedString>, value: impl Into<SharedString>, tappable: bool) -> Stateful<Div> {
+pub(super) fn line(id: impl Into<ElementId>, title: impl Into<SharedString>, value: impl Into<SharedString>, tappable: bool) -> Stateful<Div> {
     div().id(id).w_full().h(px(54.)).px(px(18.)).flex().items_center().gap(px(12.))
         .when(tappable, |d| d.active(|d| d.bg(Theme::fill_pressed())))
         .child(div().flex_none().text_size(px(17.)).text_color(row_ink()).child(title.into()))
@@ -205,7 +205,7 @@ fn pick_row(id: impl Into<ElementId>, name: impl Into<SharedString>, sub: Option
 }
 
 /// 「＋ 添加…」一行。
-fn add_row(id: &'static str, label: &'static str, on: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> AnyElement {
+pub(super) fn add_row(id: &'static str, label: &'static str, on: impl Fn(&mut Workspace, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> AnyElement {
     div().id(id).w_full().h(px(52.)).px(px(18.)).flex().items_center().gap(px(8.)).active(|d| d.bg(Theme::fill_pressed()))
         .child(ui::icon("plus", 16., Theme::primary()))
         .child(div().text_size(px(17.)).text_color(Theme::primary()).child(label))
@@ -213,14 +213,14 @@ fn add_row(id: &'static str, label: &'static str, on: impl Fn(&mut Workspace, &m
 }
 
 /// 红色的删除：点一下弹出只有一项的系统菜单，再点才删，免得误触。
-fn delete_row(key: &'static str, id: &'static str, label: &'static str) -> AnyElement {
+pub(super) fn delete_row(key: &'static str, id: &'static str, label: &'static str) -> AnyElement {
     div().relative().w_full().h(px(52.)).px(px(18.)).flex().items_center().text_size(px(17.)).text_color(Theme::danger())
         .child(label).child(menu::button(key, vec![menu::Item::new(id, label, "trash", 0).danger()])).into_any_element()
 }
-fn delete_card(key: &'static str, id: &'static str, label: &'static str) -> Div { general::card(vec![delete_row(key, id, label)]) }
+pub(super) fn delete_card(key: &'static str, id: &'static str, label: &'static str) -> Div { general::card(vec![delete_row(key, id, label)]) }
 
 /// 已经在用：和「使用这个…」同一个位置，灰字加一个勾，点了没反应。版面不跳。
-fn in_use() -> AnyElement {
+pub(super) fn in_use() -> AnyElement {
     div().w_full().h(px(52.)).px(px(18.)).flex().items_center().gap(px(12.))
         .child(div().flex_1().text_size(px(17.)).text_color(Theme::text_caption()).child(tr("正在使用", "In Use")))
         .child(ui::icon("check", 17., Theme::primary())).into_any_element()

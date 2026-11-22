@@ -33,7 +33,7 @@ unsafe impl RefEncode for CGPath { const ENCODING_REF: Encoding = Encoding::Poin
 unsafe impl RefEncode for CGColor { const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGColor", &[])); }
 
 #[derive(Clone, PartialEq)]
-struct Look { frame: Bounds<Pixels>, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, radius: Option<f32>, bare: bool, stacked: bool, actions: Vec<Tap>, dark: bool, shape: Option<Shape> }
+struct Look { frame: Bounds<Pixels>, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, radius: Option<f32>, bare: bool, stacked: bool, actions: Vec<Tap>, dark: bool, shape: Option<Shape>, clip: Option<Bounds<Pixels>> }
 struct Pane { key: &'static str, view: *mut AnyObject, image: *mut AnyObject, text: *mut AnyObject, tabs: Vec<*mut AnyObject>, hits: Vec<*mut AnyObject>, pill: *mut AnyObject, shape: *mut AnyObject, look: Option<Look>, seen: bool, shown: bool }
 
 thread_local! { static PANES: RefCell<Vec<Pane>> = const { RefCell::new(Vec::new()) }; }
@@ -84,49 +84,50 @@ impl Pane {
 /// 放在 GPUI 元素里的占位：把这个元素的位置交给同名的玻璃。胶囊形，圆角跟着短边走。
 /// 只有图标时图标居中；带文字时图标靠左、文字跟在后面（搜索条）。
 pub fn pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 同 `pane`，但放在会滚动的页面内容里：滚进顶上的返回钮那一条、或出了屏幕底就藏起，免得压在顶栏的玻璃上。
 pub fn page_pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
     canvas(move |bounds, window, _| {
         if bounds.origin.y < px(super::chrome_top()) || bounds.bottom() > window.viewport_size().height { return; }
-        place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None }, window)
+        place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window)
     }, |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 圆角矩形的一块玻璃：自己拼的弹出菜单的底。首页的菜单已改用系统菜单（`menu.rs`），这两个留给系统菜单放不下的内容。
 #[allow(dead_code)]
 pub fn panel(key: &'static str, radius: f32) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: vec![], picked: None, radius: Some(radius), bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: vec![], picked: None, radius: Some(radius), bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 /// 玻璃菜单里的一行：自己没有玻璃，只有图标和字，叠在 `panel` 上面。
 #[allow(dead_code)]
 pub fn row(key: &'static str, icon: Icon, label: (SharedString, Hsla)) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 同 `row`，图标换成会动的图形（助手在想、在写时的标记）。
 pub fn shape_row(key: &'static str, shape: Shape, label: (SharedString, Hsla)) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: Some(shape.clone()) }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: Some(shape.clone()), clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 块动作栏的一格：原生图标在上、文字在下，点击仍交给下面的 GPUI。`fill` 是垫底的淡色（只有「删除」垫）。
+/// 动作栏横着滚：原生视图不归 GPUI 裁，按这一格所在的裁剪范围（`content_mask`）给它套一层遮罩，滚到边上的只露出里面那一截。
 pub fn tile(key: &'static str, icon: Icon, label: (SharedString, Hsla), fill: Option<Hsla>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: fill, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(16.), bare: true, stacked: true, actions: vec![], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: fill, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(16.), bare: true, stacked: true, actions: vec![], dark: crate::theme::dark(), shape: None, clip: Some(window.content_mask().bounds) }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 自己接触摸的玻璃圆钮：按下时的拉伸和高光由系统给，点了把 `action` 交给 `ios::menu_action`。
 /// 这块地方的点击不再经过 GPUI。
 pub fn tap_pane(key: &'static str, icon: Icon, action: &'static str, label: &'static str) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: None, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![(action, Some(label))], dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: None, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![(action, Some(label))], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 标签栏：一条玻璃上等分排开几个图标，`picked` 是当前那一格和垫在它下面的底色；`actions` 是各格点了交出去的标识
 /// （给了就由玻璃自己接触摸，同 `tap_pane`）。
 pub fn tab_pane(key: &'static str, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, actions: Vec<&'static str>) -> impl IntoElement {
     let actions: Vec<_> = actions.into_iter().map(|id| (id, None)).collect();
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, stacked: false, actions: actions.clone(), dark: crate::theme::dark(), shape: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, stacked: false, actions: actions.clone(), dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 按下时玻璃轻轻缩一下再弹回：GPUI 画不到玻璃上面，按压的反馈只能由原生视图给。
@@ -192,6 +193,29 @@ pub(crate) unsafe fn ns_string(s: &str) -> *mut AnyObject {
     unsafe { msg_send![AnyClass::get(c"NSString").unwrap(), stringWithUTF8String: c.as_ptr()] }
 }
 
+/// 只露出 `frame` 里落在 `clip` 之内的那一截（没有 `clip` 或整个都在里面就不套遮罩）。
+unsafe fn clip(view: *mut AnyObject, frame: Bounds<Pixels>, clip: Option<Bounds<Pixels>>) {
+    unsafe {
+        let layer: *mut AnyObject = msg_send![view, layer];
+        let inside = clip.map(|c| c.intersect(&frame));
+        let Some(inside) = inside.filter(|i| *i != frame) else { let _: () = msg_send![layer, setMask: std::ptr::null_mut::<AnyObject>()]; return };
+        let ca = AnyClass::get(c"CATransaction").unwrap();
+        let _: () = msg_send![ca, begin];
+        let _: () = msg_send![ca, setDisableActions: true];
+        let mut mask: *mut AnyObject = msg_send![layer, mask];
+        if mask.is_null() {
+            mask = msg_send![AnyClass::get(c"CALayer").unwrap(), layer];
+            let black: *mut AnyObject = msg_send![AnyClass::get(c"UIColor").unwrap(), blackColor];
+            let black: *const CGColor = msg_send![black, CGColor];
+            let _: () = msg_send![mask, setBackgroundColor: black];
+            let _: () = msg_send![layer, setMask: mask];
+        }
+        let o = inside.origin - frame.origin;
+        let _: () = msg_send![mask, setFrame: CGRect::new(CGPoint::new(f64::from(o.x), f64::from(o.y)), CGSize::new(f64::from(inside.size.width).max(0.), f64::from(inside.size.height).max(0.)))];
+        let _: () = msg_send![ca, commit];
+    }
+}
+
 fn place(key: &'static str, look: Look, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
@@ -239,6 +263,7 @@ fn place(key: &'static str, look: Look, window: &Window) {
         let old = pane.look.take();
         let (x, y, w, h) = (f64::from(look.frame.origin.x), f64::from(look.frame.origin.y), f64::from(look.frame.size.width), f64::from(look.frame.size.height));
         let _: () = msg_send![pane.view, setFrame: CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))];
+        clip(pane.view, look.frame, look.clip);
         // 深浅色跟应用的设置，不跟系统。
         let _: () = msg_send![pane.view, setOverrideUserInterfaceStyle: if look.dark { 2isize } else { 1isize }];
         if old.as_ref().map(|o| o.radius) != Some(look.radius) && let Some(r) = look.radius && let (Some(corners), Some(corner)) = (AnyClass::get(c"UICornerConfiguration"), AnyClass::get(c"UICornerRadius")) {

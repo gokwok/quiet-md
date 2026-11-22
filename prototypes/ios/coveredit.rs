@@ -115,8 +115,13 @@ fn items() -> Vec<Item> {
     ]
 }
 
+/// 长按封面（`Editor::lift_block`）：马上弹出同一个菜单。菜单弹出时系统取消了这次触摸，抬手后不会再补点按。
+pub fn long_press(frame: Bounds<Pixels>, window: &Window) { show(frame, window); }
+
 /// 点了封面（`Editor::cover_el`）：透明按钮摆到封面上，弹出它的菜单。按钮平时不接触摸，滚动照常从封面上开始。
-pub fn tap(frame: Bounds<Pixels>, window: &Window) {
+pub fn tap(frame: Bounds<Pixels>, window: &Window) { show(frame, window); }
+
+fn show(frame: Bounds<Pixels>, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
     FRAME.with(|f| f.set(Some(frame)));
@@ -137,7 +142,8 @@ pub fn tap(frame: Bounds<Pixels>, window: &Window) {
         let _: () = msg_send![button, setOverrideUserInterfaceStyle: if crate::theme::dark() { 2isize } else { 1isize }];
         let _: () = msg_send![button, setMenu: menu::native("", &items())];
         let ok: bool = msg_send![button, respondsToSelector: sel!(performPrimaryAction)];
-        if ok { let _: () = msg_send![button, performPrimaryAction]; }
+        // 放到下一轮 run loop 再弹：菜单弹出时 UIKit 会当场取消这次触摸，这时还在 GPUI 的事件分发里，取消送不进去，之后的点按就都收不到了。
+        if ok { let _: () = msg_send![button, performSelector: sel!(performPrimaryAction), withObject: std::ptr::null_mut::<AnyObject>(), afterDelay: 0f64]; }
     }
 }
 
@@ -148,7 +154,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
     let document = w.current.clone();
     match id {
         "covermenu-view" => if let Some(path) = editor.read(cx).cover_src().and_then(|s| crate::store::image_path(&s)) && let Some(frame) = FRAME.with(|f| f.get()) {
-            view(&path, frame, crate::ios::style::banded());
+            view(&path, frame, if crate::ios::style::banded() { 10. } else { 0. });
         },
         "covermenu-crop" => if let Some(src) = editor.read(cx).cover_src() {
             // 「默认」是没裁比例时封面本来的形状：宽照现在的框，高照 `cover_height`（不是现在的高，现在可能已经是 3:1）。
@@ -253,7 +259,8 @@ fn camera_delegate() -> &'static AnyClass {
 struct Viewer { vc: *mut AnyObject, scroll: *mut AnyObject, image: *mut AnyObject, close: *mut AnyObject, share: *mut AnyObject, source: *mut AnyObject, path: std::path::PathBuf, chrome: Cell<bool>, size: Cell<(f64, f64)> }
 thread_local! { static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) }; }
 
-fn view(path: &std::path::Path, frame: Bounds<Pixels>, rounded: bool) {
+/// 全屏看一张图：从 `frame`（窗口里的位置，圆角 `radius`）放大出来。封面的「视图」和生成的图（`ios::imagine`）的「视图」都用它。
+pub(super) fn view(path: &std::path::Path, frame: Bounds<Pixels>, radius: f64) {
     if VIEWER.with(|v| v.borrow().is_some()) { return; }
     unsafe {
         let root = super::files::root_controller();
@@ -264,7 +271,7 @@ fn view(path: &std::path::Path, frame: Bounds<Pixels>, rounded: bool) {
         let source: *mut AnyObject = msg_send![source, initWithImage: image];
         let _: () = msg_send![source, setContentMode: 2isize];
         let _: () = msg_send![source, setClipsToBounds: true];
-        if rounded { let l: *mut AnyObject = msg_send![source, layer]; let _: () = msg_send![l, setCornerRadius: 10f64]; }
+        if radius > 0. { let l: *mut AnyObject = msg_send![source, layer]; let _: () = msg_send![l, setCornerRadius: radius]; }
         let _: () = msg_send![source, setFrame: rect(f64::from(frame.origin.x), f64::from(frame.origin.y), f64::from(frame.size.width), f64::from(frame.size.height))];
         let host: *mut AnyObject = msg_send![root, view];
         let _: () = msg_send![host, addSubview: source];

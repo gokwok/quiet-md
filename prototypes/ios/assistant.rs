@@ -19,12 +19,17 @@ pub mod llm;
 pub mod writing;
 #[path = "assistant_sheet.rs"]
 pub mod sheet;
+#[path = "assistant_image.rs"]
+pub mod image;
+#[path = "assistant_image_prompts.rs"]
+pub mod prompts;
 
 pub const DEFAULT_MODEL: &str = "eleven_v4";
 const MODEL_ACTION: &str = "speech-model-";
-/// (菜单项, model_id, 名称, 版本, 一句话, 标签)。前两条的说法照 ElevenLabs 应用里的模型卡片。
-#[allow(clippy::type_complexity)]
-const MODELS: &[(&str, &str, &str, &str, (&str, &str), (&str, &str))] = &[
+/// 一张模型卡片：(id, 模型名, 名称, 版本, 一句话, 标签)。
+pub(super) type Card = (&'static str, &'static str, &'static str, &'static str, (&'static str, &'static str), (&'static str, &'static str));
+/// 前两条的说法照 ElevenLabs 应用里的模型卡片。
+const MODELS: &[Card] = &[
     ("speech-model-v4", DEFAULT_MODEL, "Eleven v4", "v4", ("情感幅度与保真度最高", "Maximum emotional range and fidelity"), ("最高质量", "Highest quality")),
     ("speech-model-v4-turbo", "eleven_v4_turbo", "Eleven v4 Turbo", "v4", ("v4 的低延迟版本", "Lower-latency v4"), ("快速", "Fast")),
     ("speech-model-v3", "eleven_v3", "Eleven v3", "v3", ("富有表现力", "Expressive model"), ("高质量", "High quality")),
@@ -38,16 +43,17 @@ const MODELS: &[(&str, &str, &str, &str, (&str, &str), (&str, &str))] = &[
 
 thread_local! { static KEY_SAVED: Cell<Option<bool>> = const { Cell::new(None) }; }
 
-/// 第二级页面回到哪一页：语音的音色列表、角色设置回语音，选头像回角色设置；模型列表、服务商回文本；写作的几页见 `writing::parent`。
+/// 第二级页面回到哪一页：语音的音色列表、角色设置回语音，选头像回角色设置；模型列表、服务商回文本；画风、人物回图像；写作的几页见 `writing::parent`。
 pub fn parent(page: Page) -> Option<Page> {
     if let Some(p) = writing::parent(page) { return Some(p); }
-    match page { Page::AssistantVoices | Page::AssistantRole => Some(Page::AssistantSpeech), Page::AssistantAvatar => Some(Page::AssistantRole), Page::AssistantModels | Page::AssistantProvider => Some(Page::AssistantText), _ => None }
+    match page { Page::AssistantVoices | Page::AssistantRole => Some(Page::AssistantSpeech), Page::AssistantAvatar => Some(roles::avatars_parent()), Page::AssistantModels | Page::AssistantProvider => Some(Page::AssistantText), Page::AssistantStyle | Page::AssistantPerson => Some(Page::AssistantImage), _ => None }
 }
 
 /// 打开助手设置的某一页时：重新看一眼钥匙串，文本页顺便取模型列表。
 pub fn opened(page: Page, cx: &mut Context<Workspace>) {
     match page {
         Page::AssistantSpeech => refresh_key_status(),
+        Page::AssistantImage | Page::AssistantStyle | Page::AssistantPerson => { image::opened(); prompts::opened(); }
         Page::AssistantText | Page::AssistantModels | Page::AssistantProvider => text::opened(page, cx),
         Page::AssistantWriting | Page::AssistantPreset | Page::AssistantEntries | Page::AssistantEntry | Page::AssistantRegexes | Page::AssistantRegex | Page::AssistantCard => writing::opened(page, cx),
         _ => {}
@@ -71,7 +77,7 @@ pub fn voice(cx: &mut Context<Workspace>) -> AnyElement {
     let current = MODELS.iter().find(|m| m.1 == p.speech_model).map_or(DEFAULT_MODEL, |m| m.1);
     div().w_full().pt(px(18.)).flex().flex_col().gap(px(32.))
         .child(general::titled(Some(tr("服务商连接", "Provider Connection")), vec![provider]))
-        .child(models(current, cx))
+        .child(model_cards("speech-models", tr("语音模型", "Speech Model"), MODELS, current, |p, id| p.speech_model = id.into(), cx))
         .child(roles::section(&p.speech_roles, cx))
         .into_any_element()
 }
@@ -83,15 +89,15 @@ fn open_key(w: &mut Workspace, cx: &mut Context<Workspace>) {
     cx.notify();
 }
 
-/// 语音模型（照 ElevenLabs 应用的模型卡片）：一排横着滑的卡片，左上角版本号，下面名称、一句话和标签；选中的描一圈并打勾。
-fn models(current: &str, cx: &mut Context<Workspace>) -> AnyElement {
+/// 模型卡片（照 ElevenLabs 应用）：一排横着滑的卡片，左上角版本号，下面名称、一句话和标签；选中的描一圈并打勾。语音和图像共用。
+pub(super) fn model_cards(id: &'static str, title: &'static str, cards: &'static [Card], current: &str, pick: fn(&mut crate::settings::Preferences, &'static str), cx: &mut Context<Workspace>) -> AnyElement {
     const W: f32 = 172.;
     const GAP: f32 = 10.;
     let chip = |text: &'static str, on: bool| div().px(px(9.)).h(px(24.)).rounded_full().flex().items_center()
         .bg(if on { crate::theme::ca(crate::theme::craft::N1000, 0.07) } else { Theme::bg_body() })
         .text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(text);
-    let cards = MODELS.iter().map(|&(action, id, label, version, line, tag)| {
-        let on = id == current;
+    let items = cards.iter().map(|&(action, model, label, version, line, tag)| {
+        let on = model == current;
         div().id(action).w(px(W)).h(px(172.)).flex_none().p(px(14.)).rounded(px(20.)).bg(general::card_bg())
             .border_2().border_color(if on { Theme::text() } else { gpui::transparent_black() })
             .flex().flex_col().active(|d| d.bg(Theme::fill_pressed()))
@@ -101,19 +107,20 @@ fn models(current: &str, cx: &mut Context<Workspace>) -> AnyElement {
             .child(div().mt(px(14.)).text_size(px(16.)).line_height(px(21.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(label))
             .child(div().mt(px(4.)).flex_1().text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(tr(line.0, line.1)))
             .child(div().flex().child(chip(tr(tag.0, tag.1), false)))
-            .on_click(cx.listener(move |w, _, _, cx| if prefs().speech_model != id { super::glass::haptic(); w.set_pref(|p| p.speech_model = id.into(), cx); }))
+            .on_click(cx.listener(move |w, _, _, cx| if !on { super::glass::haptic(); w.set_pref(move |p| pick(p, model), cx); }))
     });
-    let width = 32. + MODELS.len() as f32 * (W + GAP);
+    let width = 32. + cards.len() as f32 * (W + GAP);
     div().w_full().flex().flex_col()
-        .child(roles::header(tr("语音模型", "Speech Model")))
-        .child(div().id("speech-models").w_full().overflow_x_scroll().restrict_scroll_to_axis()
-            .child(div().w(px(width)).flex_none().px(px(10.)).flex().gap(px(GAP)).children(cards)))
+        .child(roles::header(title))
+        .child(div().id(id).w_full().overflow_x_scroll().restrict_scroll_to_axis()
+            .child(div().w(px(width)).flex_none().px(px(10.)).flex().gap(px(GAP)).children(items)))
         .into_any_element()
 }
 
 pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
     if action.starts_with("text-") { return text::menu_action(action, w, cx); }
     if action.starts_with("tavern-") { return writing::menu_action(action, w, cx); }
+    if action.starts_with("image-") { return image::menu_action(action, w, cx) || prompts::menu_action(action, w, cx); }
     if action.starts_with("speech-role-lang-") { return roles::menu_action(action, w, cx); }
     if !action.starts_with(MODEL_ACTION) { return false; }
     if let Some(&(_, id, ..)) = MODELS.iter().find(|m| m.0 == action) && prefs().speech_model != id {

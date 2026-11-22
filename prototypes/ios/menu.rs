@@ -71,8 +71,9 @@ impl Button {
 
 /// 放在 GPUI 元素里的占位：这个元素的位置上盖一个透明的原生按钮，点它弹出系统菜单。
 /// 按钮本身不画东西，图标仍由下面的 GPUI 元素画。
+/// 按钮在能滚的一排里时只留露出来的那部分（滚出去的部分不接点按）。
 pub fn button(key: &'static str, items: Vec<Item>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, bounds, None, items.clone(), window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, bounds.intersect(&window.content_mask().bounds), None, items.clone(), window), |_, _, _, _| {}).absolute().inset_0()
 }
 /// 同上，但按钮自己就是一颗系统的玻璃圆钮（图标是 SF Symbols 里的 `symbol`）：菜单从这颗玻璃里变出来。
 pub fn glass_button(key: &'static str, symbol: &'static str, color: Hsla, items: Vec<Item>) -> impl IntoElement {

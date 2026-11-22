@@ -28,7 +28,9 @@ thread_local! {
 /// 每帧开头调用：这一帧没有占位，卡片就收起。
 pub fn begin(window: &Window) {
     SEEN.with(|s| s.set(false));
-    window.on_next_frame(|_, _| if !SEEN.with(|s| s.get()) { hide(); });
+    // 收起时 `endEditing` 让键盘落下，系统当场发「键盘将收起」；那时正在这一帧的回调里，GPUI 记下了键盘高度变 0，
+    // 却没能排下一帧（窗口正忙），版面要等别的事来重画才落下去（约一秒半）。所以收了就自己要一帧。
+    window.on_next_frame(|window, _| if !SEEN.with(|s| s.get()) && CARD.with(|c| c.borrow().as_ref().is_some_and(|c| c.shown)) { hide(); window.refresh(); });
 }
 
 fn hide() {
@@ -196,7 +198,7 @@ fn changed(text: usize, hint: usize, send: usize) {
 }
 
 /// 控件事件接一段代码（系统在主线程上回调）。
-unsafe fn on(control: *mut AnyObject, events: usize, run: impl Fn() + 'static) {
+pub(crate) unsafe fn on(control: *mut AnyObject, events: usize, run: impl Fn() + 'static) {
     unsafe {
         let handler = block2::RcBlock::new(move |_action: *mut AnyObject| run());
         let action: *mut AnyObject = msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(""), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler];
@@ -280,7 +282,7 @@ unsafe fn refresh(card: &Card) {
     }
 }
 
-fn text_of(field: *mut AnyObject) -> String {
+pub(crate) fn text_of(field: *mut AnyObject) -> String {
     unsafe {
         let text: *mut AnyObject = msg_send![field, text];
         if text.is_null() { return String::new(); }

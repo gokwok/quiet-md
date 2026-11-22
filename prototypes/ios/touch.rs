@@ -230,10 +230,25 @@ impl Editor {
         if !self.compact() || self.read_only { return false; }
         // 助手在写时长按什么都不做（认下来不往下走选词）：预览挂在锚点块里，按在预览上会提起锚点；底部也只留助手的栏。
         if crate::ios::assist::active() { window.prevent_default(); crate::ios::take_long_press(); return true; }
+        // 封面：长按和点一下一样弹出封面的菜单（`ios::coveredit`），不往下走选标题里的词（那会弹键盘和编辑条）。
+        if self.core.doc.cover.is_some() && self.cover_ui.drag.is_none() && let Some(b) = self.cover_ui.frame.get().filter(|b| b.contains(&at)) {
+            window.prevent_default();
+            crate::ios::take_long_press();
+            crate::ios::coveredit::long_press(b, window);
+            return true;
+        }
         let editing = self.focus.is_focused(window);
         // 手指下面最里层的块（引用、高亮块里的那一段，而不是整个容器）。
         let hit = self.block_bounds.borrow().iter().filter(|(id, b)| **id != super::core::TITLE && b.contains(&at))
             .min_by(|a, b| f32::from(a.1.size.height).total_cmp(&f32::from(b.1.size.height))).map(|(id, _)| *id);
+        // 生成出来的图（`ios::imagine`）：长按出它的菜单（取消、查看提示词、重新生成），不提起来；表格格子里的也算。
+        if let Some(id) = hit && self.img.boxes.borrow().get(&id).is_some_and(|f| f.contains(&at))
+            && let Some(fdl_core::model::BlockKind::Image { src, .. }) = self.core.block(id).map(|b| &b.kind)
+            && crate::ios::imagine::press(src, at, self.img.boxes.borrow()[&id]) {
+            window.prevent_default();
+            crate::ios::take_long_press();
+            return true;
+        }
         // 表格格子里的块不提起来（格子有自己的选择），长按照旧选词。
         let Some(id) = hit.filter(|id| self.core.cell_of(*id).is_none()) else { return false };
         self.press_handle(id, at);
@@ -283,6 +298,11 @@ impl Editor {
 #[derive(Clone, Copy)]
 struct Pull { key: &'static str, from: f32, dy: f32, back: Option<(std::time::Instant, f32)> }
 thread_local! { static PULL: std::cell::Cell<Option<Pull>> = const { std::cell::Cell::new(None) }; }
+thread_local! {
+    /// 块动作栏里那一排的滚动位置；栏收起过，下次出来从头开始。
+    static BAR_SCROLL: ScrollHandle = ScrollHandle::new();
+    static BAR_SHOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 /// 面板上沿往下这么高的一条接这个手势（就是抓手让出的那一条，不压第一行）；拖过多远松手算收起；弹回用时。
 const PULL_ZONE: f32 = crate::ios::GRAB_ROOM;
 const PULL_COMMIT: f32 = 80.;
@@ -399,6 +419,8 @@ impl Editor {
             "delete" => { self.core.select_block(block); self.core.delete_selected_blocks(); }
             // 助手：写出来的排在这一行下面（这一行空着就在插入时替换掉它）。
             "assist" => { self.changed(window, cx); return crate::ios::assist::open(self, Some(block), window, cx); }
+            // 配图：图排在这一行（只剩「/」就用它，不然排在后面），见 `ios::imagine`。
+            "imagine" => { self.changed(window, cx); return crate::ios::imagine::open(self, Some(block), window, cx); }
             // 颜色：打开格式面板的颜色页（和「格式」里的彩虹圈同一页）。
             "color" => { self.changed(window, cx); return crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open_at(crate::ios::format::Page::Color, w, window, cx)); }
             _ => {}
@@ -426,23 +448,40 @@ impl Editor {
     }
 
     /// 块动作栏（照 Craft）：一条玻璃，一排动作（图标在上、小字在下，不垫底色），「删除」在最右，垫一层淡红。
-    /// 动作是 格式 / 添加 / 配音 / 助手 / 剪切 / 复制，选了多块时只留对多块有意义的几项；最多七格，一行放得下。
+    /// 动作是 格式 / 添加 / 配音 / 助手 / 配图 / 剪切 / 复制，选了多块时只留对多块有意义的几项。格子一样宽：
+    /// 放得下就排满一行；放不下时「删除」钉在最右，前面的一排横着滚，露半格出来让人知道还有。
     pub(super) fn block_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         // 助手开着时，底部是它的卡片或那块玻璃（贴着键盘或底边）。
         if let Some(el) = crate::ios::assist::overlay() {
             let (_, safe, viewport) = crate::ios::layout();
             return Some(rise_at("sheet-assist", self.rel(point(viewport.width / 2., viewport.height - safe.bottom - px(crate::ios::SHEET_INSET))), el));
         }
-        if !self.block_bar_on() || self.menu.is_some() { return None; }
+        if let Some(el) = crate::ios::imagine::overlay() {
+            let (_, safe, viewport) = crate::ios::layout();
+            return Some(rise_at("sheet-imagine", self.rel(point(viewport.width / 2., viewport.height - safe.bottom - px(crate::ios::SHEET_INSET))), el));
+        }
+        if !self.block_bar_on() || self.menu.is_some() { BAR_SHOWN.with(|s| s.set(false)); return None; }
+        // 每次出来都从头开始。
+        if !BAR_SHOWN.with(|s| s.replace(true)) { BAR_SCROLL.with(|h| h.set_offset(Point::default())); }
         let ids = self.core.block_sel_ids();
         let one = (ids.len() == 1).then(|| ids[0]);
         let tr = crate::settings::tr;
         let glass = crate::ios::glass::supported();
         // 玻璃上图标和字是原生的（GPUI 画的会被玻璃盖住）；只有「删除」垫底色。
         // 「助手」的 ¶ 是朱红的（应用图标的颜色），字照旧。
+        let kind = one.and_then(|id| self.core.kind_of(id));
+        let crop = one.filter(|&id| self.can_phone_crop(id));
+        let code = one.filter(|_| matches!(kind, Some(BlockKind::Code { .. })));
+        let table = one.filter(|_| matches!(kind, Some(BlockKind::Table(_))));
+        // 选了几块时也有「格式」：打开的是「文字」页，字体、粗体这些、对齐一起改这几块。
+        let format = (one.is_none() && ids.iter().any(|id| self.core.kind_of(*id).is_some_and(BlockKind::takes_bg))) || (one.is_some() && crop.is_none() && !matches!(kind,Some(BlockKind::Table(_) | BlockKind::Code { .. })));
+        // 滚的那一排有几格（配音、助手、配图、剪切、复制总在）。
+        let n = [crop.is_some(), code.is_some(), table.is_some(), format, one.is_some()].iter().filter(|x| **x).count() + 5;
+        let full = crate::ios::menu_w(0.) - px(12.);
+        let tw = if n <= 5 { (full - px(4. * n as f32)) / (n + 1) as f32 } else { (full - px(24.)) / 6.5 };
         let tile = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla, fill: bool| {
-            let ink = if ic == "assistant" { crate::ios::assist::mark() } else { tint };
-            div().id(id).flex_1().min_w_0().h(px(58.)).flex().flex_col().items_center().justify_center().gap(px(3.)).rounded(px(16.)).relative()
+            let ink = if matches!(ic, "assistant" | "imagine") { crate::ios::assist::mark() } else { tint };
+            div().id(id).w(tw).flex_none().h(px(58.)).flex().flex_col().items_center().justify_center().gap(px(3.)).rounded(px(16.)).relative()
                 .when(!glass && fill, |d| d.bg(tint.opacity(0.08)))
                 .active(|s| s.bg(Theme::fill_pressed()))
                 .when(glass, |d| d.child(crate::ios::glass::tile(id, (ic, 22., ink), (label.into(), tint), fill.then(|| tint.opacity(0.08)))))
@@ -465,25 +504,21 @@ impl Editor {
             e.changed(window, cx);
             crate::ios::blocks_removed(n, copy);
         });
-        let kind = one.and_then(|id| self.core.kind_of(id));
-        let crop = one.filter(|&id| self.can_phone_crop(id));
-        let bar = div().when(!glass, |d| d.bg(crate::theme::raised(Theme::bg_body())).shadow(crate::theme::shadow_menu())).rounded(px(24.)).relative().when(glass, |d| d.child(crate::ios::glass::panel("block-bar-glass", 24.))).id("block-bar").occlude().w(crate::ios::menu_w(0.)).p(px(6.)).flex().items_center().gap(px(4.))
-            .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); })
+        let strip = div().id("block-bar-strip").flex_1().min_w_0().flex().items_center().gap(px(4.)).overflow_x_scroll().restrict_scroll_to_axis().track_scroll(&BAR_SCROLL.with(Clone::clone))
             .when_some(crop, |d,id| d.child(
                 item("bb-crop","crop",tr("裁剪","Crop"),Theme::text()).on_click(cx.listener(move |ed: &mut Editor,_,w,cx| {
                     ed.start_crop(id,w,cx); if ed.cropping() { ed.core.clear_block_sel(); ed.set_caret(super::core::Pos::new(id,0),false); }
                 }))))
-            .when_some(one.filter(|_| matches!(kind, Some(BlockKind::Code { .. }))), |d,id| d.child(
+            .when_some(code, |d,id| d.child(
                 item("bb-code","code",tr("编辑代码","Edit code"),Theme::text()).on_click(cx.listener(move |ed: &mut Editor,_,w,cx| {
                     ed.core.clear_block_sel(); ed.set_caret(super::core::Pos::new(id,0),false); ed.open_lang_menu(id,w,cx);
                 }))))
-            .when_some(one.filter(|_| matches!(kind, Some(BlockKind::Table(_)))), |d,id| d.child(
+            .when_some(table, |d,id| d.child(
                 item("bb-table","table",tr("编辑表格","Edit table"),Theme::text()).on_click(cx.listener(move |ed: &mut Editor,_,_,cx| {
                     ed.core.select_cells(CellSel { table:id, anchor:(0,0), head:(0,0), kind:CellSelKind::Range });
                     ed.table_page=0; ed.table_panel_target.set(None); cx.notify();
                 }))))
-            // 选了几块时也有「格式」：打开的是「文字」页，字体、粗体这些、对齐一起改这几块。
-            .when((one.is_none() && ids.iter().any(|id| self.core.kind_of(*id).is_some_and(BlockKind::takes_bg))) || (one.is_some() && crop.is_none() && !matches!(kind,Some(BlockKind::Table(_) | BlockKind::Code { .. }))), |d| d
+            .when(format, |d| d
                 // 「格式」：和键盘上方的「格式」是同一块面板（`crate::ios::format`）。
                 .child(item("bb-format", "type", tr("格式", "Format"), Theme::text()).on_click(|_, _, _| crate::ios::menu::dispatch(|w, window, cx| crate::ios::format::open(w, window, cx)))))
             .when(one.is_some(), |d| d.child(item("bb-add", "square-plus", tr("添加", "Add"), Theme::text()).on_click(open(Some(BlockSub::Add(usize::MAX))))))
@@ -500,8 +535,13 @@ impl Editor {
                 let anchor = ed.core.block_order(false).into_iter().rfind(|id| picked.contains(id));
                 crate::ios::assist::open(ed, anchor, w, cx);
             })))
+            // 「配图」：照选中的块（带上前后文）配一张，插在它们下面。
+            .child(item("bb-imagine", "imagine", tr("配图", "Illustrate"), Theme::text()).on_click(cx.listener(|ed: &mut Editor, _, w, cx| crate::ios::imagine::open_passage(ed, w, cx))))
             .child(item("bb-cut", "scissors", tr("剪切", "Cut"), Theme::text()).on_click(act(true, true)))
-            .child(item("bb-copy", "copy", tr("复制", "Copy"), Theme::text()).on_click(act(false, true)))
+            .child(item("bb-copy", "copy", tr("复制", "Copy"), Theme::text()).on_click(act(false, true)));
+        let bar = div().when(!glass, |d| d.bg(crate::theme::raised(Theme::bg_body())).shadow(crate::theme::shadow_menu())).rounded(px(24.)).relative().when(glass, |d| d.child(crate::ios::glass::panel("block-bar-glass", 24.))).id("block-bar").occlude().w(crate::ios::menu_w(0.)).p(px(6.)).flex().items_center().gap(px(4.))
+            .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); })
+            .child(strip)
             .child(tile("bb-del", "trash-2", tr("删除", "Delete"), Theme::danger(), true).on_click(act(true, false)));
         Some(rise_at("sheet-block-bar", self.rel(crate::ios::sheet_point()), bar))
     }
@@ -983,6 +1023,7 @@ const SLASH_CATS: &[(&str, &str, &str, &[Pick])] = {
     use Pick::{A, K as I};
     &[
         ("助手", "Assistant", "assistant", &[A("assist", "助手", "Assistant", "assistant")]),
+        ("配图", "Illustration", "imagine", &[A("imagine", "配图", "Illustration", "imagine")]),
         ("列表", "Lists", "list", &[I(K::Bullet), I(K::Ordered), I(K::Todo)]),
         ("缩进", "Indent", "indent-increase", &[A("indent", "增加缩进", "Indent", "indent-increase"), A("outdent", "减少缩进", "Outdent", "indent-decrease")]),
         ("文本样式", "Text Styles", "type", &[I(K::Text), I(K::Heading(1)), I(K::Heading(2)), I(K::Heading(3)), I(K::Heading(4)), I(K::Quote), I(K::Code)]),
@@ -1035,10 +1076,10 @@ impl Editor {
         let (block, trigger) = (s.block, s.trigger);
         let mut list = div().id("slash-card-list").py(px(6.)).flex().flex_col().overflow_y_scroll().track_scroll(&self.slash_scroll);
         let mut n = 0usize;
-        // 一行：图标、名字，点进一类的行尾一个小箭头。照 Craft：图标都是灰的，删除是红的；「助手」的 ¶ 是朱红的。
+        // 一行：图标、名字，点进一类的行尾一个小箭头。照 Craft：图标都是灰的，删除是红的；「助手」的 ¶ 和「配图」的星框是朱红的（两样 AI 的一家）。
         let pick_row = |id: ElementId, glyph: &'static str, text: SharedString, more: bool, danger: bool| {
             let tint = if danger { crate::feishu_theme::c(0xd83931) } else { Theme::icon() };
-            let ink = if glyph == "assistant" { crate::ios::assist::mark() } else { tint };
+            let ink = if matches!(glyph, "assistant" | "imagine") { crate::ios::assist::mark() } else { tint };
             row(id).child(icon(glyph, 19., ink)).child(label(text).when(danger, |d| d.text_color(tint))).when(more, |d| d.child(icon("chevron-right", 14., Theme::text_caption())))
         };
         let has = |k: super::menus::SlashKind| items.iter().any(|i| SLASH_ITEMS[*i].kind == k);

@@ -71,10 +71,13 @@ fn toast(text: String) { menu::dispatch(move |w, _, cx| w.show_toast_kind(ui::To
 /// 工作区每帧调用：现在看的是哪篇文档。
 pub fn frame(doc: Option<String>) { SHOWING.with(|s| *s.borrow_mut() = doc); }
 
+/// 这一帧在看的文档。
+pub fn showing() -> Option<String> { SHOWING.with(|s| s.borrow().clone()) }
+
 fn here(job: &Job) -> bool { SHOWING.with(|s| *s.borrow() == job.doc) }
 
 /// 助手在这篇文档里露着面（卡片、预览或底部那块玻璃）：底部的铅笔、块工具条让开。
-pub fn active() -> bool { JOB.with(|j| j.borrow().as_ref().is_some_and(here)) }
+pub fn active() -> bool { JOB.with(|j| j.borrow().as_ref().is_some_and(here)) || super::imagine::composing() }
 pub fn composing() -> bool { JOB.with(|j| j.borrow().as_ref().is_some_and(|j| here(j) && j.phase == Phase::Composing)) }
 
 /// 打开卡片。已经有一次在写（别的文档里也算）时不开，提示一下。

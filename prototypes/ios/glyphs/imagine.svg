@@ -1,0 +1,7 @@
+<!-- 本项目绘制（quiet.md: original, MIT）：「配图」——画框右上角让出一块，放一颗四角星（生成），框里一道山。24px / 2px 描边同 editor-icons，星是实心的。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+  <path d="m21 16-3.6-3.6a2 2 0 0 0-2.8 0L6 21"/>
+  <circle cx="8.5" cy="8.5" r="1.5"/>
+  <path d="M18 1.6c.4 2.3 1.6 3.5 4 4-2.4.5-3.6 1.7-4 4-.4-2.3-1.6-3.5-4-4 2.4-.5 3.6-1.7 4-4Z" fill="currentColor" stroke-width="1"/>
+</svg>

@@ -4,3 +4,4 @@
 //! 下面共用模型接入，上面共用「预览 → 经 `editor::Core` 写入文档」。现在只有酒馆核心（`tavern`）。
 
 pub mod tavern;
+pub mod imagine;

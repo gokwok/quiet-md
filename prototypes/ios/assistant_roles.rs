@@ -1,5 +1,5 @@
 //! ElevenLabs 音色列表和本机保存的语音角色。
-use std::{cell::{Cell, RefCell}, collections::HashSet, fmt::Write, path::{Path, PathBuf}, ptr::null_mut};
+use std::{cell::{Cell, RefCell}, collections::HashSet, fmt::Write, path::{Path, PathBuf}, ptr::null_mut, rc::Rc};
 
 use gpui::{prelude::FluentBuilder, *};
 use objc2::{ClassType, class, define_class, msg_send, runtime::{AnyObject, NSObject}};
@@ -594,7 +594,7 @@ fn avatar_path(id: &str) -> Option<PathBuf> {
     Some(crate::store::Store::home_dir().join("assistant-avatars").join(format!("{id}.png")))
 }
 
-/// 自带的头像（`avatars/*.webp`，只给语音角色用，编进二进制）。选了的话 `Role::avatar` 存 `builtin-NN`（从 1 数）。
+/// 自带的头像（`avatars/*.webp`，语音角色和图像的人物用，编进二进制）。选了的话 `Role::avatar` 存 `builtin-NN`（从 1 数）。
 const BUILTIN: [&[u8]; 38] = [
     include_bytes!("avatars/01.webp"),
     include_bytes!("avatars/02.webp"),
@@ -653,6 +653,13 @@ fn circle(size: f32, image: impl Into<ImageSource>) -> AnyElement {
     div().size(px(size)).flex_none().rounded_full().overflow_hidden().bg(general::card_bg()).child(img(image).size_full().rounded_full().object_fit(ObjectFit::Cover)).into_any_element()
 }
 
+/// 头像标识（自带的 `builtin-NN` 或照片）画成圆；照片不在这台设备上（比如人物从别的设备同步过来）是 `None`。
+pub(super) fn avatar_image(id: Option<&str>, size: f32) -> Option<AnyElement> {
+    let id = id?;
+    if let Some(n) = builtin(id) { return Some(circle(size, builtin_image(n))); }
+    avatar_path(id).filter(|path| path.is_file()).map(|path| circle(size, path))
+}
+
 /// 角色头像：换过的是圆形照片或自带头像，没换的是这个音色的光球。
 pub(crate) fn avatar(role: &Role, size: f32) -> AnyElement {
     if let Some(n) = role.avatar.as_deref().and_then(builtin) { return circle(size, builtin_image(n)); }
@@ -677,30 +684,55 @@ pub(crate) fn picture(role: &Role) -> Option<(SharedString, std::sync::Arc<[u8]>
     Some(found)
 }
 
+/// 换上一个头像（`None` 是恢复默认）。
+pub(super) type SetAvatar = Rc<dyn Fn(&mut Workspace, Option<String>, &mut Context<Workspace>)>;
+thread_local! {
+    /// 选择头像页不是给语音角色选时：现在的头像、换上的办法、返回到哪一页（图像的人物）。
+    static CHOOSING: RefCell<Option<(Option<String>, SetAvatar, Page)>> = const { RefCell::new(None) };
+}
+
 fn open_avatars(w: &mut Workspace, cx: &mut Context<Workspace>) {
     super::super::glass::haptic();
+    CHOOSING.with(|c| *c.borrow_mut() = None);
     w.open_settings(Page::AssistantAvatar, cx);
 }
 
-/// 选择头像（角色设置的下一级）：四个一排的圆，第一个是「从照片选」，后面是自带的头像，现在用的那个外面一圈细环。
-/// 点一下就换上并回到角色设置。
+/// 别处（图像的人物）借选择头像页：`back` 是选完回到的那页。
+pub(super) fn choose_avatar(current: Option<String>, back: Page, set: SetAvatar, w: &mut Workspace, cx: &mut Context<Workspace>) {
+    super::super::glass::haptic();
+    CHOOSING.with(|c| *c.borrow_mut() = Some((current, set, back)));
+    w.open_settings(Page::AssistantAvatar, cx);
+}
+/// 选择头像页的上一页。
+pub(super) fn avatars_parent() -> Page { CHOOSING.with(|c| c.borrow().as_ref().map_or(Page::AssistantRole, |c| c.2)) }
+
+/// 选择头像（角色设置或人物的下一级）：四个一排的圆，第一个是「从照片选」，后面是自带的头像，现在用的那个外面一圈细环。
+/// 点一下就换上并回到上一页。
 pub fn avatars(cx: &mut Context<Workspace>) -> AnyElement {
-    let Some(role) = EDITING.with(|id| prefs().speech_roles.into_iter().find(|r| r.voice_id == *id.borrow())) else { return div().into_any_element() };
-    let current = role.avatar.as_deref().and_then(builtin);
+    let chosen = CHOOSING.with(|c| c.borrow().as_ref().map(|(current, set, _)| (current.clone(), set.clone())));
+    let (current, set): (Option<String>, SetAvatar) = match chosen {
+        Some(found) => found,
+        None => {
+            let Some(role) = EDITING.with(|id| prefs().speech_roles.into_iter().find(|r| r.voice_id == *id.borrow())) else { return div().into_any_element() };
+            let id = role.voice_id.clone();
+            (role.avatar, Rc::new(move |w, next, cx| set_avatar(w, &id, next, cx)))
+        }
+    };
+    let current = current.as_deref().and_then(builtin);
     const CELL: f32 = 80.;
     let ring = |id: ElementId, on: bool| div().id(id).size(px(CELL)).flex_none().rounded_full().p(px(4.)).border_2()
         .border_color(if on { Theme::text() } else { gpui::transparent_black() }).active(|d| d.opacity(0.7));
-    let photo = role.voice_id.clone();
+    let photo = set.clone();
     let mut cells = vec![ring("speech-avatar-photo".into(), false)
         .child(div().size_full().rounded_full().bg(general::card_bg()).flex().items_center().justify_center().child(svg().path("editor-icons/image.svg").size(px(26.)).flex_none().text_color(Theme::text_caption())))
         .on_click(cx.listener(move |_, _, _, cx| { super::super::glass::haptic(); pick_avatar(photo.clone(), cx); }))
         .into_any_element()];
     cells.extend((1..=BUILTIN.len()).map(|n| {
-        let id = role.voice_id.clone();
+        let set = set.clone();
         ring(("speech-builtin-avatar", n).into(), current == Some(n)).child(circle(CELL - 12., builtin_image(n)))
             .on_click(cx.listener(move |w, _, _, cx| {
                 super::super::glass::haptic();
-                set_avatar(w, &id, Some(format!("{BUILTIN_PREFIX}{n:02}")), cx);
+                set(w, Some(format!("{BUILTIN_PREFIX}{n:02}")), cx);
                 super::super::settings_back(w, cx);
             }))
             .into_any_element()
@@ -715,15 +747,15 @@ pub fn avatars(cx: &mut Context<Workspace>) -> AnyElement {
     div().w_full().px(px(20.)).pt(px(18.)).pb(px(32.)).flex().flex_col().gap(px(14.)).children(rows).into_any_element()
 }
 
-/// 从照片选一张，裁成正方形存下来；在「选择头像」页选的，换上后回到角色设置。
-fn pick_avatar(id: String, cx: &mut Context<Workspace>) {
+/// 从照片选一张，裁成正方形存下来；在「选择头像」页选的，换上后回到上一页。
+fn pick_avatar(set: SetAvatar, cx: &mut Context<Workspace>) {
     let pick = super::super::files::open_image();
     cx.spawn(async move |this, cx| {
         let Some(path) = pick.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next()) else { return };
         let Some(path) = super::super::crop::square(path).await.ok().and_then(Result::ok).flatten() else { return };
         let _ = this.update(cx, |w, cx| match write_avatar(&path) {
             Ok(image) => {
-                set_avatar(w, &id, Some(image), cx);
+                set(w, Some(image), cx);
                 if w.settings_page == Page::AssistantAvatar { super::super::settings_back(w, cx); }
             }
             Err(_) => w.show_toast_kind(ui::ToastKind::Error, tr("无法保存头像", "Could not save avatar"), cx),
@@ -740,7 +772,7 @@ fn write_avatar(from: &Path) -> anyhow::Result<String> {
     Ok(id)
 }
 
-fn discard_avatar(id: Option<&str>) { if let Some(path) = id.and_then(avatar_path) { let _ = std::fs::remove_file(path); } }
+pub(super) fn discard_avatar(id: Option<&str>) { if let Some(path) = id.and_then(avatar_path) { let _ = std::fs::remove_file(path); } }
 
 fn set_avatar(w: &mut Workspace, id: &str, next: Option<String>, cx: &mut Context<Workspace>) {
     let Some(old) = prefs().speech_roles.into_iter().find(|r| r.voice_id == id) else { discard_avatar(next.as_deref()); return; };
