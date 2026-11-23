@@ -1,15 +1,15 @@
 //! 设置 › 助手设置 › 图像 里的画风和人物（`fdl_ai::imagine`）。
 //! 画风：一排横滑的卡片，和模型卡片一个样子，点一下就是以后生图用的画风；再点选中的那张（或长按选「编辑」）打开它。
-//! 内置的几种只能看，可以复制一份再改。人物：一排横滑的圆头像（和语音角色一样），名字在下面，最前面是「添加」；
-//! 点开是大头像（右下角换头像）、名称、别名、外貌标签和只压这个人的排除标签。头像借语音的「选择头像」页，照片只存在这台设备上。
-//! 质量词（「生成」那组里的两行）也在这里：和画风分开，每张图都带，点开在文字页里改。
+//! 内置的几种只能看，可以复制一份再改。人物：一排横滑的圆头像（和语音角色一样），没换头像的是首字；最前面是「添加」；
+//! 点开是大头像（右下角换头像）、名称、别名、外貌标签和只压这个人的排除标签（胶囊标签流预览，点开在系统文字页里批量改）。
+//! 质量词（「生成」那组里的两行）也在这里：和画风分开，每张图都带，带单行预览与「恢复默认」动作。
 //! 都存在空间的 `tavern/imagine.json`，跟着 iCloud 走；每改一处整份写回去。
 use std::cell::RefCell;
 
 use fdl_ai::imagine::{self, BUILTIN, Character, Library, Style};
 use gpui::{prelude::FluentBuilder, *};
 
-use crate::{app::Workspace, settings::{Page, prefs, tr}, theme::{self, Theme, craft}, ui};
+use crate::{app::Workspace, settings::{Page, prefs, row_chevron, row_ink, tr}, theme::{self, Theme, craft}, ui};
 use super::{Field, general, menu, sheet, writing::{delete_card, in_use, intern, line}};
 
 const STYLE_EDIT: &str = "image-style-edit";
@@ -23,6 +23,8 @@ const KEY: &str = "image-style:";
 const LOOK_EXAMPLE: &str = "girl, long black hair, red eyes, serafuku";
 /// 人物排除空着时的示例。
 const NEGATIVE_EXAMPLE: &str = "long hair, glasses, hat";
+/// 胶囊标签流最多平铺展示几颗，多出的折成 `+N`。
+const MAX_CHIPS: usize = 16;
 
 thread_local! {
     static LIB: RefCell<Option<Library>> = const { RefCell::new(None) };
@@ -79,7 +81,7 @@ pub fn title(page: Page) -> &'static str {
 
 /// 画风：「默认」（不加画风）、内置的几种、自己加的，最后一张「新建」。
 pub fn styles(cx: &mut Context<Workspace>) -> AnyElement {
-    const W: f32 = 148.;
+    const W: f32 = 156.;
     const GAP: f32 = 10.;
     let l = lib();
     let current = l.current_style(english()).map_or(String::new(), |s| s.id);
@@ -87,7 +89,9 @@ pub fn styles(cx: &mut Context<Workspace>) -> AnyElement {
     all.extend(imagine::builtin(english()).into_iter().chain(l.styles).map(|s| (s.id, s.name, s.positive)));
     let mut cards: Vec<AnyElement> = all.into_iter().map(|(id, name, tags)| {
         let on = id == current;
-        let sub: SharedString = blurb(&id).map_or_else(|| tags.into(), SharedString::from);
+        let sub: SharedString = blurb(&id).map_or_else(|| {
+            if tags.trim().is_empty() { tr("未填写标签", "No tags yet").into() } else { tags.into() }
+        }, SharedString::from);
         let builtin = id.is_empty() || id.starts_with(BUILTIN);
         let items = match id.as_str() {
             "" => vec![],
@@ -114,10 +118,10 @@ pub fn styles(cx: &mut Context<Workspace>) -> AnyElement {
     }).collect();
     cards.push(div().id("image-style-new").w(px(W)).h(px(112.)).flex_none().rounded(px(20.)).bg(general::card_bg())
         .flex().flex_col().items_center().justify_center().gap(px(6.)).active(|d| d.bg(Theme::fill_pressed()))
-        .child(ui::icon("plus", 18., Theme::text_caption()))
-        .child(div().text_size(px(15.)).text_color(Theme::text_caption()).child(tr("新建画风", "New Style")))
+        .child(div().size(px(32.)).rounded_full().bg(Theme::bg_body()).flex().items_center().justify_center().child(ui::icon("plus", 16., Theme::text_caption())))
+        .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(tr("新建画风", "New Style")))
         .on_click(cx.listener(|w, _, _, cx| { haptic(); new_style(w, cx) })).into_any_element());
-    let width = 20. + cards.len() as f32 * (W + GAP);
+    let width = 20. + cards.len() as f32 * W + cards.len().saturating_sub(1) as f32 * GAP;
     div().w_full().flex().flex_col()
         .child(super::roles::header(tr("画风", "Style")))
         .child(div().id("image-styles").w_full().overflow_x_scroll().restrict_scroll_to_axis()
@@ -202,7 +206,7 @@ fn duplicate(w: &mut Workspace, id: &str, cx: &mut Context<Workspace>) {
 
 fn delete_style(id: &str) { change(|l| { l.styles.retain(|s| s.id != id); if l.style == id { l.style.clear(); } }); }
 
-/// 画风：没在用时最上面是「使用这个画风」；名称；标签、排除两段（点开在文字页里改）；复制一份、删除。内置的只能看。
+/// 画风：没在用时最上面是「使用这个画风」；名称；标签、排除两段（胶囊标签流，点开在文字页里改）；复制一份、删除。内置的只能看。
 pub fn style_page(cx: &mut Context<Workspace>) -> AnyElement {
     let Some(s) = open_style() else { return div().into_any_element() };
     let builtin = s.id.starts_with(BUILTIN);
@@ -242,14 +246,40 @@ pub fn style_page(cx: &mut Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
-/// 一段标签：等宽字，点开在文字页里改。空的写灰色的 `example`（没有就写「空」）。
+/// 解析权重组 `1.5::a, b::` → `Some(("1.5", "a, b"))`。
+fn weight_parts(piece: &str) -> Option<(&str, &str)> {
+    let (w, inner) = piece.strip_suffix("::")?.split_once("::")?;
+    w.trim().parse::<f32>().ok()?;
+    Some((w.trim(), inner.trim()))
+}
+
+/// 一颗标签胶囊：普通标签是轻盈的纸白小块；带权重的组带一颗强调色权重角标。
+fn tag_chip(piece: &str) -> Div {
+    let chip = div().px(px(10.)).py(px(5.)).rounded(px(9.)).flex().items_center().gap(px(5.)).max_w_full();
+    if let Some((w, inner)) = weight_parts(piece) {
+        chip.bg(Theme::block_hover()).border_1().border_color(Theme::block_selected())
+            .child(div().flex_none().font_family(theme::MONO_FONT).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::primary()).child(format!("{w}×")))
+            .child(div().min_w_0().text_size(px(13.)).line_height(px(17.)).text_color(row_ink()).child(inner.to_owned()))
+    } else {
+        chip.bg(Theme::bg_body()).border_1().border_color(Theme::line_divider())
+            .child(div().min_w_0().text_size(px(13.)).line_height(px(17.)).text_color(row_ink()).child(piece.to_owned()))
+    }
+}
+
+/// 一段标签：拆成圆角胶囊流，点开在系统文字页里批量改。空的写灰色的 `example`（没有就写「空」）。
 fn tags_block(id: &'static str, text: &str, example: Option<&'static str>, tappable: bool) -> Stateful<Div> {
-    let empty = text.trim().is_empty();
-    div().id(id).mx(px(10.)).px(px(18.)).py(px(14.)).rounded(px(20.)).bg(general::card_bg())
-        .when(tappable, |d| d.active(|d| d.bg(Theme::fill_pressed())))
-        .child(div().text_size(px(14.)).line_height(px(20.)).max_h(px(160.)).overflow_hidden().font_family(theme::MONO_FONT)
-            .text_color(if empty { Theme::text_placeholder() } else { crate::settings::row_ink() })
-            .child(if empty { example.unwrap_or(tr("空", "Empty")).to_owned() } else { text.to_owned() }))
+    let list = imagine::pieces(text);
+    let card = div().id(id).mx(px(10.)).px(px(14.)).py(px(14.)).rounded(px(20.)).bg(general::card_bg())
+        .when(tappable, |d| d.active(|d| d.bg(Theme::fill_pressed())));
+    if list.is_empty() {
+        return card.px(px(18.)).child(div().text_size(px(14.)).line_height(px(20.)).font_family(theme::MONO_FONT)
+            .text_color(Theme::text_placeholder()).child(example.unwrap_or(tr("空", "Empty")).to_owned()));
+    }
+    let extra = list.len().saturating_sub(MAX_CHIPS);
+    card.child(div().w_full().flex().flex_wrap().gap(px(6.))
+        .children(list.into_iter().take(MAX_CHIPS).map(|t| tag_chip(&t)))
+        .when(extra > 0, |d| d.child(div().px(px(10.)).py(px(5.)).rounded(px(9.)).bg(Theme::fill_hover())
+            .text_size(px(13.)).line_height(px(17.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(format!("+{extra}")))))
 }
 
 // ---- 人物
@@ -281,7 +311,7 @@ fn set_person_avatar(id: &str, next: Option<String>, cx: &mut Context<Workspace>
     cx.notify();
 }
 
-/// 标签块上面的小标题和块；点开在系统文字页里改。
+/// 标签块上面的小标题和胶囊块；点开在系统文字页里改。
 fn tags_section(id: &'static str, title: &'static str, text: String, example: &'static str, save: fn(&mut Character, String), cx: &mut Context<Workspace>) -> Div {
     div().w_full().flex().flex_col().child(super::roles::header(title))
         .child(tags_block(id, &text, Some(example), true).on_click(cx.listener(move |w, _, window, cx| {
@@ -343,22 +373,39 @@ pub fn person_page(cx: &mut Context<Workspace>) -> AnyElement {
         .into_any_element()
 }
 
-/// 「生成」里的两行：质量词、质量排除。右边灰字是「默认」或「已修改」（空着是「无」），点开在文字页里改；改回和默认一样就算默认。
+/// 「生成」里的质量词与质量排除：带单行标签预览，右边状态字是「默认」「已修改」或「无」；有修改时底下出现一键「恢复默认质量词」。
 pub fn quality_rows(cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     let l = lib();
-    [(false, "image-quality", tr("质量词", "Quality Tags"), l.quality.clone()), (true, "image-quality-negative", tr("质量排除", "Quality Exclusions"), l.quality_negative.clone())]
-        .into_iter().map(|(negative, id, title, custom)| {
+    let edited = l.quality.is_some() || l.quality_negative.is_some();
+    let mut rows: Vec<AnyElement> = [(false, "image-quality", tr("质量词", "Quality Tags"), l.quality.clone(), l.quality().to_owned()),
+        (true, "image-quality-negative", tr("质量排除", "Quality Exclusions"), l.quality_negative.clone(), l.quality_negative().to_owned())]
+        .into_iter().map(|(negative, id, title, custom, preview)| {
             let state = match custom.as_deref() { None => tr("默认", "Default"), Some(s) if s.trim().is_empty() => tr("无", "None"), Some(_) => tr("已修改", "Edited") };
-            line(id, title, state, true).on_click(cx.listener(move |w, _, window, cx| {
-                window.blur(cx);
-                haptic();
-                let l = lib();
-                let value = if negative { l.quality_negative() } else { l.quality() }.to_owned();
-                if !sheet::edit(title, &value, true, move |text| menu::dispatch(move |_, _, cx| { change(|l| l.set_quality(negative, &text)); cx.notify(); })) {
-                    toast(w, tr("无法打开编辑", "Could not open the editor"), cx);
-                }
-            })).into_any_element()
-        }).collect()
+            let sub = preview.trim().to_owned();
+            div().id(id).w_full().min_h(px(58.)).px(px(18.)).py(px(11.)).flex().items_center().gap(px(10.))
+                .active(|d| d.bg(Theme::fill_pressed()))
+                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
+                    .child(div().text_size(px(17.)).line_height(px(22.)).text_color(row_ink()).child(title))
+                    .when(!sub.is_empty(), |d| d.child(div().truncate().text_size(px(12.5)).line_height(px(16.)).font_family(theme::MONO_FONT).text_color(Theme::text_placeholder()).child(sub))))
+                .child(div().flex_none().text_size(px(15.)).text_color(if custom.is_some() { Theme::primary() } else { Theme::text_caption() }).child(state))
+                .child(ui::icon("chevron-right", 14., row_chevron()))
+                .on_click(cx.listener(move |w, _, window, cx| {
+                    window.blur(cx);
+                    haptic();
+                    let l = lib();
+                    let value = if negative { l.quality_negative() } else { l.quality() }.to_owned();
+                    if !sheet::edit(title, &value, true, move |text| menu::dispatch(move |_, _, cx| { change(|l| l.set_quality(negative, &text)); cx.notify(); })) {
+                        toast(w, tr("无法打开编辑", "Could not open the editor"), cx);
+                    }
+                })).into_any_element()
+        }).collect();
+    if edited {
+        rows.push(general::action("image-quality-reset", tr("恢复默认质量词", "Reset Quality Tags"), false, |_, cx| {
+            change(|l| { l.quality = None; l.quality_negative = None; });
+            cx.notify();
+        }, cx));
+    }
+    rows
 }
 
 /// 画风卡片的上下文菜单、两页上的删除。

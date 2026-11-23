@@ -562,7 +562,7 @@ pub fn placeholder(src: &str, local: bool, w: f32, h: f32, radius: f32) -> Optio
 
 /// 生成中：成图形状的一块浅底，底色很轻地起伏，一道柔光从左往右慢慢扫过去，歇一下再来；正中一个淡淡的图片图标跟着呼吸。
 /// 时间都从共用的时钟算（不靠元素自己的动画状态），滚出去再滚回来、换了状态，光都接得上。
-fn developing(w: f32, h: f32, radius: f32) -> Div {
+pub(crate) fn developing(w: f32, h: f32, radius: f32) -> Div {
     const SWEEP: f32 = 1.8;
     const REST: f32 = 0.9;
     const BREATH: f32 = 2.7;

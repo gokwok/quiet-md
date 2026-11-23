@@ -109,7 +109,7 @@ pub(super) fn model_cards(id: &'static str, title: &'static str, cards: &'static
             .child(div().flex().child(chip(tr(tag.0, tag.1), false)))
             .on_click(cx.listener(move |w, _, _, cx| if !on { super::glass::haptic(); w.set_pref(move |p| pick(p, model), cx); }))
     });
-    let width = 32. + cards.len() as f32 * (W + GAP);
+    let width = 20. + cards.len() as f32 * W + cards.len().saturating_sub(1) as f32 * GAP;
     div().w_full().flex().flex_col()
         .child(roles::header(title))
         .child(div().id(id).w_full().overflow_x_scroll().restrict_scroll_to_axis()
@@ -120,7 +120,7 @@ pub(super) fn model_cards(id: &'static str, title: &'static str, cards: &'static
 pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
     if action.starts_with("text-") { return text::menu_action(action, w, cx); }
     if action.starts_with("tavern-") { return writing::menu_action(action, w, cx); }
-    if action.starts_with("image-") { return image::menu_action(action, w, cx) || prompts::menu_action(action, w, cx); }
+    if action.starts_with("image-") { return image::menu_action(action, cx) || prompts::menu_action(action, w, cx); }
     if action.starts_with("speech-role-lang-") { return roles::menu_action(action, w, cx); }
     if !action.starts_with(MODEL_ACTION) { return false; }
     if let Some(&(_, id, ..)) = MODELS.iter().find(|m| m.0 == action) && prefs().speech_model != id {

@@ -1,13 +1,14 @@
-//! 设置 › 助手设置 › 图像：NovelAI 生图。服务商只有 NovelAI（接口地址可以换成同协议的别的服务），API Key 只在设备钥匙串里保存、按地址分开；模型可选 V5 和 V4.5，尺寸三种，
-//! 步数、CFG、采样器固定，种子每次随机。下面是画风和人物（`assistant_image_prompts.rs`），「生成」里尺寸和质量词，最后一行「测试生成」（套着现在的画风和质量词）。
-use std::{cell::{Cell, RefCell}, sync::Arc, time::{Duration, Instant}};
+//! 设置 › 助手设置 › 图像：NovelAI 生图。服务商只有 NovelAI（接口地址可以换成同协议的别的服务），API Key 只在设备钥匙串里保存、按地址分开；
+//! 模型可选 V5 和 V4.5，尺寸三种（可视化画幅选择），步数、CFG、采样器固定，种子每次随机。
+//! 下面是画风和人物（`assistant_image_prompts.rs`），「生成」里画幅与质量词，最后「测试生成」（套着现在的画风、质量词，也可带入人物试画，结果可点击全屏查看）。
+use std::{cell::{Cell, RefCell}, collections::HashSet, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 
 use futures::channel::oneshot;
 use gpui::{prelude::FluentBuilder, *};
 use serde_json::{json, Value};
 
-use crate::{app::Workspace, settings::{prefs, row_chevron, row_ink, tr}, theme::Theme, ui};
-use crate::ios::{general, glass, menu};
+use crate::{app::Workspace, settings::{prefs, row_chevron, row_ink, tr}, theme::{self, Theme}, ui};
+use crate::ios::{coveredit, general, glass, imagine, menu};
 use super::{Card, Field, Secret};
 
 pub const DEFAULT_MODEL: &str = "nai-diffusion-5-full";
@@ -22,39 +23,53 @@ const MODELS: &[Card] = &[
     ("image-model-v4-5-full", "nai-diffusion-4-5-full", "NAI V4.5", "V4.5", ("上一代完整模型", "Previous generation"), ("完整", "Full")),
     ("image-model-v4-5-curated", "nai-diffusion-4-5-curated", "NAI V4.5 Curated", "V4.5", ("上一代精选模型", "Previous generation, curated"), ("精选", "Curated")),
 ];
-/// (菜单项, 键, 名称, 宽, 高)。偏好里空的键当 2:3。
+/// (元素 id, 键, 名称, 比例文字, 宽, 高)。偏好里空的键当 2:3。
 #[allow(clippy::type_complexity)]
-const SIZES: &[(&str, &str, (&str, &str), u32, u32)] = &[
-    ("image-size-portrait", "portrait", ("竖版 2:3", "Portrait 2:3"), 832, 1216),
-    ("image-size-landscape", "landscape", ("横版 3:2", "Landscape 3:2"), 1216, 832),
-    ("image-size-square", "square", ("方形 1:1", "Square 1:1"), 1024, 1024),
+const SIZES: &[(&str, &str, (&str, &str), &str, u32, u32)] = &[
+    ("image-size-portrait", "portrait", ("竖版", "Portrait"), "2:3", 832, 1216),
+    ("image-size-landscape", "landscape", ("横版", "Landscape"), "3:2", 1216, 832),
+    ("image-size-square", "square", ("方形", "Square"), "1:1", 1024, 1024),
 ];
 const STEPS: u32 = 28;
 const SCALE: f32 = 3.5;
 const SAMPLER: &str = "k_euler_ancestral";
 const TEST_PROMPT: &str = "no humans, scenery, a quiet wooden desk by the window, morning light, books, potted plant";
+const TEST_PERSON_PROMPT: &str = "upper body, standing by a sunlit window, soft morning light, gentle smile, looking at viewer";
+const TEST_SUBJECT_SCENE: &str = "image-test-subject-scene";
+const TEST_PERSON_ITEM: &str = "image-test-person-";
 /// 质量词（正向、负向）在设置里改，默认的在 `fdl_ai::imagine::QUALITY`；和画风是两回事。
 
 #[derive(Clone)]
-enum Test { Idle, Running, Done(f32, (u32, u32), Arc<Image>), Failed(String) }
+enum Test {
+    Idle,
+    Running((u32, u32)),
+    Done { secs: f32, size: (u32, u32), meta: String, image: Arc<Image>, path: Option<PathBuf> },
+    Failed(String),
+}
 
 thread_local! {
     static KEY_SAVED: Cell<Option<bool>> = const { Cell::new(None) };
     static TEST: RefCell<Test> = const { RefCell::new(Test::Idle) };
     static TEST_RUN: Cell<u64> = const { Cell::new(0) };
     static TEST_CALL: RefCell<Option<tokio::task::AbortHandle>> = const { RefCell::new(None) };
+    /// 测试试画选中的人物 id；`None` 用固定静物场景。
+    static TEST_PERSON: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// 试画菜单里各人物的菜单项 id（要 `&'static str`，同一个人只记一份）。
+    static PERSON_ITEMS: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+    /// 测试图在窗口里的位置，点按放大全屏查看用。
+    static TEST_FRAME: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
 }
 
 fn model_of(id: &str) -> &'static Card { MODELS.iter().find(|m| m.1 == id).unwrap_or(&MODELS[0]) }
 /// 模型名对应的显示名（「NAI V5」）；不认识的原样。
 pub(crate) fn model_name(id: &str) -> &str { MODELS.iter().find(|m| m.1 == id).map_or(id, |m| m.2) }
-fn size_of(key: &str) -> &'static (&'static str, &'static str, (&'static str, &'static str), u32, u32) { SIZES.iter().find(|s| s.1 == key).unwrap_or(&SIZES[0]) }
+fn size_of(key: &str) -> &'static (&'static str, &'static str, (&'static str, &'static str), &'static str, u32, u32) { SIZES.iter().find(|s| s.1 == key).unwrap_or(&SIZES[0]) }
 
 /// 一次生图要的东西。`characters` 是各人物的分角色提示词和排除词。种子不给就随机。
 pub(crate) struct Request { pub prompt: String, pub negative: String, pub characters: Vec<(String, String)>, pub seed: Option<u32> }
 
 /// 比例的键（`SIZES`）对应的宽高；不认识的当 2:3。
-pub(crate) fn size(key: &str) -> (u32, u32) { let s = size_of(key); (s.3, s.4) }
+pub(crate) fn size(key: &str) -> (u32, u32) { let s = size_of(key); (s.4, s.5) }
 /// 偏好里的比例键（空的当 2:3）。
 pub(crate) fn size_key() -> &'static str { size_of(&prefs().image_size).1 }
 
@@ -62,7 +77,7 @@ pub(crate) fn size_key() -> &'static str { size_of(&prefs().image_size).1 }
 pub(crate) fn current() -> (&'static str, (u32, u32)) {
     let p = prefs();
     let s = size_of(&p.image_size);
-    (model_of(&p.image_model).1, (s.3, s.4))
+    (model_of(&p.image_model).1, (s.4, s.5))
 }
 
 /// 请求体。V4.5 和 V5 都要 V4 的 `v4_prompt` / `v4_negative_prompt` 结构（缺了服务端回 500）；`params_version` V5 是 4，V4.5 是 3。
@@ -146,6 +161,33 @@ pub(crate) fn key() -> Option<String> { with_secret(super::read_secret) }
 
 pub fn opened() { KEY_SAVED.with(|k| k.set(with_secret(super::key_saved))); }
 
+/// 可视化画幅选择（三枚按真实长宽比缩放的微缩画框，点一下即切换）。
+fn size_picker(current_key: &str, cx: &mut Context<Workspace>) -> AnyElement {
+    let items = SIZES.iter().map(|&(id, key, label, ratio, w, h)| {
+        let on = key == current_key;
+        let max_side = w.max(h) as f32;
+        let (fw, fh) = (w as f32 / max_side * 40., h as f32 / max_side * 40.);
+        let frame_bg = if on { Theme::block_hover() } else { Theme::bg_body() };
+        let frame_border = if on { Theme::primary() } else { Theme::line_border() };
+        div().id(id).flex_1().min_w_0().py(px(12.)).px(px(6.)).rounded(px(14.))
+            .bg(if on { Theme::block_hover() } else { gpui::transparent_black() })
+            .border_2().border_color(if on { Theme::primary() } else { gpui::transparent_black() })
+            .flex().flex_col().items_center().gap(px(8.))
+            .active(|d| d.bg(Theme::fill_pressed()))
+            .child(div().h(px(44.)).flex().items_center().justify_center()
+                .child(div().w(px(fw)).h(px(fh)).rounded(px(5.)).bg(frame_bg).border_1().border_color(frame_border)
+                    .when(on, |d| d.shadow(theme::shadow_button()))
+                    .flex().items_center().justify_center()
+                    .child(div().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(if on { Theme::primary() } else { Theme::text_placeholder() }).child(ratio))))
+            .child(div().flex().flex_col().items_center().gap(px(1.))
+                .child(div().text_size(px(14.)).line_height(px(18.)).font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                    .text_color(if on { Theme::primary() } else { row_ink() }).child(tr(label.0, label.1)))
+                .child(div().text_size(px(11.)).line_height(px(15.)).text_color(Theme::text_caption()).child(format!("{w}×{h}"))))
+            .on_click(cx.listener(move |w, _, _, cx| if !on { glass::haptic(); w.set_pref(|p| p.image_size = key.into(), cx); }))
+    });
+    div().w_full().px(px(12.)).py(px(12.)).flex().items_center().gap(px(6.)).children(items).into_any_element()
+}
+
 pub fn page(cx: &mut Context<Workspace>) -> AnyElement {
     let saved = KEY_SAVED.with(Cell::get);
     let status = match saved {
@@ -163,22 +205,30 @@ pub fn page(cx: &mut Context<Workspace>) -> AnyElement {
         .on_click(cx.listener(|w, _, _, cx| open_url(w, cx))).into_any_element();
     let p = prefs();
     let size = size_of(&p.image_size);
-    let items = SIZES.iter().map(|s| menu::Item::new(s.0, tr(s.2.0, s.2.1), "", 0).checked(s.1 == size.1).sub(format!("{} × {}", s.3, s.4))).collect();
-    let size_row = general::choice("image-size-choice", tr("尺寸", "Size"), format!("{} · {} × {}", tr(size.2.0, size.2.1), size.3, size.4), items);
-    div().w_full().pt(px(18.)).flex().flex_col().gap(px(32.))
+    let mut gen_rows = vec![size_picker(size.1, cx)];
+    gen_rows.extend(super::prompts::quality_rows(cx));
+    div().w_full().pt(px(18.)).pb(px(28.)).flex().flex_col().gap(px(32.))
         .child(general::titled(Some(tr("服务商连接", "Provider Connection")), vec![provider, address]))
         .child(super::model_cards("image-models", tr("图像模型", "Image Model"), MODELS, model_of(&p.image_model).1, |p, id| p.image_model = id.into(), cx))
         .child(super::prompts::styles(cx))
         .child(super::prompts::people(cx))
-        .child(general::titled(Some(tr("生成", "Generation")), std::iter::once(size_row).chain(super::prompts::quality_rows(cx)).collect()))
+        .child(general::titled(Some(tr("生成", "Generation")), gen_rows))
         .child(general::titled(None, test_rows(saved == Some(true), cx)))
         .into_any_element()
 }
 
-pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
-    let Some(s) = SIZES.iter().find(|s| s.0 == action) else { return false };
-    if prefs().image_size != s.1 { w.set_pref(|p| p.image_size = s.1.into(), cx); }
-    true
+pub fn menu_action(action: &str, cx: &mut Context<Workspace>) -> bool {
+    if action == TEST_SUBJECT_SCENE {
+        TEST_PERSON.with(|p| *p.borrow_mut() = None);
+        cx.notify();
+        return true;
+    }
+    if let Some(id) = action.strip_prefix(TEST_PERSON_ITEM) {
+        TEST_PERSON.with(|p| *p.borrow_mut() = Some(id.to_owned()));
+        cx.notify();
+        return true;
+    }
+    false
 }
 
 fn open_key(w: &mut Workspace, cx: &mut Context<Workspace>) {
@@ -233,36 +283,92 @@ fn key_result(status: i32, saved: bool) {
 
 fn seconds(s: f32) -> String { if prefs().english { format!("{s:.1} s") } else { format!("{s:.1} 秒") } }
 
-/// 测试：用现在的模型和尺寸生成一张固定内容的图，写用了多久，图放在下面；不通就用红字写服务的说法。没有 Key 时灰着。
+/// 试画可选的人物（写了外貌的才能入画）。
+fn testable_people() -> Vec<fdl_ai::imagine::Character> {
+    super::prompts::lib().characters.into_iter().filter(|c| !c.look.trim().is_empty()).collect()
+}
+
+fn person_item(id: &str) -> &'static str {
+    let key = format!("{TEST_PERSON_ITEM}{id}");
+    PERSON_ITEMS.with(|t| {
+        let mut t = t.borrow_mut();
+        if let Some(x) = t.get(key.as_str()) { return *x; }
+        let x: &'static str = Box::leak(key.into_boxed_str());
+        t.insert(x);
+        x
+    })
+}
+
+/// 当前选中的试画人物（若已被删或清空外貌则返回 `None`，回退静物场景）。
+fn selected_test_person(people: &[fdl_ai::imagine::Character]) -> Option<fdl_ai::imagine::Character> {
+    let id = TEST_PERSON.with(|p| p.borrow().clone())?;
+    people.iter().find(|c| c.id == id).cloned()
+}
+
+/// 测试：用现在的模型、尺寸、画风和质量词生成一张图（默认窗边静物，也可以选已建人物试画），
+/// 生成中用按目标比例呈现的扫光呼吸占位，生成后点击图片可全屏放大查看。没有 Key 时灰着。
 fn test_rows(saved: bool, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
     let test = TEST.with(|t| t.borrow().clone());
-    let running = matches!(test, Test::Running);
-    let action = div().id("image-test").w_full().h(px(52.)).px(px(18.)).flex().items_center()
-        .text_size(px(17.)).text_color(Theme::primary()).child(if running { tr("停止", "Stop") } else { tr("测试生成", "Test Generation") })
-        .when(!saved && !running, |d| d.opacity(0.4))
-        .when(saved || running, |d| d.active(|d| d.bg(Theme::fill_pressed()))
-            .on_click(cx.listener(move |_, _, _, cx| { glass::haptic(); if running { stop(); } else { run_test(cx); } cx.notify(); })));
+    let running = matches!(test, Test::Running(_));
+    let people = testable_people();
+    let chosen = selected_test_person(&people);
+    let subject_btn = (!people.is_empty() && !running).then(|| {
+        let mut items = vec![menu::Item::new(TEST_SUBJECT_SCENE, tr("静物场景", "Still Life"), "photo", 0).checked(chosen.is_none())];
+        for c in &people {
+            items.push(menu::Item::new(person_item(&c.id), c.name.clone(), "person", 1).checked(chosen.as_ref().is_some_and(|x| x.id == c.id)));
+        }
+        let label = chosen.as_ref().map_or_else(|| tr("静物场景", "Still Life").to_owned(), |c| c.name.clone());
+        div().relative().flex_none().h(px(30.)).px(px(10.)).rounded_full().bg(Theme::bg_body()).border_1().border_color(Theme::line_divider())
+            .flex().items_center().gap(px(4.))
+            .child(div().max_w(px(110.)).truncate().text_size(px(13.)).text_color(Theme::text_caption()).child(label))
+            .child(ui::icon("chevron-up-down", 12., row_chevron()))
+            .child(menu::button("image-test-subject", items))
+    });
+    let action = div().w_full().h(px(52.)).px(px(18.)).flex().items_center().gap(px(10.))
+        .child(div().id("image-test").flex_1().h_full().flex().items_center()
+            .text_size(px(17.)).font_weight(FontWeight::MEDIUM)
+            .text_color(if running { Theme::danger() } else { Theme::primary() })
+            .child(if running { tr("停止生成", "Stop") } else { tr("测试生成", "Test Generation") })
+            .when(!saved && !running, |d| d.opacity(0.4))
+            .when(saved || running, |d| d.active(|d| d.opacity(0.6))
+                .on_click(cx.listener(move |_, _, _, cx| { glass::haptic(); if running { stop(); } else { run_test(cx); } cx.notify(); }))))
+        .children(subject_btn);
     let mut rows = vec![action.into_any_element()];
     let (model, _) = current();
     let name = model_of(model).2;
-    let line = |meta: AnyElement| div().w_full().min_h(px(54.)).px(px(18.)).py(px(12.)).flex().items_center().gap(px(10.))
-        .child(div().flex_1().min_w_0().truncate().text_size(px(17.)).text_color(row_ink()).child(name))
+    let line = |title: String, meta: AnyElement| div().w_full().min_h(px(48.)).px(px(18.)).py(px(10.)).flex().items_center().gap(px(10.))
+        .child(div().flex_1().min_w_0().truncate().text_size(px(15.)).text_color(Theme::text_caption()).child(title))
         .child(div().flex_none().child(meta));
     match test {
         Test::Idle => {}
-        Test::Running => rows.push(line(super::preview::bars("image-test-bars", 12., Theme::text_caption())).into_any_element()),
-        Test::Done(s, (w, h), image) => {
-            // 放进 300 见方的框里。
-            let k = 300. / w.max(h) as f32;
+        Test::Running((w, h)) => {
+            let k = 260. / w.max(h) as f32;
+            let (pw, ph) = (w as f32 * k, h as f32 * k);
             rows.push(div().w_full().flex().flex_col()
-                .child(line(div().text_size(px(15.)).text_color(Theme::text_caption()).child(crate::localized_format!("可用 · {}", "OK · {}", seconds(s))).into_any_element()))
+                .child(line(name.to_owned(), div().text_size(px(14.)).text_color(Theme::text_caption()).child(tr("正在生成…", "Generating…")).into_any_element()))
                 .child(div().w_full().px(px(18.)).pb(px(18.)).flex().justify_center()
-                    .child(img(image).w(px(w as f32 * k)).h(px(h as f32 * k)).rounded(px(12.))))
+                    .child(div().relative().w(px(pw)).h(px(ph)).rounded(px(14.)).overflow_hidden().child(imagine::developing(pw, ph, 14.))))
+                .into_any_element());
+        }
+        Test::Done { secs, size: (w, h), meta, image, path } => {
+            let k = 280. / w.max(h) as f32;
+            let (pw, ph) = (w as f32 * k, h as f32 * k);
+            let view_path = path.clone();
+            rows.push(div().w_full().flex().flex_col()
+                .child(line(meta, div().text_size(px(14.)).text_color(Theme::text_caption()).child(crate::localized_format!("可用 · {}", "OK · {}", seconds(secs))).into_any_element()))
+                .child(div().w_full().px(px(18.)).pb(px(18.)).flex().justify_center()
+                    .child(div().id("image-test-preview").relative().w(px(pw)).h(px(ph)).rounded(px(14.)).overflow_hidden().shadow(theme::shadow_card())
+                        .child(img(image).size_full().rounded(px(14.)))
+                        .child(canvas(|b, _, _| TEST_FRAME.with(|f| f.set(Some(b))), |_, _, _, _| {}).absolute().inset_0())
+                        .when(view_path.is_some(), |d| d.active(|d| d.opacity(0.88)).on_click(cx.listener(move |_, _, _, _| {
+                            glass::haptic();
+                            if let (Some(p), Some(frame)) = (view_path.as_ref(), TEST_FRAME.with(Cell::get)) { coveredit::view(p, frame, 14.); }
+                        })))))
                 .into_any_element());
         }
         Test::Failed(e) => rows.push(div().w_full().flex().flex_col()
-            .child(line(div().text_size(px(15.)).text_color(Theme::danger()).child(tr("不可用", "Failed")).into_any_element()))
-            .child(div().px(px(18.)).pb(px(12.)).text_size(px(14.)).line_height(px(19.)).text_color(Theme::danger()).child(e))
+            .child(line(name.to_owned(), div().text_size(px(14.)).text_color(Theme::danger()).child(tr("不可用", "Failed")).into_any_element()))
+            .child(div().px(px(18.)).pb(px(14.)).text_size(px(14.)).line_height(px(19.)).text_color(Theme::danger()).child(e))
             .into_any_element()),
     }
     rows
@@ -272,7 +378,7 @@ fn test_rows(saved: bool, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
 fn stop() {
     TEST_RUN.with(|r| r.set(r.get() + 1));
     if let Some(call) = TEST_CALL.with(|c| c.borrow_mut().take()) { call.abort(); }
-    TEST.with(|t| if matches!(*t.borrow(), Test::Running) { *t.borrow_mut() = Test::Idle; });
+    TEST.with(|t| if matches!(*t.borrow(), Test::Running(_)) { *t.borrow_mut() = Test::Idle; });
 }
 
 fn run_test(cx: &mut Context<Workspace>) {
@@ -282,10 +388,20 @@ fn run_test(cx: &mut Context<Workspace>) {
     let (model, size) = current();
     let lib = super::prompts::lib();
     let style = lib.current_style(crate::settings::prefs().english);
-    let p = fdl_ai::imagine::assemble(style.as_ref(), &[], TEST_PROMPT, None, (lib.quality(), lib.quality_negative()));
-    let request = Request { prompt: p.base, negative: p.negative, characters: vec![], seed: None };
+    let people = testable_people();
+    let person = selected_test_person(&people);
+    let cast: Vec<&fdl_ai::imagine::Character> = person.iter().collect();
+    let prompt_text = if person.is_some() { TEST_PERSON_PROMPT } else { TEST_PROMPT };
+    let p = fdl_ai::imagine::assemble(style.as_ref(), &cast, prompt_text, None, (lib.quality(), lib.quality_negative()));
+    let request = Request { prompt: p.base, negative: p.negative, characters: p.characters.into_iter().map(|c| (c.tags, c.negative)).collect(), seed: None };
+    let mut parts = vec![model_of(model).2.to_owned()];
+    if let Some(s) = &style { parts.push(s.name.clone()); }
+    if let Some(c) = &person { parts.push(c.name.clone()); }
+    let meta = parts.join(" · ");
+    // 上一张的临时文件不要了。
+    TEST.with(|t| if let Test::Done { path: Some(p), .. } = &*t.borrow() { let _ = std::fs::remove_file(p); });
     let started = Instant::now();
-    TEST.with(|t| *t.borrow_mut() = Test::Running);
+    TEST.with(|t| *t.borrow_mut() = Test::Running(size));
     let (tx, rx) = oneshot::channel();
     let url = endpoint();
     let call = super::llm::runtime().spawn(async move { let _ = tx.send(generate(&url, &key, model, size, &request).await); });
@@ -295,7 +411,11 @@ fn run_test(cx: &mut Context<Workspace>) {
         if TEST_RUN.with(Cell::get) != run { return; }
         TEST_CALL.with(|c| c.borrow_mut().take());
         let test = match result {
-            Ok(png) => Test::Done(started.elapsed().as_secs_f32(), size, Arc::new(Image::from_bytes(ImageFormat::Png, png))),
+            Ok(png) => {
+                let path = std::env::temp_dir().join(format!("margin-image-test-{run}.png"));
+                let saved_path = std::fs::write(&path, &png).ok().map(|()| path);
+                Test::Done { secs: started.elapsed().as_secs_f32(), size, meta, image: Arc::new(Image::from_bytes(ImageFormat::Png, png)), path: saved_path }
+            }
             Err(e) => Test::Failed(e),
         };
         TEST.with(|t| *t.borrow_mut() = test);

@@ -260,7 +260,7 @@ struct Viewer { vc: *mut AnyObject, scroll: *mut AnyObject, image: *mut AnyObjec
 thread_local! { static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) }; }
 
 /// 全屏看一张图：从 `frame`（窗口里的位置，圆角 `radius`）放大出来。封面的「视图」和生成的图（`ios::imagine`）的「视图」都用它。
-pub(super) fn view(path: &std::path::Path, frame: Bounds<Pixels>, radius: f64) {
+pub(crate) fn view(path: &std::path::Path, frame: Bounds<Pixels>, radius: f64) {
     if VIEWER.with(|v| v.borrow().is_some()) { return; }
     unsafe {
         let root = super::files::root_controller();
