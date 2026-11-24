@@ -997,6 +997,84 @@ impl Core {
         self.insert_object(InlineKind::DocLink(l.clone()))
     }
 
+    /// #标签 at the caret (over the selection); `name` without the `#`.
+    pub fn insert_tag(&mut self, name: &str) -> Option<Pos> {
+        if name.is_empty() || !name.chars().all(crate::model::tag_char) {
+            return None;
+        }
+        self.insert_object(InlineKind::Tag(name.to_string()))
+    }
+
+    /// The name of the #标签 at `p`.
+    pub fn tag_at(&self, p: Pos) -> Option<String> {
+        self.object_at(p)?.tag().map(str::to_string)
+    }
+
+    /// 替换标签: the tag at `p` becomes `name`.
+    pub fn set_tag(&mut self, p: Pos, name: &str) {
+        if self.tag_at(p).is_some() && !name.is_empty() && name.chars().all(crate::model::tag_char) {
+            self.set_object(p, InlineKind::Tag(name.to_string()));
+        }
+    }
+
+    /// 转为文本: the tag at `p` becomes the plain text `#名字`, keeping its
+    /// styles (one undo step). The caret lands after it.
+    pub fn tag_to_text(&mut self, p: Pos) -> bool {
+        let Some(name) = self.tag_at(p) else { return false };
+        let Some(mut marks) = self.text_of(p.block).map(|t| t.marks_at(p.offset + EQUATION.len())) else { return false };
+        marks.inline = None;
+        self.sel = Selection::caret(p);
+        self.checkpoint(EditKind::Other);
+        self.break_coalescing();
+        let mut ins = RichText::default();
+        ins.push(&format!("#{name}"), marks);
+        let len = ins.text.len();
+        let Some(t) = self.text_mut(p.block) else { return false };
+        t.replace(p.offset..p.offset + EQUATION.len(), &ins);
+        self.sel = Selection::caret(Pos::new(p.block, p.offset + len));
+        true
+    }
+
+    /// The plain `#名字` that ends at `p`, if it may become a tag: the `#`
+    /// starts the block or follows a space or an object, and the name has at
+    /// least one character. Not in the title or in code.
+    pub fn tag_before(&self, p: Pos) -> Option<(std::ops::Range<usize>, String)> {
+        if p.block == TITLE || self.is_code(p.block) {
+            return None;
+        }
+        let t = self.text_of(p.block)?;
+        let head = t.text.get(..p.offset)?;
+        let start = head.rfind('#')?;
+        let name = &head[start + 1..];
+        let free = head[..start].chars().next_back().is_none_or(|c| c.is_whitespace() || c == '\u{fffc}');
+        (free && !name.is_empty() && name.chars().all(crate::model::tag_char)).then(|| (start..p.offset, name.to_string()))
+    }
+
+    /// Turn the plain `#名字` that ends at `end` into a tag (one undo step).
+    /// A caret behind it in the same block stays behind the same text (the
+    /// space just typed after the name). Nothing happens with a selection.
+    pub fn convert_tag_ending_at(&mut self, end: Pos) -> bool {
+        let caret = self.sel.head;
+        if self.sel.anchor != caret {
+            return false;
+        }
+        let Some((range, name)) = self.tag_before(end) else { return false };
+        self.sel = Selection { anchor: Pos::new(end.block, range.start), head: Pos::new(end.block, range.end) };
+        if self.insert_tag(&name).is_none() {
+            self.sel = Selection::caret(caret);
+            return false;
+        }
+        if caret.block == end.block && caret.offset >= range.end {
+            self.sel = Selection::caret(Pos::new(caret.block, caret.offset - range.len() + EQUATION.len()));
+        }
+        true
+    }
+
+    /// The same for the `#名字` right before the caret (Enter after it).
+    pub fn convert_tag_before_caret(&mut self) -> bool {
+        self.convert_tag_ending_at(self.sel.head)
+    }
+
     fn insert_object(&mut self, kind: InlineKind) -> Option<Pos> {
         self.checkpoint(EditKind::Other);
         self.break_coalescing();

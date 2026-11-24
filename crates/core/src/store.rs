@@ -277,6 +277,8 @@ pub struct Entry {
     pub reminders: Vec<crate::model::InlineReminder>,
     /// Its @文档 mentions, for the 反向引用 of the documents they point at.
     pub links: Vec<crate::model::DocLink>,
+    /// Its #标签 and how many times each occurs.
+    pub tags: Vec<(String, usize)>,
 }
 
 #[path = "store_v4.rs"]
@@ -306,7 +308,7 @@ pub struct Store {
 
 /// The parts of an `Entry` that come from the document file.
 #[derive(Clone)]
-struct Parsed { title: String, icon: Option<String>, body: std::sync::Arc<str>, reminders: Vec<crate::model::InlineReminder>, links: Vec<crate::model::DocLink> }
+struct Parsed { title: String, icon: Option<String>, body: std::sync::Arc<str>, reminders: Vec<crate::model::InlineReminder>, links: Vec<crate::model::DocLink>, tags: Vec<(String, usize)> }
 
 /// One write to the indexes: several copies of the app may share a library
 /// (builds tested side by side), so this is a short mutex, not a
@@ -676,7 +678,7 @@ impl Store {
                         dirty = true;
                     }
                     let doc = self.parse_doc(&id, &xml).unwrap_or_default();
-                    let parsed = Parsed { title: doc.title.text.clone(), icon: doc.icon.clone(), body: doc.plain_text().into(), reminders: doc.reminders(), links: doc.doc_links() };
+                    let parsed = Parsed { title: doc.title.text.clone(), icon: doc.icon.clone(), body: doc.plain_text().into(), reminders: doc.reminders(), links: doc.doc_links(), tags: doc.tags() };
                     if let Some((t, len)) = stamp { self.parsed.insert(id.clone(), (t, len, parsed.clone())); }
                     parsed
                 }
@@ -691,17 +693,17 @@ impl Store {
                     .unwrap_or_else(now);
                 Meta { created: m, modified: m, ..Default::default() }
             });
-            let Parsed { mut title, icon, body, reminders, links } = parsed;
+            let Parsed { mut title, icon, body, reminders, links, tags } = parsed;
             if meta.markdown { title = self.markdown_title(&id); }
             let meta = self.index[&id].clone();
-            out.push(Entry { download: DownloadState::Ready, id, meta, title, icon, body, reminders, links });
+            out.push(Entry { download: DownloadState::Ready, id, meta, title, icon, body, reminders, links, tags });
         }
         // Folders in id order: the index is a HashMap, whose order changes every time it is re-read.
         let mut folders: Vec<(&String, &Meta)> = self.index.iter().filter(|(_, m)| m.folder.is_some()).collect();
         folders.sort_by(|a, b| a.0.cmp(b.0));
         for (id, meta) in folders {
             let title = meta.folder.clone().unwrap_or_default();
-            out.push(Entry { download: DownloadState::Ready, id: id.clone(), meta: meta.clone(), title, icon: meta.folder_icon.clone(), body: Default::default(), reminders: vec![], links: vec![] });
+            out.push(Entry { download: DownloadState::Ready, id: id.clone(), meta: meta.clone(), title, icon: meta.folder_icon.clone(), body: Default::default(), reminders: vec![], links: vec![], tags: vec![] });
         }
         let seen: std::collections::HashSet<&str> = out.iter().map(|e| e.id.as_str()).collect();
         self.parsed.retain(|id, _| seen.contains(id.as_str()));
@@ -1017,7 +1019,7 @@ impl Store {
             let doc = if t.meta.folder.is_some() { None } else { self.load_trashed(id).ok() };
             let title = t.meta.folder.clone().or_else(|| t.meta.name.clone()).or_else(|| doc.as_ref().map(|d| d.title.text.clone())).unwrap_or_default();
             let icon = t.meta.folder_icon.clone().or_else(|| doc.as_ref().and_then(|d| d.icon.clone()));
-            Entry { download: Default::default(), id: id.clone(), meta: t.meta.clone(), title, icon, body: "".into(), reminders: vec![], links: vec![] }
+            Entry { download: Default::default(), id: id.clone(), meta: t.meta.clone(), title, icon, body: "".into(), reminders: vec![], links: vec![], tags: vec![] }
         }).collect()
     }
 

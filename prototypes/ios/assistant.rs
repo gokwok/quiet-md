@@ -120,7 +120,7 @@ pub(super) fn model_cards(id: &'static str, title: &'static str, cards: &'static
 pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
     if action.starts_with("text-") { return text::menu_action(action, w, cx); }
     if action.starts_with("tavern-") { return writing::menu_action(action, w, cx); }
-    if action.starts_with("image-") { return image::menu_action(action, cx) || prompts::menu_action(action, w, cx); }
+    if action.starts_with("image-") { return image::menu_action(action, w, cx) || prompts::menu_action(action, w, cx); }
     if action.starts_with("speech-role-lang-") { return roles::menu_action(action, w, cx); }
     if !action.starts_with(MODEL_ACTION) { return false; }
     if let Some(&(_, id, ..)) = MODELS.iter().find(|m| m.0 == action) && prefs().speech_model != id {

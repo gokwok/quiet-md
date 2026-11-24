@@ -54,9 +54,113 @@ static void thumbnail(UIImageView *view, NSString *path, CGFloat pixels) {
 }
 // 文档面板（目录 / 任务 / 附件 / 查找）是同一张从底部升起的纸：切换分段时沿用同一个视图，只有首次出现和关闭时动画。
 static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqual:@"catalogue"]; }
-@interface QuietEditorSurface : UIVisualEffectView <UITextFieldDelegate, UITextViewDelegate, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate>
+// 设置卡片（按钮、提醒、倒计时、编号、表格尺寸、表情）：底部一张玻璃卡片，整页连同顶栏压暗，点外面、往下拖都收起。同「文档信息」（`info.rs`）。
+static BOOL cardKey(NSString *key) { return [@[@"button",@"reminder",@"countdown",@"number",@"size",@"emoji"] containsObject:key]; }
+static UIColor *rgb(NSArray *c) { return [UIColor colorWithRed:[c[0] doubleValue] green:[c[1] doubleValue] blue:[c[2] doubleValue] alpha:c.count > 3 ? [c[3] doubleValue] : 1]; }
+static void rule(UIView *row, CGFloat w, CGFloat h) {
+    UIView *line = [[UIView alloc] initWithFrame:CGRectMake(0,h-1.0/3,w,1.0/3)]; line.backgroundColor = UIColor.separatorColor; [row addSubview:line];
+}
+// 表格尺寸：手指在格子上拖，划到哪格选到哪格，抬手插入；抬手时在外面就不插。
+@interface QuietSizeGrid : UIView
+@property NSInteger rows, cols, r, c;
+@property UILabel *tally;
+@property (copy) void (^picked)(NSInteger, NSInteger);
+@end
+@implementation QuietSizeGrid
+- (CGFloat)pitch { return (self.bounds.size.width+6)/self.cols; }
+- (void)drawRect:(CGRect)rect {
+    CGFloat p = [self pitch];
+    for (NSInteger i=0;i<self.rows;i++) for (NSInteger j=0;j<self.cols;j++) {
+        [(i<self.r && j<self.c ? [self.tintColor colorWithAlphaComponent:0.75] : UIColor.tertiarySystemFillColor) setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(j*p,i*p,p-6,p-6) cornerRadius:7] fill];
+    }
+}
+- (void)pick:(UITouch *)touch {
+    CGPoint at = [touch locationInView:self]; CGFloat p = [self pitch]; NSInteger r = 0, c = 0;
+    if (CGRectContainsPoint(CGRectInset(self.bounds,-14,-14),at)) { r = MIN(self.rows,MAX(1,(NSInteger)(at.y/p)+1)); c = MIN(self.cols,MAX(1,(NSInteger)(at.x/p)+1)); }
+    if (r == self.r && c == self.c) return;
+    self.r = r; self.c = c; self.tally.text = r ? [NSString stringWithFormat:@"%ld x %ld",(long)c,(long)r] : @""; [self setNeedsDisplay];
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self pick:touches.anyObject]; }
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self pick:touches.anyObject]; }
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self pick:touches.anyObject]; if (self.r && self.picked) self.picked(self.r,self.c); }
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { self.r = self.c = 0; self.tally.text = @""; [self setNeedsDisplay]; }
+@end
+// 表情：一格一个字的网格，分组标题吸顶；底下一排分类，跟着滚动走。
+@interface QuietEmojiGrid : UIView <UICollectionViewDataSource, UICollectionViewDelegate>
+@property UICollectionView *grid;
+@property NSArray<NSDictionary *> *sections;
+@property NSArray<NSString *> *symbols;
+@property UIStackView *bar;
+@property NSInteger current;
+@property (copy) void (^picked)(NSInteger, NSInteger);
+@end
+@implementation QuietEmojiGrid
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    UICollectionViewFlowLayout *flow = [UICollectionViewFlowLayout new]; flow.minimumInteritemSpacing = 0; flow.minimumLineSpacing = 0; flow.sectionHeadersPinToVisibleBounds = NO;
+    self.grid = [[UICollectionView alloc] initWithFrame:CGRectZero collectionViewLayout:flow]; self.grid.backgroundColor = UIColor.clearColor;
+    self.grid.dataSource = self; self.grid.delegate = self; self.grid.showsVerticalScrollIndicator = NO; self.grid.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    self.grid.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [self.grid registerClass:UICollectionViewCell.class forCellWithReuseIdentifier:@"e"];
+    [self.grid registerClass:UICollectionReusableView.class forSupplementaryViewOfKind:UICollectionElementKindSectionHeader withReuseIdentifier:@"h"];
+    [self addSubview:self.grid];
+    self.bar = [UIStackView new]; self.bar.distribution = UIStackViewDistributionFillEqually; [self addSubview:self.bar];
+    return self;
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    BOOL bar = self.sections.count > 1; CGFloat foot = bar ? 44 : 0, w = self.bounds.size.width;
+    self.bar.hidden = !bar; self.bar.frame = CGRectMake(0,self.bounds.size.height-foot,w,foot);
+    self.grid.frame = CGRectMake(0,0,w,self.bounds.size.height-foot);
+    CGFloat side = floor(w/8); ((UICollectionViewFlowLayout *)self.grid.collectionViewLayout).itemSize = CGSizeMake(side,side);
+}
+- (void)show:(NSArray *)sections symbols:(NSArray *)symbols {
+    if ([self.sections isEqual:sections]) return;
+    self.sections = sections; [self.grid reloadData]; self.grid.contentOffset = CGPointZero; self.current = 0;
+    for (UIView *v in self.bar.arrangedSubviews.copy) [v removeFromSuperview];
+    __weak QuietEmojiGrid *weak = self;
+    if (sections.count > 1) for (NSUInteger i=0;i<symbols.count && i<sections.count;i++) {
+        UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+        [b setImage:[UIImage systemImageNamed:symbols[i] withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:16 weight:UIImageSymbolWeightRegular]] forState:UIControlStateNormal];
+        b.accessibilityLabel = sections[i][@"title"];
+        [b addAction:[UIAction actionWithHandler:^(__unused UIAction *a) {
+            CGRect head = [weak.grid layoutAttributesForSupplementaryElementOfKind:UICollectionElementKindSectionHeader atIndexPath:[NSIndexPath indexPathForItem:0 inSection:i]].frame;
+            CGFloat end = MAX(0,weak.grid.contentSize.height-weak.grid.bounds.size.height);
+            [weak.grid setContentOffset:CGPointMake(0,MIN(head.origin.y,end)) animated:YES];
+        }] forControlEvents:UIControlEventTouchUpInside];
+        [self.bar addArrangedSubview:b];
+    }
+    [self mark]; [self setNeedsLayout];
+}
+- (void)mark {
+    [self.bar.arrangedSubviews enumerateObjectsUsingBlock:^(UIView *v, NSUInteger i, __unused BOOL *stop) { v.tintColor = (NSInteger)i == self.current ? UIColor.labelColor : UIColor.tertiaryLabelColor; }];
+}
+- (void)scrollViewDidScroll:(UIScrollView *)view {
+    NSIndexPath *at = [self.grid indexPathForItemAtPoint:CGPointMake(8,view.contentOffset.y+40)];
+    if (at && at.section != self.current) { self.current = at.section; [self mark]; }
+}
+- (NSInteger)numberOfSectionsInCollectionView:(UICollectionView *)v { return (NSInteger)self.sections.count; }
+- (NSInteger)collectionView:(UICollectionView *)v numberOfItemsInSection:(NSInteger)s { return (NSInteger)[self.sections[s][@"items"] count]; }
+- (CGSize)collectionView:(UICollectionView *)v layout:(UICollectionViewLayout *)l referenceSizeForHeaderInSection:(NSInteger)s { return CGSizeMake(v.bounds.size.width,[self.sections[s][@"title"] length] ? 32 : 4); }
+- (UICollectionViewCell *)collectionView:(UICollectionView *)v cellForItemAtIndexPath:(NSIndexPath *)p {
+    UICollectionViewCell *cell = [v dequeueReusableCellWithReuseIdentifier:@"e" forIndexPath:p];
+    UILabel *label = [cell.contentView viewWithTag:7];
+    if (!label) { label = [[UILabel alloc] initWithFrame:cell.contentView.bounds]; label.tag = 7; label.autoresizingMask = 18; label.font = [UIFont systemFontOfSize:28]; label.textAlignment = NSTextAlignmentCenter; [cell.contentView addSubview:label]; }
+    label.text = self.sections[p.section][@"items"][p.item]; return cell;
+}
+- (UICollectionReusableView *)collectionView:(UICollectionView *)v viewForSupplementaryElementOfKind:(NSString *)kind atIndexPath:(NSIndexPath *)p {
+    UICollectionReusableView *head = [v dequeueReusableSupplementaryViewOfKind:kind withReuseIdentifier:@"h" forIndexPath:p];
+    UILabel *label = [head viewWithTag:7];
+    if (!label) { label = [[UILabel alloc] initWithFrame:CGRectMake(6,0,v.bounds.size.width-12,32)]; label.tag = 7; label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote]; label.textColor = UIColor.secondaryLabelColor; [head addSubview:label]; }
+    label.text = self.sections[p.section][@"title"]; return head;
+}
+- (void)collectionView:(UICollectionView *)v didSelectItemAtIndexPath:(NSIndexPath *)p { if (self.picked) self.picked(p.section,p.item); }
+@end
+@interface QuietEditorSurface : UIVisualEffectView <UIPickerViewDataSource, UIPickerViewDelegate, UITextFieldDelegate, UITextViewDelegate, UITableViewDataSource, UITableViewDelegate, UIGestureRecognizerDelegate>
 @property NSString *key;
 @property BOOL sheet;
+@property BOOL card;
 @property CGFloat inset;
 @property BOOL pulled;
 @property BOOL fromList;
@@ -67,6 +171,7 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
 @property UIScrollView *scroll;
 @property NSArray<NSDictionary *> *rows;
 @property NSMutableDictionary<NSString *, UIView *> *fields;
+@property NSMutableDictionary<NSString *, NSDictionary *> *lastFields;
 @property NSMutableArray<UIView *> *lines;
 @property NSString *model;
 @property UITableView *list;
@@ -116,7 +221,7 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
             UITextView *t = [[QuietSourceView alloc] initWithFrame:CGRectZero textContainer:nil]; t.textContainerInset = UIEdgeInsetsMake(8,36,12,10); t.delegate = self;
             t.font = [UIFont monospacedSystemFontOfSize:16 weight:UIFontWeightRegular]; t.text = r[@"value"]; view = t;
         } else {
-            UITextField *t = [UITextField new]; t.delegate = self; t.placeholder = key; t.text = r[@"value"];
+            UITextField *t = [UITextField new]; t.delegate = self; t.placeholder = r[@"hint"] ?: key; t.text = r[@"value"];
             t.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
             t.leftView = [[UIView alloc] initWithFrame:CGRectMake(0,0,12,1)]; t.leftViewMode = UITextFieldViewModeAlways;
             if ([self.key isEqual:@"find"]) {
@@ -124,6 +229,11 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
                 glyph.tintColor=UIColor.secondaryLabelColor; glyph.contentMode=UIViewContentModeCenter; glyph.frame=CGRectMake(4,0,32,36);
                 UIView *lead=[[UIView alloc] initWithFrame:CGRectMake(0,0,38,36)]; [lead addSubview:glyph];
                 t.leftView=lead; t.clearButtonMode=UITextFieldViewModeWhileEditing;
+            }
+            if (r[@"label"]) {
+                // 卡片里的一行：左边是名字，右边输入，底下一道分隔线。
+                UIView *lead = [[UIView alloc] initWithFrame:CGRectMake(0,0,104,52)]; UILabel *name = [[UILabel alloc] initWithFrame:CGRectMake(0,0,104,52)];
+                name.text = r[@"label"]; name.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody]; [lead addSubview:name]; t.leftView = lead; t.clearButtonMode = UITextFieldViewModeWhileEditing;
             }
             [t addTarget:self action:@selector(changed:) forControlEvents:UIControlEventEditingChanged]; view = t;
         }
@@ -134,15 +244,26 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
             input.autocapitalizationType = UITextAutocapitalizationTypeNone; input.autocorrectionType = UITextAutocorrectionTypeNo;
             input.smartQuotesType = UITextSmartQuotesTypeNo; input.smartDashesType = UITextSmartDashesTypeNo;
         }
-        view.backgroundColor = [r[@"multi"] boolValue] ? UIColor.secondarySystemBackgroundColor : UIColor.secondarySystemFillColor; view.layer.cornerRadius = 12;
+        view.backgroundColor = [r[@"multi"] boolValue] ? UIColor.secondarySystemBackgroundColor : (self.card ? UIColor.quaternarySystemFillColor : UIColor.secondarySystemFillColor); view.layer.cornerRadius = 12;
+        if (r[@"label"]) { view.backgroundColor = UIColor.clearColor; if ([r[@"rule"] boolValue]) rule(view,[r[@"width"] doubleValue],52); }
+        if ([r[@"plain"] boolValue] || [r[@"url"] boolValue]) {
+            UITextField *t = (id)view; t.autocapitalizationType = UITextAutocapitalizationTypeNone; t.autocorrectionType = UITextAutocorrectionTypeNo;
+            t.smartQuotesType = UITextSmartQuotesTypeNo; t.smartDashesType = UITextSmartDashesTypeNo; if ([r[@"url"] boolValue]) t.keyboardType = UIKeyboardTypeURL;
+        }
         self.fields[key] = view; [self.scroll addSubview:view];
         if ([r[@"focus"] boolValue]) { [view becomeFirstResponder];
-            if ([self.key isEqual:@"equation"] || [self.key isEqual:@"find"]) [(UIResponder *)view selectAll:nil]; }
+            if ([self.key isEqual:@"equation"] || [self.key isEqual:@"find"] || [r[@"select"] boolValue]) [(UIResponder *)view selectAll:nil]; }
+    }
+    // 输入框里的字被编辑器改了（换「执行操作」时默认文字跟着换）：跟上。正在组字、自己刚打的不动。
+    if (self.card && [view isKindOfClass:UITextField.class]) {
+        UITextField *t = (id)view; NSDictionary *before = self.lastFields[key];
+        if (before && ![before[@"value"] isEqual:r[@"value"]] && !t.markedTextRange && ![t.text isEqual:r[@"value"]]) t.text = r[@"value"];
+        self.lastFields[key] = r;
     }
     view.tag = i; return view;
 }
 - (UIView<UITextInput> *)focusedInput {
-    for (UIView *v in self.fields.allValues) if (v.isFirstResponder) return (id)v;
+    for (UIView *v in self.fields.allValues) if (v.isFirstResponder && [v conformsToProtocol:@protocol(UITextInput)]) return (id)v;
     return nil;
 }
 - (NSArray<UIKeyCommand *> *)keyCommands {
@@ -186,7 +307,7 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
     // 同一 group 的选项放进一段，段与段之间是系统分隔线。
     NSMutableArray *sections = [NSMutableArray array], *actions = nil; id group = nil;
     for (NSDictionary *child in children) {
-        if (!actions || ![child[@"group"] isEqual:group]) { actions = [NSMutableArray array]; [sections addObject:actions]; group = child[@"group"]; }
+        if (!actions || !(child[@"group"] == group || [child[@"group"] isEqual:group])) { actions = [NSMutableArray array]; [sections addObject:actions]; group = child[@"group"]; }
         UIAction *a = [self action:child owner:owner]; if ([child[@"disabled"] boolValue]) a.attributes=UIMenuElementAttributesDisabled;
         a.state = [child[@"on"] boolValue] ? UIMenuElementStateOn : UIMenuElementStateOff; [actions addObject:a];
     }
@@ -234,6 +355,7 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
             c.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
             c.baseForegroundColor = UIColor.tertiaryLabelColor;
         }
+        if ([self.key hasSuffix:@"bar"]) c.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightRegular];
         if ([item[@"muted"] boolValue]) c.baseForegroundColor = UIColor.secondaryLabelColor;
         if ([item[@"menuTitle"] boolValue]) {
             // 「查找 ⌄」：文字在前，小号下箭头跟在后面。
@@ -306,6 +428,135 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
     [close addAction:[self action:item owner:close] forControlEvents:UIControlEventTouchUpInside];
     return header;
 }
+- (NSDictionary *)rowNamed:(NSString *)name {
+    for (NSDictionary *r in self.rows) if ([r[@"control"] isEqual:name]) return r;
+    return nil;
+}
+- (UIButton *)text:(NSDictionary *)item {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem]; UIFont *body = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    if ([item[@"symbol"] length]) [b setImage:[UIImage systemImageNamed:item[@"symbol"] withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:17 weight:UIImageSymbolWeightRegular]] forState:UIControlStateNormal];
+    else [b setTitle:item[@"title"] forState:UIControlStateNormal];
+    b.titleLabel.font = [item[@"primary"] boolValue] ? [UIFont systemFontOfSize:body.pointSize weight:UIFontWeightSemibold] : body;
+    b.tintColor = [item[@"primary"] boolValue] ? self.tintColor : UIColor.labelColor; b.enabled = ![item[@"disabled"] boolValue];
+    b.accessibilityLabel = item[@"title"]; b.accessibilityIdentifier = [NSString stringWithFormat:@"quiet.%@.%@",self.key,item[@"title"]];
+    [b addAction:[self action:item owner:b] forControlEvents:UIControlEventTouchUpInside]; return b;
+}
+- (UIDatePicker *)datePicker:(NSDictionary *)r style:(UIDatePickerStyle)style mode:(UIDatePickerMode)mode {
+    UIDatePicker *p = [UIDatePicker new]; p.datePickerMode = mode; p.preferredDatePickerStyle = style;
+    // 时间都按应用自己的时区算（`time::local_offset`），和正文里的提醒一致。
+    NSTimeZone *zone = [NSTimeZone timeZoneForSecondsFromGMT:[r[@"zone"] integerValue]];
+    NSCalendar *cal = [NSCalendar calendarWithIdentifier:NSCalendarIdentifierGregorian]; cal.locale = [NSLocale localeWithLocaleIdentifier:r[@"locale"]]; cal.timeZone = zone; cal.firstWeekday = 1;
+    p.calendar = cal; p.locale = cal.locale; p.timeZone = zone; return p;
+}
+- (void)show:(UIDatePicker *)p at:(NSNumber *)unix {
+    NSDate *date = [NSDate dateWithTimeIntervalSince1970:unix.doubleValue];
+    if (fabs([p.date timeIntervalSinceDate:date]) >= 1) [p setDate:date animated:NO];
+}
+// 带状态的系统控件（日期、滚轮、开关、网格、表情）按名字留着：编辑器每改一次都会重发这些行，重建会打断正在滚、正在拖的手势。
+- (UIView *)control:(NSDictionary *)r width:(CGFloat)w height:(CGFloat)h {
+    NSString *name = r[@"control"], *kind = r[@"kind"]; UIView *v = self.fields[name]; BOOL fresh = !v; __weak QuietEditorSurface *weak = self;
+    if ([kind isEqual:@"date"]) {
+        UIDatePicker *p = (id)v;
+        if (fresh) {
+            p = [self datePicker:r style:UIDatePickerStyleInline mode:[r[@"clock"] boolValue] ? UIDatePickerModeDateAndTime : UIDatePickerModeDate]; v = p;
+            [p addAction:[UIAction actionWithHandler:^(UIAction *a) { [weak send:[weak rowNamed:name][@"action"] value:[NSString stringWithFormat:@"%.0f",((UIDatePicker *)a.sender).date.timeIntervalSince1970]]; }] forControlEvents:UIControlEventValueChanged];
+        }
+        [self show:p at:r[@"value"]];
+    } else if ([kind isEqual:@"wheels"]) {
+        UIPickerView *p = (id)v; NSArray *values = r[@"value"];
+        if (fresh) { p = [UIPickerView new]; p.layer.name = name; p.dataSource = self; p.delegate = self; v = p; }
+        for (NSInteger i=0;i<(NSInteger)values.count;i++) if ([p selectedRowInComponent:i] != [values[i] integerValue]) [p selectRow:[values[i] integerValue] inComponent:i animated:NO];
+    } else if ([kind isEqual:@"switch"]) {
+        // 名字 + 开关；开着时开关左边还有一个时间（紧凑的系统时间钮）或一个下拉菜单。
+        UILabel *label; UISwitch *sw; UIDatePicker *time; UIButton *menu;
+        if (fresh) {
+            v = [UIView new]; label = [UILabel new]; label.tag = 1; label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody]; label.adjustsFontSizeToFitWidth = YES; label.minimumScaleFactor = 0.8; [v addSubview:label];
+            sw = [UISwitch new]; sw.tag = 2; [v addSubview:sw];
+            [sw addAction:[UIAction actionWithHandler:^(UIAction *a) { [weak send:[weak rowNamed:name][@"toggle"] value:((UISwitch *)a.sender).on ? @"1" : @"0"]; }] forControlEvents:UIControlEventValueChanged];
+        }
+        label = [v viewWithTag:1]; sw = [v viewWithTag:2]; time = [v viewWithTag:3]; menu = [v viewWithTag:4];
+        label.text = r[@"title"]; sw.accessibilityLabel = r[@"title"];
+        CGSize s = sw.intrinsicContentSize; sw.frame = CGRectMake(w-s.width,(h-s.height)/2,s.width,s.height);
+        if (sw.on != [r[@"on"] boolValue]) [sw setOn:[r[@"on"] boolValue] animated:!fresh];
+        CGFloat right = w-s.width-10;
+        if (r[@"time"]) {
+            if (!time) {
+                time = [self datePicker:r style:UIDatePickerStyleCompact mode:UIDatePickerModeTime]; time.tag = 3; [v addSubview:time];
+                [time addAction:[UIAction actionWithHandler:^(UIAction *a) { [weak send:[weak rowNamed:name][@"action"] value:[NSString stringWithFormat:@"%.0f",((UIDatePicker *)a.sender).date.timeIntervalSince1970]]; }] forControlEvents:UIControlEventValueChanged];
+            }
+            [self show:time at:r[@"time"]]; CGSize t = [time sizeThatFits:CGSizeMake(140,h)]; time.frame = CGRectMake(right-t.width,(h-t.height)/2,t.width,t.height); right -= t.width;
+        }
+        time.hidden = !r[@"time"];
+        if (r[@"children"]) {
+            if (!menu) { menu = [UIButton buttonWithConfiguration:UIButtonConfiguration.plainButtonConfiguration primaryAction:nil]; menu.tag = 4; menu.showsMenuAsPrimaryAction = YES; [v addSubview:menu]; }
+            [self value:menu row:r]; CGSize t = [menu sizeThatFits:CGSizeMake(220,h)]; menu.frame = CGRectMake(right-t.width,0,t.width,h); right -= t.width;
+        }
+        menu.hidden = !r[@"children"];
+        label.frame = CGRectMake(0,0,MAX(60,right-8),h);
+    } else if ([kind isEqual:@"size"]) {
+        QuietSizeGrid *g;
+        if (fresh) {
+            v = [UIView new]; UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(2,0,w-70,44)]; title.text = r[@"title"]; title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]; [v addSubview:title];
+            UILabel *count = [[UILabel alloc] initWithFrame:CGRectMake(w-72,0,70,44)]; count.textAlignment = NSTextAlignmentRight; count.textColor = UIColor.secondaryLabelColor; count.font = [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightRegular]; [v addSubview:count];
+            g = [[QuietSizeGrid alloc] initWithFrame:CGRectMake(0,48,w,w)]; g.backgroundColor = UIColor.clearColor; g.contentMode = UIViewContentModeRedraw; g.tally = count; g.rows = [r[@"rows"] integerValue]; g.cols = [r[@"cols"] integerValue]; g.tag = 5; [v addSubview:g];
+            g.picked = ^(NSInteger rr, NSInteger cc) { [weak send:[weak rowNamed:name][@"action"] value:[NSString stringWithFormat:@"%ld,%ld",(long)rr,(long)cc]]; };
+        }
+    } else if ([kind isEqual:@"emoji"]) {
+        QuietEmojiGrid *g = (id)v;
+        if (fresh) { g = [[QuietEmojiGrid alloc] initWithFrame:CGRectMake(0,0,w,h)]; v = g; g.picked = ^(NSInteger s, NSInteger i) { [weak send:[weak rowNamed:name][@"action"] value:[NSString stringWithFormat:@"%ld,%ld",(long)s,(long)i]]; }; }
+        [g show:r[@"sections"] symbols:r[@"symbols"]];
+    }
+    if (fresh) { v.accessibilityIdentifier = [NSString stringWithFormat:@"quiet.%@.%@",self.key,name]; self.fields[name] = v; [self.scroll addSubview:v]; if ([r[@"rule"] boolValue]) rule(v,w,h); }
+    return v;
+}
+// 右边的取值：字 + 小号上下箭头，点了是系统菜单。
+- (void)value:(UIButton *)b row:(NSDictionary *)r {
+    UIButtonConfiguration *c = UIButtonConfiguration.plainButtonConfiguration; c.title = r[@"value"]; c.image = [UIImage systemImageNamed:@"chevron.up.chevron.down"];
+    c.imagePlacement = NSDirectionalRectEdgeTrailing; c.imagePadding = 4; c.baseForegroundColor = UIColor.secondaryLabelColor; c.contentInsets = NSDirectionalEdgeInsetsMake(0,8,0,4);
+    c.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:11 weight:UIImageSymbolWeightMedium]; c.titleLineBreakMode = NSLineBreakByTruncatingTail;
+    b.configuration = c; b.menu = [self menu:r[@"children"] owner:b]; b.accessibilityLabel = [NSString stringWithFormat:@"%@ %@",r[@"title"],r[@"value"]];
+}
+- (NSInteger)numberOfComponentsInPickerView:(UIPickerView *)p { return (NSInteger)[[self rowNamed:p.layer.name][@"value"] count]; }
+- (NSInteger)pickerView:(UIPickerView *)p numberOfRowsInComponent:(NSInteger)c { return [[self rowNamed:p.layer.name][@"max"][c] integerValue]+1; }
+- (UIView *)pickerView:(UIPickerView *)p viewForRow:(NSInteger)row forComponent:(NSInteger)c reusingView:(UIView *)old {
+    UILabel *label = [old isKindOfClass:UILabel.class] ? (id)old : [UILabel new]; NSString *unit = [self rowNamed:p.layer.name][@"units"][c];
+    NSMutableAttributedString *s = [[NSMutableAttributedString alloc] initWithString:[NSString stringWithFormat:@"%ld",(long)row] attributes:@{NSFontAttributeName:[UIFont monospacedDigitSystemFontOfSize:21 weight:UIFontWeightRegular],NSForegroundColorAttributeName:UIColor.labelColor}];
+    [s appendAttributedString:[[NSAttributedString alloc] initWithString:[@" " stringByAppendingString:unit] attributes:@{NSFontAttributeName:[UIFont preferredFontForTextStyle:UIFontTextStyleFootnote],NSForegroundColorAttributeName:UIColor.secondaryLabelColor}]];
+    label.attributedText = s; label.textAlignment = NSTextAlignmentCenter; return label;
+}
+- (CGFloat)pickerView:(UIPickerView *)p rowHeightForComponent:(NSInteger)c { return 36; }
+- (void)pickerView:(UIPickerView *)p didSelectRow:(NSInteger)row inComponent:(NSInteger)c {
+    NSMutableArray *v = [NSMutableArray array]; for (NSInteger i=0;i<p.numberOfComponents;i++) [v addObject:@([p selectedRowInComponent:i]).stringValue];
+    [self send:[self rowNamed:p.layer.name][@"action"] value:[v componentsJoinedByString:@","]];
+}
+- (UIView *)cardBar:(NSDictionary *)r width:(CGFloat)w height:(CGFloat)h {
+    UIView *bar = [UIView new]; UILabel *title = [UILabel new]; title.text = r[@"bar"]; title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline]; title.textAlignment = NSTextAlignmentCenter;
+    title.frame = CGRectMake(76,0,w-152,h); [bar addSubview:title];
+    for (NSDictionary *item in r[@"items"]) {
+        UIButton *b = [self text:item]; CGFloat span = MAX(44,[b sizeThatFits:CGSizeMake(80,h)].width+4); BOOL right = [item[@"primary"] boolValue];
+        b.frame = CGRectMake(right ? w-span : 0,0,span,h); b.contentHorizontalAlignment = right ? UIControlContentHorizontalAlignmentTrailing : UIControlContentHorizontalAlignmentLeading; [bar addSubview:b];
+    }
+    return bar;
+}
+- (UIView *)valueRow:(NSDictionary *)r width:(CGFloat)w height:(CGFloat)h {
+    UIView *row = [UIView new]; UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0,0,w/2,h)]; label.text = r[@"title"]; label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody]; [row addSubview:label];
+    UIButton *b = [UIButton buttonWithConfiguration:UIButtonConfiguration.plainButtonConfiguration primaryAction:nil]; b.showsMenuAsPrimaryAction = YES; [self value:b row:r];
+    CGFloat span = MIN(w*0.6,[b sizeThatFits:CGSizeMake(w*0.6,h)].width); b.frame = CGRectMake(w-span,0,span,h); [row addSubview:b];
+    if ([r[@"rule"] boolValue]) rule(row,w,h);
+    return row;
+}
+- (UIView *)swatches:(NSDictionary *)r width:(CGFloat)w height:(CGFloat)h {
+    UIView *row = [UIView new]; NSArray *items = r[@"swatches"]; NSInteger per = 8; CGFloat pitch = w/per; __weak QuietEditorSurface *weak = self;
+    for (NSInteger i=0;i<(NSInteger)items.count;i++) {
+        BOOL on = [r[@"on"] integerValue] == i; UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom]; b.frame = CGRectMake((i%per)*pitch,8+(i/per)*44,pitch,44);
+        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(pitch/2-13,9,26,26)]; dot.userInteractionEnabled = NO; dot.backgroundColor = rgb(items[i]); dot.layer.cornerRadius = 13; dot.layer.borderWidth = 1.0/3; dot.layer.borderColor = UIColor.separatorColor.CGColor; [b addSubview:dot];
+        if (on) { UIView *ring = [[UIView alloc] initWithFrame:CGRectMake(pitch/2-17,5,34,34)]; ring.userInteractionEnabled = NO; ring.layer.cornerRadius = 17; ring.layer.borderWidth = 2; ring.layer.borderColor = self.tintColor.CGColor; [b addSubview:ring]; b.accessibilityTraits |= UIAccessibilityTraitSelected; }
+        b.accessibilityLabel = [NSString stringWithFormat:@"%@ %ld",r[@"title"],(long)i+1];
+        [b addAction:[UIAction actionWithHandler:^(__unused UIAction *a) { [weak send:r[@"action"] value:@(i).stringValue]; }] forControlEvents:UIControlEventTouchUpInside]; [row addSubview:b];
+    }
+    if ([r[@"rule"] boolValue]) rule(row,w,h);
+    return row;
+}
 - (void)update:(NSArray *)rows width:(CGFloat)w {
     NSArray *old = self.rows; self.rows = rows;
     CGFloat y = 6, x = self.inset;
@@ -333,19 +584,28 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
                 }
             }
         }
+        else if (r[@"control"]) { v = [self control:r width:w height:h]; [keep addObject:r[@"control"]]; }
         else if (i < (NSInteger)old.count && [old[i] isEqual:r] && prior.frame.size.width == w) v = prior;
+        else if (r[@"bar"]) v = [self cardBar:r width:w height:h];
+        else if (r[@"swatches"]) v = [self swatches:r width:w height:h];
+        else if (r[@"children"]) v = [self valueRow:r width:w height:h];
         else if (r[@"header"] && r[@"space"]) v = [self documentHeader:r width:w height:h];
         else if (r[@"header"]) {
             UIView *header = [UIView new]; BOOL source = [r[@"source"] boolValue];
             UILabel *label = [UILabel new]; label.text = r[@"header"]; label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleHeadline];
-            label.frame = CGRectMake(source ? 48 : 4,0,w-(source ? 96 : 52),h); label.textAlignment = source ? NSTextAlignmentCenter : NSTextAlignmentLeft;
+            label.frame = CGRectMake(source ? 48 : (self.card ? 0 : 4),0,w-(source ? 96 : 52),h); label.textAlignment = source ? NSTextAlignmentCenter : NSTextAlignmentLeft;
             [header addSubview:label]; NSDictionary *item = [r[@"items"] firstObject];
             UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem]; [close setImage:[UIImage systemImageNamed:source ? @"checkmark.circle.fill" : @"xmark.circle.fill"] forState:UIControlStateNormal];
             close.tintColor = source ? self.tintColor : UIColor.tertiaryLabelColor;
             [close setPreferredSymbolConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:source ? 33 : 23] forImageInState:UIControlStateNormal];
             close.accessibilityIdentifier = [@"quiet.close." stringByAppendingString:self.key];
-            close.frame = CGRectMake(w-44,(h-44)/2,44,44); close.accessibilityLabel = item[@"title"];
+            close.frame = CGRectMake(w-(self.card ? 34 : 44),(h-44)/2,44,44); close.accessibilityLabel = item[@"title"];
             [header addSubview:close]; [close addAction:[self action:item owner:close] forControlEvents:UIControlEventTouchUpInside]; v = header;
+            // 卡片的 ✕ 左边还可以有别的钮（表情的「随机」「移除」）。
+            CGFloat right = w-38;
+            for (NSDictionary *more in self.card && [r[@"items"] count] > 1 ? [r[@"items"] subarrayWithRange:NSMakeRange(1,[r[@"items"] count]-1)] : @[]) {
+                UIButton *b = [self text:more]; CGFloat span = MAX(44,[b sizeThatFits:CGSizeMake(120,h)].width+16); right -= span; b.frame = CGRectMake(right,0,span,h); [header addSubview:b];
+            }
         } else if ([r[@"style"] isEqual:@"tabs"]) {
             // 换分段时沿用原来的分段控件，iOS 26 的选中镜片才能一路滑过去。
             NSArray *items = r[@"items"]; UISegmentedControl *tabs = [prior isKindOfClass:UISegmentedControl.class] && ((UISegmentedControl *)prior).numberOfSegments == items.count ? (id)prior : nil;
@@ -375,6 +635,9 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
         if ([r[@"multi"] boolValue]) {
             v.layer.cornerRadius=0; v.frame=CGRectMake(0,y,self.bounds.size.width,h);
         } else if (r[@"field"] && self.sheet) v.frame=CGRectMake(x,y+3,w,h-6);
+        else if (r[@"label"]) v.frame=CGRectMake(x,y,w,h);
+        else if ([r[@"style"] isEqual:@"tabs"] && self.card) v.frame=CGRectMake(x,y,w,h-8);
+        else if (r[@"field"] && self.card) v.frame=CGRectMake(x,y,w,h-4);
         else if ([r[@"style"] isEqual:@"tabs"] && self.sheet) v.frame=CGRectMake(x,y+2,w,h-12);
         else if (r[@"caption"] && self.sheet) v.frame=CGRectMake(x+8,y,w-8,h);
         else v.frame = CGRectMake(x,y,w,h);
@@ -387,7 +650,7 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
     for (NSString *key in self.fields.allKeys) if (![keep containsObject:key]) {
         BOOL focused = self.fields[key].isFirstResponder;
         [self.fields[key] removeFromSuperview]; [self.fields removeObjectForKey:key];
-        if (focused && keep.count) [[self.fields objectForKey:keep.anyObject] becomeFirstResponder];
+        if (focused && keep.count) for (NSString *next in keep) if ([self.fields[next] conformsToProtocol:@protocol(UITextInput)]) { [self.fields[next] becomeFirstResponder]; break; }
     }
     if (self.sheet && (switched || self.adopted) && old) {
         // 换分段：分段控件以下的新内容淡入，列表交叉淡变。
@@ -507,6 +770,12 @@ static BOOL sheetKey(NSString *key) { return [key isEqual:@"find"] || [key isEqu
 // 下拉收起：从标题区往下拖，或列表已在顶端时往下拖，纸跟手下移；松手够远或够快就关闭，否则弹回。
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
     if (g != self.pull) return [super gestureRecognizerShouldBegin:g];
+    // 卡片里正在拖的是格子、滚轮、日历或表情，不当成往下收。
+    if (self.card) for (NSDictionary *r in self.rows) if (r[@"control"] && ![r[@"kind"] isEqual:@"switch"]) {
+        UIView *v = self.fields[r[@"control"]]; CGPoint at = [self.pull locationInView:v], moved = [self.pull translationInView:v]; at.x -= moved.x; at.y -= moved.y;
+        if ([r[@"kind"] isEqual:@"size"]) v = [v viewWithTag:5] ?: v, at = [v convertPoint:at fromView:self.fields[r[@"control"]]];
+        if ([v pointInside:at withEvent:nil]) return NO;
+    }
     CGPoint speed = [self.pull velocityInView:self];
     if (speed.y <= 0 || fabs(speed.x) > speed.y) return NO;
     UIView *list = self.list.superview ? self.list : nil;
@@ -553,9 +822,15 @@ void quiet_editor_surface(UIView *parent, const char *key, const char *model, do
             v.key = name; v.accessibilityIdentifier = [@"quiet.editor." stringByAppendingString:name]; v.adopted = YES;
         }
         if (!v) {
-            BOOL page = [@[@"find",@"catalogue",@"language",@"equation"] containsObject:name], sheet = sheetKey(name);
+            BOOL page = [@[@"find",@"catalogue",@"language",@"equation"] containsObject:name], sheet = sheetKey(name), card = cardKey(name);
             v = [[QuietEditorSurface alloc] initWithEffect:page ? nil : [UIGlassEffect effectWithStyle:UIGlassEffectStyleRegular]];
-            v.sheet = sheet; v.inset = sheet ? 16 : 10; rise = sheet;
+            v.sheet = sheet; v.card = card; v.inset = card ? 20 : (sheet ? 16 : 10); rise = sheet || card;
+            if (card) {
+                // 和「文档信息」的卡片一样垫一层纸色：底下先压暗过，字在玻璃上才清楚。
+                UIView *wash = [[UIView alloc] initWithFrame:CGRectZero]; wash.tag = 'wash'; wash.userInteractionEnabled = NO; wash.layer.cornerRadius = 30; wash.layer.cornerCurve = kCACornerCurveContinuous;
+                wash.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [(t.userInterfaceStyle == UIUserInterfaceStyleDark ? UIColor.blackColor : UIColor.whiteColor) colorWithAlphaComponent:t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.32 : 0.38]; }];
+                [v.contentView addSubview:wash];
+            }
             if (page) { v.backgroundColor = UIColor.systemBackgroundColor; v.layer.cornerRadius = sheet ? 34 : 22; v.layer.cornerCurve = kCACornerCurveContinuous; v.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner; }
             if (page) {
                 // 纸的底边停在键盘顶上；iOS 26 的键盘四角是圆的，往下垫一截同色的纸，圆角外露出的就是纸而不是后面压暗的页面（照 Craft）。
@@ -564,24 +839,30 @@ void quiet_editor_surface(UIView *parent, const char *key, const char *model, do
                 skirt.backgroundColor = UIColor.systemBackgroundColor; skirt.userInteractionEnabled = NO;
                 [v.contentView addSubview:skirt];
             }
-            if (page) {
+            if (page || card) {
                 UIControl *backdrop = [[UIControl alloc] initWithFrame:parent.bounds];
                 backdrop.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
-                backdrop.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:sheet ? 0.2 : 0.26];
+                backdrop.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:card ? (dark ? 0.4 : 0.18) : (sheet ? 0.2 : 0.26)];
                 [backdrop addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:v action:@selector(tappedBackdrop)]];
                 [parent addSubview:backdrop]; v.backdrop=backdrop;
             }
-            v.key = name; v.accessibilityIdentifier = [@"quiet.editor." stringByAppendingString:name]; v.fields = [NSMutableDictionary dictionary]; v.lines = [NSMutableArray array];
-            if (!page) v.cornerConfiguration = [UICornerConfiguration configurationWithUniformRadius:[UICornerRadius fixedRadius:22]];
+            v.key = name; v.accessibilityIdentifier = [@"quiet.editor." stringByAppendingString:name]; v.fields = [NSMutableDictionary dictionary]; v.lastFields = [NSMutableDictionary dictionary]; v.lines = [NSMutableArray array];
+            if (!page) v.cornerConfiguration = [UICornerConfiguration configurationWithUniformRadius:[UICornerRadius fixedRadius:card ? 30 : ([name hasSuffix:@"bar"] ? 24 : 22)]];
             v.scroll = [UIScrollView new]; v.scroll.keyboardDismissMode = UIScrollViewKeyboardDismissModeNone;
             v.scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
-            if (sheet) { v.pull = [[UIPanGestureRecognizer alloc] initWithTarget:v action:@selector(pulling:)]; v.pull.delegate = v; [v addGestureRecognizer:v.pull]; }
+            if (card) { v.scroll.delaysContentTouches = NO; v.scroll.showsVerticalScrollIndicator = NO; }
+            if (sheet || card) { v.pull = [[UIPanGestureRecognizer alloc] initWithTarget:v action:@selector(pulling:)]; v.pull.delegate = v; [v addGestureRecognizer:v.pull]; }
             [v.contentView addSubview:v.scroll]; [parent addSubview:v]; surfaces[name] = v;
         }
         // 用 bounds/center 摆位：升起、下拉时 transform 不是单位矩阵，frame 读回来的是变换后的值。
         BOOL resized = !CGSizeEqualToSize(v.bounds.size,CGSizeMake(width,height));
-        if (resized) { v.bounds = CGRectMake(0,0,width,height); v.scroll.frame = v.bounds; [v.contentView viewWithTag:'skrt'].frame = CGRectMake(0,height,width,1200); }
+        // 卡片换内容、让开键盘时高矮跟着动，不是跳。
+        BOOL glide = v.card && resized && !rise;
         CGPoint center = CGPointMake(x+width/2,y+height/2);
+        if (glide) [UIView animateWithSpringDuration:0.35 bounce:0 initialSpringVelocity:0 delay:0 options:UIViewAnimationOptionAllowUserInteraction|UIViewAnimationOptionBeginFromCurrentState animations:^{
+            v.bounds = CGRectMake(0,0,width,height); v.scroll.frame = v.bounds; v.center = center; [v.contentView viewWithTag:'wash'].frame = v.bounds;
+        } completion:nil];
+        else if (resized) { v.bounds = CGRectMake(0,0,width,height); v.scroll.frame = v.bounds; [v.contentView viewWithTag:'wash'].frame = v.bounds; [v.contentView viewWithTag:'skrt'].frame = CGRectMake(0,height,width,1200); }
         if (!CGPointEqualToPoint(v.center,center)) v.center = center;
         UIUserInterfaceStyle style = dark ? UIUserInterfaceStyleDark : UIUserInterfaceStyleLight;
         if (v.overrideUserInterfaceStyle != style) v.overrideUserInterfaceStyle = style;
@@ -606,7 +887,7 @@ void quiet_editor_surface(UIView *parent, const char *key, const char *model, do
 void quiet_hide_editor_surface(const char *key) {
     NSString *name = @(key); QuietEditorSurface *v = surfaces[name]; if (!v) return;
     [surfaces removeObjectForKey:name]; UIControl *backdrop = v.backdrop;
-    if (!v.sheet || !v.window) { [backdrop removeFromSuperview]; [v removeFromSuperview]; return; }
+    if (!(v.sheet || v.card) || !v.window) { [backdrop removeFromSuperview]; [v removeFromSuperview]; return; }
     // 收起：先交出焦点，纸从当前位置滑到底下，压暗同时淡出，结束后再移除。
     v.userInteractionEnabled = NO; backdrop.userInteractionEnabled = NO; v.pulled = NO; [v endEditing:YES];
     [UIView animateWithSpringDuration:0.4 bounce:0 initialSpringVelocity:0 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{

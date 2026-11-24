@@ -85,7 +85,7 @@ DocxXML 是飞书 / Lark 的文档 XML 格式。`crates/core/tests/fixtures/all-
 
 - 只丢掉**源码排版产生的空白**：一个换行加缩进，以及嵌套 block 前面的空格和 Tab。其余空白都是内容，例如 `<p> </p>` 保留那个空格。
 - 不认识的元素原样保留，写出时原样输出：block 级的是 `BlockKind::Raw`。
-- 行内对象（公式、文件、按钮、日期提醒、@文档，以及不认识的行内元素）在文本里各占一个 U+FFFC，样式里存一个 `Inline { kind, xml }`：
+- 行内对象（公式、文件、按钮、日期提醒、@文档、#标签，以及不认识的行内元素）在文本里各占一个 U+FFFC，样式里存一个 `Inline { kind, xml }`：
   - `xml` 是读入时的原文，写出时原样输出，所以不认识的属性也不会丢；
   - `kind` 是读入时解析出来的类型，视图和导出只看它。
   - 编辑器新建或修改对象时，经 `docxml::to_inline` 先拼出规范 XML 再读回一遍，两者始终一致，存盘再读回也不变。
@@ -96,6 +96,7 @@ DocxXML 里没有、本应用自己加的写法。别的工具不认识这些写
 
 - `<countdown duration start-time notify color timing/>`：倒计时。云端的倒计时是小组件，不在 DocxXML 里。
 - `<page>标题<p>…</p></page>`、`<page view="card">…</page>`：页面 / 卡片（`BlockKind::Page`）。和 `<p>` 一样先是标题文字，后面是这一页的 block；子页面就存在这篇文档里，不是文档库里的另一篇。读入时页面总是折叠（内容只在打开这一页时显示），文件里不写 `folded`。导出 Markdown 时标题加粗，内容缩进在下面。
+- `<cite type="tag">#名字</cite>`：#标签（`InlineKind::Tag`，名字不含 `#`）。文字内容就是看到的 `#名字`，导出和不认识它的版本显示的也是这几个字；名字只能是字母、数字、`_`、`-`，不合规的当未知行内元素原样留着。
 - `<time … is-whole-day="true">`：全天提醒。模型里有 `isWholeDay`，但 XML 里没有这个属性。没有此属性、且时间是本地 23:59 的提醒，也按全天处理。
 - 图片和附件的本地文件写成 `path="…"`（云端用 `token` / `href`）。`<figure><source path=… name=…/></figure>` 表示视频或文件。
 

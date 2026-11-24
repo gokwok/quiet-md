@@ -111,36 +111,7 @@ impl Editor {
             p.row(text("文本颜色"),"textformat",|e,_,cx| {e.menu=Some(Menu::Color);cx.notify();});
         }
         if matches!(self.menu,Some(Menu::Color | Menu::CellBg)) {
-            let cell_bg = matches!(self.menu,Some(Menu::CellBg));
-            let (ink,bg) = self.current_colors();
-            if !cell_bg {
-                p.caption(text("字体颜色"));
-                let mut dots = vec![];
-                for &(name,_) in &theme::FONT_COLORS {
-                    let on = ink.as_ref().map(|n|n.0.as_str()) == name;
-                    let item = p.button(name.unwrap_or(text("默认")),"",move |e,w,cx| e.apply_color(Some(name.filter(|_| !on).map(|n|ColorName(n.into()))),None,w,cx));
-                    dots.push(dot(item,Some(name.and_then(theme::text_color).unwrap_or_else(theme::Theme::text)),on));
-                }
-                p.line(dots);
-            }
-            p.caption(text(if cell_bg { "单元格背景颜色" } else { "背景颜色" }));
-            let bg = if cell_bg { self.core.first_selected_cell().and_then(|c|c.bg.clone()) } else { bg };
-            let names: &[Option<&str>] = if cell_bg { &theme::CELL_BG_COLORS } else { &theme::BG_COLORS };
-            for group in names.chunks(8) {
-                let mut dots = vec![];
-                for &name in group {
-                    let on = bg.as_ref().map(|c|theme::bg_canon(&c.0)) == name;
-                    let item = p.button(name.unwrap_or(text("默认")),"",move |e,w,cx| {
-                        let value = name.map(|n|ColorName(n.into()));
-                        if cell_bg { e.core.table_set_bg(value); e.changed(w,cx); } else { e.apply_color(None,Some(value.filter(|_| !on)),w,cx); }
-                        e.menu = None; cx.notify();
-                    });
-                    dots.push(dot(item,name.and_then(if cell_bg {theme::bg_swatch} else {theme::bg_color}),on));
-                }
-                p.line(dots);
-            }
-            let reset = p.button(text("恢复默认"),"",move |e,w,cx| { if cell_bg { e.core.table_set_bg(None); e.changed(w,cx); } else { e.apply_color(Some(None),Some(None),w,cx); } e.menu = None; cx.notify(); });
-            let done = p.button(tr("完成","Done"),"",|e,_,cx| { e.menu = None; cx.notify(); }); p.line(vec![reset,done]);
+            self.color_rows(&mut p);
         }
 
         // 换面板或选区时把当前格露在面板上方。之后仍能自由滚动正文。
@@ -156,6 +127,39 @@ impl Editor {
             }
         }
         self.native_sheet("selection",p,window,cx)
+    }
+    /// 颜色：字体颜色、背景颜色（或单元格背景）、恢复默认、完成。
+    pub(super) fn color_rows(&self, p: &mut Surface) {
+        let cell_bg = matches!(self.menu,Some(Menu::CellBg));
+        let (ink,bg) = self.current_colors();
+        if !cell_bg {
+            p.caption(text("字体颜色"));
+            let mut dots = vec![];
+            for &(name,_) in &theme::FONT_COLORS {
+                let on = ink.as_ref().map(|n|n.0.as_str()) == name;
+                let item = p.button(name.unwrap_or(text("默认")),"",move |e,w,cx| e.apply_color(Some(name.filter(|_| !on).map(|n|ColorName(n.into()))),None,w,cx));
+                dots.push(dot(item,Some(name.and_then(theme::text_color).unwrap_or_else(theme::Theme::text)),on));
+            }
+            p.line(dots);
+        }
+        p.caption(text(if cell_bg { "单元格背景颜色" } else { "背景颜色" }));
+        let bg = if cell_bg { self.core.first_selected_cell().and_then(|c|c.bg.clone()) } else { bg };
+        let names: &[Option<&str>] = if cell_bg { &theme::CELL_BG_COLORS } else { &theme::BG_COLORS };
+        for group in names.chunks(8) {
+            let mut dots = vec![];
+            for &name in group {
+                let on = bg.as_ref().map(|c|theme::bg_canon(&c.0)) == name;
+                let item = p.button(name.unwrap_or(text("默认")),"",move |e,w,cx| {
+                    let value = name.map(|n|ColorName(n.into()));
+                    if cell_bg { e.core.table_set_bg(value); e.changed(w,cx); } else { e.apply_color(None,Some(value.filter(|_| !on)),w,cx); }
+                    e.menu = None; cx.notify();
+                });
+                dots.push(dot(item,name.and_then(if cell_bg {theme::bg_swatch} else {theme::bg_color}),on));
+            }
+            p.line(dots);
+        }
+        let reset = p.button(text("恢复默认"),"",move |e,w,cx| { if cell_bg { e.core.table_set_bg(None); e.changed(w,cx); } else { e.apply_color(Some(None),Some(None),w,cx); } e.menu = None; cx.notify(); });
+        let done = p.button(tr("完成","Done"),"",|e,_,cx| { e.menu = None; cx.notify(); }); p.line(vec![reset,done]);
     }
     pub(super) fn native_sheet(&self,key:&'static str,p:Surface,window:&Window,cx:&Context<Self>) -> AnyElement {
         let h = crate::ios::visible_height(window) - px(crate::ios::doc_top()+24.);
@@ -246,7 +250,7 @@ impl Editor {
         let button = |id: &'static str,glyph: &'static str,on:bool| div().id(id).flex_none().w(width / 8.).h(px(44.)).flex().items_center().justify_center()
             .active(|s| s.bg(Theme::fill_pressed())).child(crate::editor_ui::icon(glyph,19.,if on { Theme::primary() } else { Theme::text() }));
         let more = |glyph,id,m:Menu| button(id,glyph,false).on_mouse_down(MouseButton::Left,cx.listener(move |ed:&mut Editor,_,w,cx| {
-            w.prevent_default(); cx.stop_propagation(); ed.menu = Some(m.clone()); cx.notify();
+            w.prevent_default(); cx.stop_propagation(); ed.menu = (ed.menu.as_ref() != Some(&m)).then(|| m.clone()); cx.notify();
         }));
         let mut bar = div().id("phone-text-tools").w(width).h(px(44.)).flex().items_center().overflow_x_scroll().restrict_scroll_to_axis().bg(Theme::bg_body());
         bar = bar.when(!self.markdown,|d| d.child(more("pen-line","text-color",Menu::Color)));

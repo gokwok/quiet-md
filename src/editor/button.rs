@@ -247,6 +247,9 @@ impl Editor {
         if self.core.reminder_at(at).is_some() {
             return self.open_reminder(at, cx);
         }
+        if let Some(name) = self.core.tag_at(at) {
+            return cx.emit(EditorEvent::Tag(name, at));
+        }
         let Some(b) = self.core.button_at(at) else { return };
         match b.action {
             ButtonAction::OpenLink => {

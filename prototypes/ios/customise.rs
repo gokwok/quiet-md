@@ -17,11 +17,11 @@ use crate::theme::Theme;
 #[serde(rename_all = "lowercase")]
 pub enum Quick { Recent, Starred, Off }
 
-/// 可以排序、隐藏的几栏。以后有了标签，加在这里。
+/// 可以排序、隐藏的几栏。
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
-pub enum Section { Starred, Folders }
-const SECTIONS: [Section; 2] = [Section::Starred, Section::Folders];
+pub enum Section { Starred, Folders, Tags }
+const SECTIONS: [Section; 3] = [Section::Starred, Section::Folders, Section::Tags];
 
 #[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 #[serde(default)]
@@ -33,7 +33,7 @@ pub struct Layout {
     pub sections: Vec<(Section, bool)>,
 }
 impl Default for Layout {
-    fn default() -> Self { Layout { quick: Quick::Starred, all: true, sections: vec![(Section::Starred, false), (Section::Folders, true)] } }
+    fn default() -> Self { Layout { quick: Quick::Starred, all: true, sections: vec![(Section::Starred, false), (Section::Folders, true), (Section::Tags, false)] } }
 }
 impl Layout {
     /// 读进来的可能缺栏、重栏（旧版本、手改过）：每栏恰好一次，缺的补在最后、关着。
@@ -74,7 +74,7 @@ fn change(f: impl FnOnce(&mut Layout)) {
 }
 
 fn quick_rows() -> [(Quick, &'static str); 3] { [(Quick::Recent, tr("最近使用", "Recent")), (Quick::Starred, tr("收藏", "Starred")), (Quick::Off, tr("无", "None"))] }
-fn section_title(s: Section) -> &'static str { match s { Section::Starred => tr("收藏", "Starred"), Section::Folders => tr("文件夹", "Folders") } }
+fn section_title(s: Section) -> &'static str { match s { Section::Starred => tr("收藏", "Starred"), Section::Folders => tr("文件夹", "Folders"), Section::Tags => tr("标签", "Tags") } }
 
 // 三组：快速访问（单选）、固定的几行（只开关）、可排序的几栏（开关 + 拖动）。
 const QUICK: isize = 0;

@@ -1,5 +1,5 @@
 //! 设置 › 助手设置 › 图像 里的画风和人物（`fdl_ai::imagine`）。
-//! 画风：一排横滑的卡片，和模型卡片一个样子，点一下就是以后生图用的画风；再点选中的那张（或长按选「编辑」）打开它。
+//! 画风：一排横滑的小图（试画过静物的是样张，没画过的写一句话），名字在下面，点一下就是以后生图用的画风；再点选中的那张（或长按选「编辑」）打开它。
 //! 内置的几种只能看，可以复制一份再改。人物：一排横滑的圆头像（和语音角色一样），没换头像的是首字；最前面是「添加」；
 //! 点开是大头像（右下角换头像）、名称、别名、外貌标签和只压这个人的排除标签（胶囊标签流预览，点开在系统文字页里批量改）。
 //! 质量词（「生成」那组里的两行）也在这里：和画风分开，每张图都带，带单行预览与「恢复默认」动作。
@@ -79,18 +79,23 @@ pub fn title(page: Page) -> &'static str {
 
 // ---- 图像页上的两组
 
-/// 画风：「默认」（不加画风）、内置的几种、自己加的，最后一张「新建」。
+/// 画风：「默认」（不加画风）、内置的几种、自己加的，最后一张「新建」。一张是一块 3:2 的小图，名字在下面：
+/// 用这个画风试画过静物的是那张图的样张（`image::style_thumb`），没画过的写一句话或它的标签。选中的描一圈、右上角打勾。
 pub fn styles(cx: &mut Context<Workspace>) -> AnyElement {
-    const W: f32 = 156.;
+    const W: f32 = 150.;
+    const H: f32 = 100.;
+    const R: f32 = 18.;
     const GAP: f32 = 10.;
     let l = lib();
     let current = l.current_style(english()).map_or(String::new(), |s| s.id);
-    let mut all: Vec<(String, String, String)> = vec![(String::new(), tr("默认", "Default").into(), String::new())];
-    all.extend(imagine::builtin(english()).into_iter().chain(l.styles).map(|s| (s.id, s.name, s.positive)));
-    let mut cards: Vec<AnyElement> = all.into_iter().map(|(id, name, tags)| {
+    let mut all = vec![Style { name: tr("默认", "Default").into(), ..Default::default() }];
+    all.extend(imagine::builtin(english()).into_iter().chain(l.styles));
+    let name_line = |name: SharedString, ink: Hsla| div().w(px(W)).px(px(4.)).truncate().text_size(px(14.)).line_height(px(19.)).font_weight(FontWeight::MEDIUM).text_color(ink).child(name);
+    let mut cards: Vec<AnyElement> = all.into_iter().map(|Style { id, name, positive, negative }| {
         let on = id == current;
+        let thumb = super::image::style_thumb(&id, &positive, &negative);
         let sub: SharedString = blurb(&id).map_or_else(|| {
-            if tags.trim().is_empty() { tr("未填写标签", "No tags yet").into() } else { tags.into() }
+            if positive.trim().is_empty() { tr("未填写标签", "No tags yet").into() } else { positive.into() }
         }, SharedString::from);
         let builtin = id.is_empty() || id.starts_with(BUILTIN);
         let items = match id.as_str() {
@@ -100,15 +105,18 @@ pub fn styles(cx: &mut Context<Workspace>) -> AnyElement {
                 menu::Item::new(STYLE_DELETE, tr("删除", "Delete"), "trash", 1).danger()],
         };
         let open = id.clone();
-        div().id(SharedString::from(format!("image-style-{id}"))).relative().w(px(W)).h(px(112.)).flex_none().p(px(14.)).rounded(px(20.)).bg(general::card_bg())
-            .border_2().border_color(if on { Theme::text() } else { gpui::transparent_black() })
-            .flex().flex_col().justify_between().active(|d| d.bg(Theme::fill_pressed()))
-            .child(div().flex().items_start().gap(px(8.))
-                .child(div().flex_1().min_w_0().truncate().text_size(px(16.)).line_height(px(21.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(name))
-                .when(on, |d| d.child(div().flex_none().size(px(22.)).rounded_full().bg(Theme::text()).flex().items_center().justify_center()
-                    .child(ui::icon("check", 13., Theme::bg_body())))))
-            .child(div().text_size(px(14.)).line_height(px(19.)).max_h(px(38.)).overflow_hidden().text_color(Theme::text_caption()).child(sub))
-            .when(!items.is_empty(), |d| d.child(menu::context(SharedString::from(format!("{KEY}{id}")), "", 20., items)))
+        let tile = div().relative().w(px(W)).h(px(H)).rounded(px(R)).bg(general::card_bg())
+            .map(|d| match thumb {
+                Some(path) => d.child(img(path).absolute().inset_0().size_full().rounded(px(R)).object_fit(ObjectFit::Cover)),
+                None => d.flex().flex_col().justify_end().p(px(12.))
+                    .child(div().text_size(px(13.)).line_height(px(18.)).line_clamp(3).text_color(Theme::text_caption()).child(sub)),
+            })
+            .when(on, |d| d.child(div().absolute().inset_0().rounded(px(R)).border_2().border_color(Theme::text()))
+                .child(div().absolute().top(px(8.)).right(px(8.)).size(px(22.)).rounded_full().bg(Theme::text()).flex().items_center().justify_center()
+                    .child(ui::icon("check", 13., Theme::bg_body()))))
+            .when(!items.is_empty(), |d| d.child(menu::context(SharedString::from(format!("{KEY}{id}")), "", R, items)));
+        div().id(SharedString::from(format!("image-style-{id}"))).w(px(W)).flex_none().flex().flex_col().gap(px(8.)).active(|d| d.opacity(0.7))
+            .child(tile).child(name_line(name.into(), Theme::text()))
             .on_click(cx.listener(move |w, _, _, cx| {
                 haptic();
                 if !on { let id = open.clone(); change(|l| l.style = id); cx.notify(); }
@@ -116,10 +124,9 @@ pub fn styles(cx: &mut Context<Workspace>) -> AnyElement {
             }))
             .into_any_element()
     }).collect();
-    cards.push(div().id("image-style-new").w(px(W)).h(px(112.)).flex_none().rounded(px(20.)).bg(general::card_bg())
-        .flex().flex_col().items_center().justify_center().gap(px(6.)).active(|d| d.bg(Theme::fill_pressed()))
-        .child(div().size(px(32.)).rounded_full().bg(Theme::bg_body()).flex().items_center().justify_center().child(ui::icon("plus", 16., Theme::text_caption())))
-        .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).text_color(Theme::text_caption()).child(tr("新建画风", "New Style")))
+    cards.push(div().id("image-style-new").w(px(W)).flex_none().flex().flex_col().gap(px(8.)).active(|d| d.opacity(0.7))
+        .child(div().w(px(W)).h(px(H)).rounded(px(R)).bg(general::card_bg()).flex().items_center().justify_center().child(ui::icon("plus", 22., Theme::text_caption())))
+        .child(name_line(tr("新建画风", "New Style").into(), Theme::text_caption()))
         .on_click(cx.listener(|w, _, _, cx| { haptic(); new_style(w, cx) })).into_any_element());
     let width = 20. + cards.len() as f32 * W + cards.len().saturating_sub(1) as f32 * GAP;
     div().w_full().flex().flex_col()

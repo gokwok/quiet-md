@@ -11,7 +11,9 @@ pub mod appicon;
 pub mod assistant;
 pub mod assist;
 pub mod imagine;
+pub mod info;
 pub mod card;
+pub mod cmdmenu;
 pub mod editmenu;
 pub mod editor_surface;
 pub mod files;
@@ -31,6 +33,7 @@ pub mod crop;
 pub mod coveredit;
 pub mod customise;
 pub mod starpick;
+pub mod tags;
 pub mod tilt;
 mod astra;
 mod neon;
@@ -342,12 +345,12 @@ pub fn floating() -> bool { is_compact() && glass::supported() }
 /// 悬浮的玻璃圆钮：玻璃和图标是原生视图，这里只留 44pt 的点击区，按下时让玻璃缩一下。
 pub fn glass_button(id: &'static str, icon: &'static str, size: f32) -> Stateful<Div> {
     div().id(id).flex_none().size(px(44.)).rounded_full().occlude()
-        .child(glass::pane(id, None, Some((icon, size, Theme::text())), None))
+        .child(glass::pane(id, None, Some((icon, size, glass::ink())), None))
         .on_mouse_down(MouseButton::Left, move |_, _, _| glass::pulse(id))
 }
 
 pub fn catalogue_button() -> impl IntoElement {
-    div().flex_none().size(px(44.)).child(glass::tap_pane("doc-catalogue", ("editor-icons/catalogue-list", 18., Theme::text()), "doc-catalogue", crate::settings::tr("目录", "Outline")))
+    div().flex_none().size(px(44.)).child(glass::tap_pane("doc-catalogue", ("editor-icons/catalogue-list", 18., glass::ink()), "doc-catalogue", crate::settings::tr("目录", "Outline")))
 }
 
 /// 文档页悬浮的那排按钮占的高度（状态栏 + 一行按钮）：正文的开头让到它下面，滚动时从它底下穿过。
@@ -435,7 +438,7 @@ pub fn close_history() { HISTORY.with(|h| h.set(false)); }
 /// 编辑就是原来右下角那支铅笔：在文末新起一行并开始写。点了「撤销…」之后换成中间一条 撤销 / 粘贴 / 重做，右上角是「完成」。
 pub fn dock() -> impl IntoElement {
     use menu::Item;
-    let ink = style::chrome_ink().map_or(Theme::text(), |_| Theme::text());
+    let ink = glass::ink();
     let row = div().id("doc-dock").absolute().left_0().right_0().bottom(dock_inset()).h(px(48.));
     if history_open() {
         let (_, _, viewport) = layout();
@@ -458,7 +461,7 @@ fn dock_inset() -> Pixels { insets().bottom.max(px(12.)) + px(4.) }
 pub fn dock_bottom() -> f32 { f32::from(dock_inset()) + 72. }
 
 /// 主页的大标题和它下面的工具行一共多高（含悬浮按钮那一段）：网格开头留出这么多。
-pub fn home_lead_h() -> f32 { chrome_top() + 56. + LEAD_SEARCH_H + 12. + if home_page() == HomePage::Starred || trash_view() || lead_note() { CAPTION_H + 14. } else { 0. } }
+pub fn home_lead_h() -> f32 { chrome_top() + 56. + LEAD_SEARCH_H + 12. + if matches!(home_page(), HomePage::Starred | HomePage::Tags) || trash_view() || lead_note() { CAPTION_H + 14. } else { 0. } }
 fn lead_note() -> bool { LEAD_NOTE.with(|n| n.get()) }
 thread_local! { static TRASH_VIEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// 这一帧画的是「最近删除」（工作区每帧开头告诉这里）：开头那段多一块说明，网格往下让。
@@ -481,9 +484,9 @@ pub fn large_title_icon(title: impl Into<SharedString>, icon: Option<AnyElement>
         .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title.into()))
 }
 
-/// 手机上主页分几页：首页（`hub`）、「所有文档」、「文件夹」（顶层的文件夹）和「收藏」。
+/// 手机上主页分几页：首页（`hub`）、「所有文档」、「文件夹」（顶层的文件夹）、「收藏」和「所有标签」（`tags`）。
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum HomePage { Hub, All, Folders, Starred }
+pub enum HomePage { Hub, All, Folders, Starred, Tags }
 thread_local! { static HOME_PAGE: std::cell::Cell<HomePage> = const { std::cell::Cell::new(HomePage::Hub) }; }
 pub fn home_page() -> HomePage { HOME_PAGE.with(|p| p.get()) }
 /// 换页。回首页时先拍下这一页（`ios::page` 把它滑走）。
@@ -504,7 +507,7 @@ pub fn browse_chrome_with(_w: &Workspace, items: Vec<menu::Item>, cx: &mut Conte
         .child(glass_button("browse-back", "editor-icons/chevron-left", 22.).on_click(cx.listener(move |w, _, window, cx| back(w, window, cx))))
         .child(div().flex_1())
         .child(div().id("browse-select").flex_none().h(px(44.)).w(px(if crate::settings::english() { 82. } else { 64. })).rounded_full().occlude()
-            .child(glass::pane("browse-select", None, None, Some((select.into(), Theme::text()))))
+            .child(glass::bar_pane("browse-select", select.into(), glass::ink()))
             .on_mouse_down(MouseButton::Left, |_, _, _| glass::pulse("browse-select"))
             .on_click(cx.listener(|w, _, _, cx| { w.batch = Some(vec![]); w.row_menu = None; w.home.sort_menu = false; cx.notify(); })))
         // 「…」是一颗系统的玻璃钮，挂着系统菜单。
@@ -576,7 +579,7 @@ pub fn browse_empty(lead: AnyElement, text: &'static str) -> AnyElement {
 /// `body` 是整页内容（含开头），`back` 是左上角返回做的事。
 pub fn batch_page(w: &Workspace, ids: Vec<String>, body: AnyElement, back: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static, cx: &mut Context<Workspace>) -> AnyElement {
     let n = w.batch.as_ref().map_or(0, |s| s.len());
-    let ink = if n > 0 { Theme::text() } else { Theme::text_disabled() };
+    let ink = if n > 0 { glass::ink() } else { Theme::text_disabled() };
     // 照 Craft：收藏（全都收藏着时是取消收藏）、导出、删除。
     let all_starred = n > 0 && w.batch.as_ref().is_some_and(|s| s.iter().all(|id| w.entries.iter().any(|e| &e.id == id && e.meta.starred > 0)));
     batch_page_with(w, ids, body, vec![(if all_starred { "sf:star.slash" } else { "sf:star" }, ink, "batch-star"), ("sf:square.and.arrow.up", ink, "batch-export"), ("sf:trash", if n > 0 { Theme::danger() } else { ink }, "batch-delete")], back, cx)
@@ -809,6 +812,8 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         "hub-customise" => customise::open(),
         "hub-star-pick" => starpick::open(w),
         "hub-starred-fold" => { STARRED_FOLDED.with(|f| f.set(!f.get())); cx.notify(); }
+        "hub-tag-pick" => tags::open_pick(w, tags::Mode::Pin),
+        "hub-tags-fold" => { tags::toggle_folded(); cx.notify(); }
         "browse-new-folder" => { let parent = if w.view == View::Folder { w.folder_current.clone() } else { None }; w.new_folder(parent, window, cx); }
         "browse-import-md" | "browse-import-folder" | "browse-import-xml" => {
             use crate::transfer::ImportKind;
@@ -907,7 +912,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 "doc-print" => w.print_doc(&cur, window, cx),
                 "doc-select-all-blocks" => select_all_blocks(w, window, cx),
                 "doc-clean-empty" => clean_empty_paragraphs(w, window, cx),
-                "doc-info" => w.open_doc_info(window, cx),
+                "doc-info" => { stylepanel::close(); format::close(); w.open_doc_info(window, cx) }
                 "doc-refs" => { let shown = !w.entries.iter().find(|e| e.id == cur).is_some_and(|e| e.meta.refs_hidden); w.ask_refs(!shown, cx); }
                 "doc-delete" => w.ask_delete(&cur, cx),
                 _ => {}
@@ -1080,7 +1085,7 @@ pub fn new_button(view: View, cx: &mut Context<Workspace>) -> impl IntoElement {
                 menu::Item::new("fab-new-doc", crate::settings::tr("新建文档", "New document"), "doc.badge.plus", 0),
                 menu::Item::new("fab-new-folder", crate::settings::tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
             ])) }
-            else if floating() { d.bottom(dock_inset()).size(px(48.)).child(glass::tap_pane("fab", ("plus", 24., Theme::text()), "new-doc", crate::settings::text("新建文档"))) }
+            else if floating() { d.bottom(dock_inset()).size(px(48.)).child(glass::tap_pane("fab", ("plus", 24., glass::ink()), "new-doc", crate::settings::text("新建文档"))) }
             else { d.bottom(px(16.)).size(px(56.)).bg(Theme::primary()).shadow(crate::theme::shadow_dialog()).active(|s| s.bg(crate::theme::c(crate::theme::craft::B700))).child(crate::ui::icon("plus", 26., gpui::white())) })
         .occlude().on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx)))
 }

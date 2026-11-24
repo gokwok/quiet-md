@@ -42,6 +42,8 @@ pub enum EditorEvent {
     Duplicate,
     /// A 页面 / 卡片 opened or closed (the window's header and page transition follow).
     Page,
+    /// A #标签 was clicked: its name and where it is (the phone's 替换标签 / 转为文本 act there; the desktop only searches).
+    Tag(String, #[allow(dead_code)] Pos),
 }
 
 /// A child page shown by 子页面列表 blocks.
@@ -1772,8 +1774,12 @@ impl Editor {
             self.core.break_coalescing();
             self.core.insert_text(&format!("\n{indent}"));
             self.core.break_coalescing();
-        } else if !self.core.markdown_enter_shortcut() {
-            self.core.enter();
+        } else {
+            // 行尾的 `#名字` 后面按回车：也变成标签。
+            self.core.convert_tag_before_caret();
+            if !self.core.markdown_enter_shortcut() {
+                self.core.enter();
+            }
         }
         self.changed(window, cx);
     }
@@ -2598,6 +2604,11 @@ impl Editor {
             return;
         }
         self.core.insert_text(&s);
+        // 空格（全角的也算，联想带出来的「词 + 空格」也算）落在 `#名字` 后面：把它变成标签。
+        if let Some(c) = s.chars().last().filter(|c| matches!(c, ' ' | '\u{3000}')) {
+            let h = self.core.sel.head;
+            self.core.convert_tag_ending_at(Pos::new(h.block, h.offset.saturating_sub(c.len_utf8())));
+        }
         if s == " " {
             let _ = self.core.markdown_block_shortcut() || self.core.markdown_divider() || self.core.autolink();
         } else if s == "-" {

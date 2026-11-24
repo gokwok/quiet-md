@@ -190,6 +190,20 @@ pub fn render(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                         .child(div().text_size(px(15.)).text_color(Theme::text_caption()).child(tr("还没有收藏的文档。", "No starred documents yet."))).into_any_element()
                 } else { group(rows).into_any_element() });
             }
+            Section::Tags => {
+                // 照 Craft：标题带箭头，点了进「所有标签」；右边「…」是管理固定标签、自定义主页、折叠标签。下面是固定的几个标签。
+                sections.push(section_head("hub-tags-head", tr("标签", "Tags"), Some(Box::new(|w, cx| super::tags::go(None, w, cx))), Some(("hub-tags-more", super::tags::hub_items())), cx).into_any_element());
+                if super::tags::folded() { continue; }
+                let rows: Vec<AnyElement> = super::tags::pinned(w).into_iter().enumerate().map(|(i, name)| {
+                    let to = name.clone();
+                    row(format!("hub-tag-{i}").into(), div().text_size(px(18.)).text_color(Theme::text_caption()).child("#"), name, None, false)
+                        .on_click(cx.listener(move |w, _, _, cx| super::tags::go(Some(to.clone()), w, cx))).into_any_element()
+                }).collect();
+                sections.push(if rows.is_empty() {
+                    div().mx(px(16.)).mt(px(4.)).h(px(64.)).flex().items_center().justify_center()
+                        .child(div().text_size(px(15.)).text_color(Theme::text_caption()).child(tr("固定关键标签以便快速访问", "Pin key tags for quick access"))).into_any_element()
+                } else { group(rows).into_any_element() });
+            }
         }
     }
 
@@ -268,7 +282,7 @@ pub fn trash_page(w: &Workspace, window: &Window, cx: &mut Context<Workspace>) -
     if w.batch.is_some() && !roots.is_empty() {
         let ids = roots.iter().map(|e| e.id.clone()).collect();
         let n = w.batch.as_ref().map_or(0, |s| s.len());
-        let ink = if n > 0 { Theme::text() } else { Theme::text_disabled() };
+        let ink = if n > 0 { super::glass::ink() } else { Theme::text_disabled() };
         let body = w.render_home_grid(&roots, true, Some(lead), window, cx);
         return super::batch_page_with(w, ids, body, vec![("sf:arrow.uturn.backward", ink, "batch-restore"), ("sf:trash", if n > 0 { Theme::danger() } else { ink }, "batch-purge")], |w, _, cx| w.show_view(View::Home, cx), cx);
     }

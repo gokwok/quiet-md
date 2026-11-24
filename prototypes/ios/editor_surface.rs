@@ -41,12 +41,23 @@ pub fn hide_keyboard() { unsafe { quiet_hide_keyboard(); } }
 
 pub fn enabled() -> bool { super::floating() && !super::overlay() && !super::stylepanel::is_open() && !super::format::is_open() }
 
+/// 卡片里两边的留白（同 `EditorSurface.m` 的 `inset`）。
+pub const CARD_INSET: f32 = 20.;
+/// 卡片最高能有多高：顶上让出状态栏，底下让出键盘。
+pub fn card_room(window: &Window) -> Pixels {
+    let insets = window.insets();
+    let bottom = if insets.ime.bottom > px(0.) { insets.ime.bottom + px(8.) } else { insets.safe_area.bottom.max(px(34.)) };
+    window.viewport_size().height - insets.safe_area.top - bottom - px(8.)
+}
+/// 这张卡片上一帧在不在。
+pub fn live(key: &str) -> bool { LIVE.with(|m| m.borrow().contains_key(key)) }
+
 pub struct Surface { rows: Vec<Value>, handlers: Vec<Handler>, target: Option<(u64,usize)>, height: f32 }
 impl Surface {
     pub fn height(&self) -> Pixels { px(self.height) }
     pub fn new() -> Self { Self { rows: vec![], handlers: vec![], target: None, height: 12. } }
     pub fn at(block: fdl_core::model::BlockId, offset: usize) -> Self { Self { target: Some((block.0,offset)), ..Self::new() } }
-    fn action(&mut self, f: impl Fn(&mut Editor, &str, &mut Window, &mut Context<Editor>) + 'static) -> usize {
+    pub fn action(&mut self, f: impl Fn(&mut Editor, &str, &mut Window, &mut Context<Editor>) + 'static) -> usize {
         self.handlers.push(Rc::new(f)); self.handlers.len() - 1
     }
     pub fn button(&mut self, title: &str, symbol: &str, f: impl Fn(&mut Editor, &mut Window, &mut Context<Editor>) + 'static) -> Value {
@@ -77,6 +88,16 @@ impl Surface {
         self.rows.push(json!({"field":title,"value":field.read(cx).text,"input":input,"submit":command,"focus":focus,"multi":multiline}));
         self.height += if multiline { 96. } else { 44. };
     }
+    /// 卡片里的一行输入：左边名字，右边输入（地址不自动大写、不纠正）。
+    pub fn labelled(&mut self, field: &Entity<TextField>, key: &str, hint: &str, url: bool, focus: bool, rule: bool, cx: &App) {
+        self.field(field, key, false, focus, cx); self.height += 8.;
+        let width = f32::from(super::menu_w(0.)) - CARD_INSET * 2.;
+        if let Some(row) = self.rows.last_mut() { for (k, v) in [("label", json!(key)), ("hint", json!(hint)), ("url", json!(url)), ("rule", json!(rule)), ("width", json!(width)), ("h", json!(52))] { row[k] = v; } }
+    }
+    /// 卡片顶上的一行：左「取消」、中间标题、右边加粗的「确定」。
+    pub fn bar(&mut self, title: &str, cancel: Value, mut ok: Value) { ok["primary"] = true.into(); self.push(json!({"bar":title,"items":[cancel,ok],"h":56})); }
+    /// 带状态的系统控件，按名字留着（见 `EditorSurface.m` 的 `control:`）。
+    pub fn control(&mut self, name: &str, kind: &str, h: f32, mut row: Value) { row["control"] = name.into(); row["kind"] = kind.into(); row["h"] = h.into(); self.push(row); }
     pub fn header(&mut self, title: &str, close: Value, source: bool) {
         self.rows.push(json!({"header":title,"items":[close],"source":source,"h":56})); self.height += 56.;
     }
@@ -104,6 +125,8 @@ impl Surface {
     pub fn push(&mut self, row: Value) { self.height += row["h"].as_f64().unwrap_or(44.) as f32; self.rows.push(row); }
     /// 列表开始后还没有任何行。
     pub fn is_empty_list(&self) -> bool { self.rows.last().is_some_and(|r| r["list"] == true) }
+    /// 标题行 ✕ 左边再加几个钮。
+    pub fn mark_items(&mut self, more: Vec<Value>) { if let Some(items) = self.rows.last_mut().and_then(|r| r["items"].as_array_mut()) { items.extend(more); } }
     /// 给最后一行补一个属性（如查找框的放大镜）。
     pub fn mark(&mut self, key: &str, value: Value) { if let Some(row) = self.rows.last_mut() { row[key] = value; } }
     pub fn page(mut self, key: &'static str, window: &Window, cx: &Context<Editor>, preview: Option<String>) -> AnyElement {
@@ -125,6 +148,17 @@ impl Surface {
             .child(self.element(key,w,h,cx.weak_entity()));
         div().absolute().inset_0().child(deferred(anchored().position_mode(AnchoredPositionMode::Window)
             .anchor(Anchor::TopLeft).position(point(px(0.),top)).child(body)).with_priority(4)).into_any_element()
+    }
+    /// 设置卡片：底部、左右各 12、离底边 34（键盘起来就停在它上面）；压暗和升降都是原生的（`EditorSurface.m` 的 `cardKey`）。
+    pub fn card(mut self, key: &'static str, window: &Window, cx: &Context<Editor>, close: impl Fn(&mut Editor, &mut Window, &mut Context<Editor>) + 'static) -> AnyElement {
+        let outside = self.action(move |e, _, w, cx| close(e, w, cx));
+        if let Some(row) = self.rows.first_mut() { row["outside"] = outside.into(); }
+        self.height += 6.;
+        let (insets, view) = (window.insets(), window.viewport_size());
+        let bottom = if insets.ime.bottom > px(0.) { insets.ime.bottom + px(8.) } else { insets.safe_area.bottom.max(px(34.)) };
+        let body = self.element(key, super::menu_w(0.), card_room(window), cx.weak_entity());
+        div().absolute().inset_0().child(deferred(anchored().position_mode(AnchoredPositionMode::Window)
+            .anchor(Anchor::BottomCenter).position(point(view.width / 2., view.height - bottom)).child(body)).with_priority(4)).into_any_element()
     }
     pub fn element(self, key: &'static str, width: Pixels, max_height: Pixels, editor: WeakEntity<Editor>) -> AnyElement {
         let height = px(self.height).min(max_height.max(px(44.)));

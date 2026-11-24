@@ -126,7 +126,7 @@ const PICTURE_WAIT: Duration = Duration::from_millis(400);
 fn pictures_ready() -> bool {
     !crate::editor::image::pictures_pending(FRAME.with(|f| f.get())) || CAPTURED.with(|c| c.get()).elapsed() > PICTURE_WAIT
 }
-fn metal() -> Option<*mut AnyObject> { Some(METAL.with(|m| m.get())).filter(|p| !p.is_null()) }
+pub(super) fn metal() -> Option<*mut AnyObject> { Some(METAL.with(|m| m.get())).filter(|p| !p.is_null()) }
 fn superview() -> Option<*mut AnyObject> {
     let m = metal()?;
     let s: *mut AnyObject = unsafe { msg_send![m, superview] };

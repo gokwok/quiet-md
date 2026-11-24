@@ -554,6 +554,7 @@ pub fn to_inline(kind: InlineKind) -> Inline {
             xml
         }
         InlineKind::DocLink(l) => format!("<cite type=\"doc\" doc-id=\"{}\" file-type=\"docx\">{}</cite>", esc_attr(&l.id), esc(&l.title)),
+        InlineKind::Tag(name) => format!("<cite type=\"tag\">#{}</cite>", esc(name)),
         InlineKind::Other { tag } => format!("<{tag}/>"),
     };
     // Read back, so that both halves are exactly what a reload will give.
@@ -585,6 +586,12 @@ fn inline_of(e: &Element) -> Inline {
         "time" => reminder_of(e).map(InlineKind::Reminder),
         "cite" if e.attr("type") == Some("doc") => {
             e.attr("doc-id").map(|id| InlineKind::DocLink(InlineDocLink { id: id.to_string(), title: code_text(&e.children) }))
+        }
+        // The text is what an export or an older build shows: `#名字`.
+        "cite" if e.attr("type") == Some("tag") => {
+            let text = code_text(&e.children);
+            let name = text.strip_prefix('#').unwrap_or(&text);
+            (!name.is_empty() && name.chars().all(crate::model::tag_char)).then(|| InlineKind::Tag(name.to_string()))
         }
         _ => None,
     };
@@ -1299,6 +1306,19 @@ mod tests {
         assert_eq!(m.inline.as_ref().unwrap().button().unwrap().action, ButtonAction::DuplicatePage);
         let xml = serialize(&doc);
         assert_eq!(serialize(&parse(&xml).unwrap()), xml);
+    }
+
+    #[test]
+    fn tags_round_trip() {
+        let doc = parse("<title>T</title><p>去 <cite type=\"tag\">#图书馆</cite> 和 <cite type=\"tag\">#图书馆</cite><cite type=\"tag\">#18x</cite></p>").unwrap();
+        assert_eq!(doc.tags(), vec![("图书馆".to_string(), 2), ("18x".to_string(), 1)]);
+        assert_eq!(doc.plain_text().trim(), "去 #图书馆 和 #图书馆#18x");
+        assert_eq!(reread(&to_inline(InlineKind::Tag("图书馆".into()))), InlineKind::Tag("图书馆".into()));
+        assert!(serialize(&doc).contains("<cite type=\"tag\">#图书馆</cite>"));
+        // 名字不合规的照原样留着，不当标签。
+        let odd = parse("<title>T</title><p><cite type=\"tag\">#a b</cite></p>").unwrap();
+        assert!(odd.tags().is_empty());
+        assert!(serialize(&odd).contains("<cite type=\"tag\">#a b</cite>"));
     }
 
     #[test]

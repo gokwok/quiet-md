@@ -110,6 +110,7 @@ fn thumb_blocks(blocks: &[crate::model::Block], budget: &mut usize, depth: usize
                     } else { reminder.label(" ") }
                 },
                 crate::model::InlineKind::DocLink(doc) => display_title(&doc.title).to_string(),
+                crate::model::InlineKind::Tag(name) => format!("#{name}"),
                 crate::model::InlineKind::Other { tag } => tag.clone(),
             }).map(|label| label.chars().take(160).collect::<String>());
             if let Some(inline) = &marks.inline { match &inline.kind {

@@ -607,6 +607,12 @@ impl Workspace {
                 this.search_sel = this.default_search_sel(cx);
             }
             EditorEvent::OpenDoc(id) => this.open(id, window, cx),
+            // 点了 #标签：在文档库里搜它（正文的纯文本里标签就是 `#名字`）。
+            EditorEvent::Tag(name, _) => {
+                this.open_search(window, cx);
+                this.search.update(cx, |s, cx| s.set_text(&format!("#{name}"), cx));
+                this.search_sel = this.default_search_sel(cx);
+            }
             EditorEvent::OpenDocAt(id, ordinal) => this.open_at(id, *ordinal, window, cx),
             EditorEvent::HideRefs => this.ask_refs(false, cx),
             EditorEvent::Page => cx.notify(),
@@ -980,7 +986,7 @@ impl Workspace {
         // Edits in an open 页面 go into the document before it is written.
         ed.update(cx, |e, _| e.graft_pages());
         let doc = &ed.read(cx).root().doc;
-        let (title, icon, body, reminders, links) = (doc.title.text.clone(), doc.icon.clone(), doc.plain_text(), doc.reminders(), doc.doc_links());
+        let (title, icon, body, reminders, links, tags) = (doc.title.text.clone(), doc.icon.clone(), doc.plain_text(), doc.reminders(), doc.doc_links(), doc.tags());
         match self.store.save(&id, doc) {
             Ok(meta) => {
                 if let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
@@ -989,6 +995,7 @@ impl Workspace {
                     e.body = body.into();
                     e.reminders = reminders;
                     e.links = links;
+                    e.tags = tags;
                     e.meta = meta.clone();
                 }
                 self.sync_links(cx);

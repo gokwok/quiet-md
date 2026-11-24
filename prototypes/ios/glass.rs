@@ -15,6 +15,8 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 /// 系统有没有 Liquid Glass。没有时各处照旧用 GPUI 画。
 /// `QUIET_MD_IOS_NO_GLASS`：当作没有，用来在新系统上检查旧系统的版式。
 pub fn supported() -> bool { AnyClass::get(c"UIGlassEffect").is_some() && std::env::var_os("QUIET_MD_IOS_NO_GLASS").is_none() }
+/// 悬浮玻璃钮上图标和字的墨色：浅色下接近纯黑（#0C0C0B，实测 Craft iOS 的截图；系统菜单钮自己画出来的也是这个深浅），比正文的 `Theme::text()` 深一档；深色下就是正文色。
+pub fn ink() -> Hsla { if crate::theme::dark() { crate::theme::Theme::text() } else { rgb(0x0c0c0b).into() } }
 
 /// 玻璃上的图标：名字（`icons/` 下的，或带目录的完整路径）、边长、颜色。
 pub type Icon = (&'static str, f32, Hsla);
@@ -33,7 +35,7 @@ unsafe impl RefEncode for CGPath { const ENCODING_REF: Encoding = Encoding::Poin
 unsafe impl RefEncode for CGColor { const ENCODING_REF: Encoding = Encoding::Pointer(&Encoding::Struct("CGColor", &[])); }
 
 #[derive(Clone, PartialEq)]
-struct Look { frame: Bounds<Pixels>, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, radius: Option<f32>, bare: bool, stacked: bool, actions: Vec<Tap>, dark: bool, shape: Option<Shape>, clip: Option<Bounds<Pixels>> }
+struct Look { frame: Bounds<Pixels>, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, radius: Option<f32>, bare: bool, heavy: bool, bar: bool, stacked: bool, actions: Vec<Tap>, dark: bool, shape: Option<Shape>, clip: Option<Bounds<Pixels>> }
 struct Pane { key: &'static str, view: *mut AnyObject, image: *mut AnyObject, text: *mut AnyObject, tabs: Vec<*mut AnyObject>, hits: Vec<*mut AnyObject>, pill: *mut AnyObject, shape: *mut AnyObject, look: Option<Look>, seen: bool, shown: bool }
 
 thread_local! { static PANES: RefCell<Vec<Pane>> = const { RefCell::new(Vec::new()) }; }
@@ -84,50 +86,71 @@ impl Pane {
 /// 放在 GPUI 元素里的占位：把这个元素的位置交给同名的玻璃。胶囊形，圆角跟着短边走。
 /// 只有图标时图标居中；带文字时图标靠左、文字跟在后面（搜索条）。
 pub fn pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, heavy: false, bar: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 同 `pane`，但放在会滚动的页面内容里：滚进顶上的返回钮那一条、或出了屏幕底就藏起，免得压在顶栏的玻璃上。
 pub fn page_pane(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
     canvas(move |bounds, window, _| {
         if bounds.origin.y < px(super::chrome_top()) || bounds.bottom() > window.viewport_size().height { return; }
-        place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window)
+        place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, heavy: false, bar: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window)
     }, |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 圆角矩形的一块玻璃：自己拼的弹出菜单的底。首页的菜单已改用系统菜单（`menu.rs`），这两个留给系统菜单放不下的内容。
 #[allow(dead_code)]
 pub fn panel(key: &'static str, radius: f32) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: vec![], picked: None, radius: Some(radius), bare: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: vec![], picked: None, radius: Some(radius), bare: false, heavy: false, bar: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 /// 玻璃菜单里的一行：自己没有玻璃，只有图标和字，叠在 `panel` 上面。
 #[allow(dead_code)]
 pub fn row(key: &'static str, icon: Icon, label: (SharedString, Hsla)) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, heavy: false, bar: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 同 `row`，图标换成会动的图形（助手在想、在写时的标记）。
 pub fn shape_row(key: &'static str, shape: Shape, label: (SharedString, Hsla)) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: Some(shape.clone()), clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(0.), bare: true, heavy: false, bar: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: Some(shape.clone()), clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 块动作栏的一格：原生图标在上、文字在下，点击仍交给下面的 GPUI。`fill` 是垫底的淡色（只有「删除」垫）。
 /// 动作栏横着滚：原生视图不归 GPUI 裁，按这一格所在的裁剪范围（`content_mask`）给它套一层遮罩，滚到边上的只露出里面那一截。
 pub fn tile(key: &'static str, icon: Icon, label: (SharedString, Hsla), fill: Option<Hsla>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: fill, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(16.), bare: true, stacked: true, actions: vec![], dark: crate::theme::dark(), shape: None, clip: Some(window.content_mask().bounds) }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: fill, icon: Some(icon), label: Some(label.clone()), tabs: vec![], picked: None, radius: Some(16.), bare: true, heavy: false, bar: false, stacked: true, actions: vec![], dark: crate::theme::dark(), shape: None, clip: Some(window.content_mask().bounds) }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 自己接触摸的玻璃圆钮：按下时的拉伸和高光由系统给，点了把 `action` 交给 `ios::menu_action`。
 /// 这块地方的点击不再经过 GPUI。
 pub fn tap_pane(key: &'static str, icon: Icon, action: &'static str, label: &'static str) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: None, tabs: vec![], picked: None, radius: None, bare: false, stacked: false, actions: vec![(action, Some(label))], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: Some(icon), label: None, tabs: vec![], picked: None, radius: None, bare: false, heavy: false, bar: false, stacked: false, actions: vec![(action, Some(label))], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 标签栏：一条玻璃上等分排开几个图标，`picked` 是当前那一格和垫在它下面的底色；`actions` 是各格点了交出去的标识
 /// （给了就由玻璃自己接触摸，同 `tap_pane`）。
 pub fn tab_pane(key: &'static str, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, actions: Vec<&'static str>) -> impl IntoElement {
     let actions: Vec<_> = actions.into_iter().map(|id| (id, None)).collect();
-    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, stacked: false, actions: actions.clone(), dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, heavy: false, bar: false, stacked: false, actions: actions.clone(), dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
+}
+
+/// 导航栏上只有字的玻璃钮（浏览页的「选择」）：字是 17 号中粗。不跟着页面滚。
+pub fn bar_pane(key: &'static str, label: SharedString, ink: Hsla) -> impl IntoElement {
+    canvas(move |bounds, window, _| place(key, Look { frame: bounds, tint: None, icon: None, label: Some((label.clone(), ink)), tabs: vec![], picked: None, radius: None, bare: false, heavy: false, bar: true, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window), |_, _, _, _| {}).absolute().inset_0()
+}
+/// 同 `page_pane`，但字是半粗的：这一排里最要紧的那颗。
+pub fn page_pane_heavy(key: &'static str, tint: Option<Hsla>, icon: Option<Icon>, label: Option<(SharedString, Hsla)>) -> impl IntoElement {
+    canvas(move |bounds, window, _| {
+        if bounds.origin.y < px(super::chrome_top()) || bounds.bottom() > window.viewport_size().height { return; }
+        place(key, Look { frame: bounds, tint, icon, label, tabs: vec![], picked: None, radius: None, bare: false, heavy: true, bar: false, stacked: false, actions: vec![], dark: crate::theme::dark(), shape: None, clip: None }, window)
+    }, |_, _, _, _| {}).absolute().inset_0()
+}
+
+/// 同 `tab_pane`，但放在会滚动的页面内容里（规矩同 `page_pane`）。
+pub fn page_tab_pane(key: &'static str, tabs: Vec<Icon>, picked: Option<(usize, Hsla)>, actions: Vec<&'static str>) -> impl IntoElement {
+    let actions: Vec<_> = actions.into_iter().map(|id| (id, None)).collect();
+    canvas(move |bounds, window, _| {
+        if bounds.origin.y < px(super::chrome_top()) || bounds.bottom() > window.viewport_size().height { return; }
+        place(key, Look { frame: bounds, tint: None, icon: None, label: None, tabs: tabs.clone(), picked, radius: None, bare: false, heavy: false, bar: false, stacked: false, actions: actions.clone(), dark: crate::theme::dark(), shape: None, clip: None }, window)
+    }, |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 按下时玻璃轻轻缩一下再弹回：GPUI 画不到玻璃上面，按压的反馈只能由原生视图给。
@@ -331,7 +354,10 @@ fn place(key: &'static str, look: Look, window: &Window) {
         }
         if !pane.shape.is_null() { let _: () = msg_send![pane.shape, setHidden: look.shape.is_none()]; }
         if let Some((label, color)) = &look.label {
-            let font: *mut AnyObject = msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: if look.stacked { 11f64 } else { 16f64 }];
+            // `heavy` 的字是半粗（0.3 = UIFontWeightSemibold）；`bar` 是导航栏上的字钮：17 号中粗（0.23 = UIFontWeightMedium），量的 Craft。
+            let font: *mut AnyObject = if look.heavy { msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: 16f64, weight: 0.3f64] }
+                else if look.bar { msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: 17f64, weight: 0.23f64] }
+                else { msg_send![AnyClass::get(c"UIFont").unwrap(), systemFontOfSize: if look.stacked { 11f64 } else { 16f64 }] };
             let _: () = msg_send![pane.text, setFont: font];
             let _: () = msg_send![pane.text, setText: ns_string(label)];
             let _: () = msg_send![pane.text, setTextColor: ui_color(*color)];

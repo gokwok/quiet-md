@@ -80,6 +80,13 @@ pub fn glass_button(key: &'static str, symbol: &'static str, color: Hsla, items:
     canvas(move |bounds, window, _| place(key, bounds, Some((symbol, color)), items.clone(), window), |_, _, _, _| {}).absolute().inset_0()
 }
 
+/// 同 `button`，但放在会滚动的页面内容里：滚进顶栏那一条、或出了屏幕底就藏起。
+pub fn page_button(key: &'static str, items: Vec<Item>) -> impl IntoElement {
+    canvas(move |bounds, window, _| {
+        if bounds.origin.y < px(super::chrome_top()) || bounds.bottom() > window.viewport_size().height { return; }
+        place(key, bounds, None, items.clone(), window)
+    }, |_, _, _, _| {}).absolute().inset_0()
+}
 fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, Hsla)>, items: Vec<Item>, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };

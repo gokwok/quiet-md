@@ -464,7 +464,8 @@ fn viewer_class() -> &'static AnyClass {
 /// 全屏弹出的页面收起后，系统把根视图重新放回窗口时会压在玻璃那一层上面（玻璃和菜单按钮是 Metal 视图的兄弟）：
 /// 放回 Metal 视图上面，再让 GPUI 画一帧，玻璃照常露面。
 fn restack() {
-    let metal = METAL.with(|m| m.get());
+    // 没开过封面菜单（比如从设置里的试画图进来）时这里还没记过 Metal 视图：用每帧都记的那一份。
+    let metal = Some(METAL.with(|m| m.get())).filter(|m| !m.is_null()).or_else(super::shot::metal).unwrap_or(std::ptr::null_mut());
     if !metal.is_null() { unsafe {
         let sup: *mut AnyObject = msg_send![metal, superview];
         let overlay = super::shot::overlay(metal);

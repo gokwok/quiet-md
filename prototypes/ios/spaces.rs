@@ -125,21 +125,80 @@ fn bytes(n: u64) -> String {
     if n >= 1e9 { format!("{:.1} GB", n / 1e9) } else if n >= 1e6 { format!("{:.1} MB", n / 1e6) } else if n >= 1e3 { format!("{:.0} KB", n / 1e3) } else { format!("{n:.0} B") }
 }
 
-/// 设置 › 统计：这个空间里有多少东西、占多大。
+// 统计里的区块、字数、字符数要把每篇文档读一遍：按（文件夹、篇数、最新的修改时间）缓存，文档没变就不重读。读不出来的（还没下载完）不算。
+thread_local! { static TALLY: std::cell::RefCell<Option<((std::path::PathBuf, usize, u64), [usize; 3])>> = const { std::cell::RefCell::new(None) }; }
+/// (区块, 字数, 字符数, 连空格的字符数)，子级和表格格子里的都算；`pages` 为假时不进嵌套的页面和卡片。
+pub(super) fn tally(blocks: &[crate::model::Block], pages: bool) -> [usize; 4] {
+    blocks.iter().fold([0; 4], |mut n, b| {
+        let cells = match &b.kind { crate::model::BlockKind::Table(t) => t.rows.iter().flatten().map(|c| tally(&c.blocks, pages)).collect(), _ => vec![] };
+        let kids = if pages || !b.kind.is_page() { tally(&b.children, pages) } else { [0; 4] };
+        let [_, words, chars, spaced] = tally_text(&b.text.text);
+        for t in cells.into_iter().chain([kids, [1, words, chars, spaced]]) { for i in 0..4 { n[i] += t[i]; } }
+        n
+    })
+}
+pub(super) fn tally_text(s: &str) -> [usize; 4] {
+    [0, crate::docinfo::word_count(s), crate::docinfo::char_count(s), s.chars().filter(|c| !c.is_control() && *c != '\u{fffc}').count()]
+}
+fn totals(w: &Workspace, root: &std::path::Path) -> [usize; 3] {
+    let docs: Vec<_> = w.entries.iter().filter(|e| e.meta.folder.is_none()).collect();
+    let key = (root.to_path_buf(), docs.len(), docs.iter().map(|e| e.meta.modified).max().unwrap_or(0));
+    if let Some(n) = TALLY.with(|t| t.borrow().as_ref().filter(|(k, _)| *k == key).map(|(_, n)| *n)) { return n; }
+    let n = docs.iter().filter_map(|e| w.store.load(&e.id).ok()).fold([0; 3], |mut n, doc| {
+        let t = tally(&doc.blocks, true);
+        n[0] += t[0]; n[1] += t[1] + crate::docinfo::word_count(&doc.title.text); n[2] += t[2] + crate::docinfo::char_count(&doc.title.text);
+        n
+    });
+    TALLY.with(|t| *t.borrow_mut() = Some((key, n)));
+    n
+}
+/// 12345 → 12,345。
+pub(super) fn grouped(n: usize) -> String {
+    let s = n.to_string();
+    s.bytes().enumerate().flat_map(|(i, c)| (i > 0 && (s.len() - i) % 3 == 0).then_some(',').into_iter().chain([c as char])).collect()
+}
+/// 读完要多久：每分钟 160 字（照 Craft 的统计页算出来的速度）。
+fn reading(words: usize) -> String {
+    let m = words.div_ceil(160);
+    match (m / 60, m % 60, crate::settings::english()) {
+        (0, m, false) => format!("{m}分钟"), (h, m, false) => format!("{h}小时{m}分钟"),
+        (0, m, true) => format!("{m} min"), (h, m, true) => format!("{h} h {m} min"),
+    }
+}
+/// 统计的一行（照 Craft）：上面一行小字是名目，下面是数。
+fn stat_row(label: &'static str, value: impl Into<SharedString>) -> AnyElement {
+    div().w_full().px(px(16.)).py(px(11.)).flex().flex_col().gap(px(2.))
+        .child(div().text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(label))
+        .child(div().text_size(px(18.)).line_height(px(24.)).text_color(crate::settings::row_ink()).child(value.into()))
+        .into_any_element()
+}
+
+/// 设置 › 统计（照 Craft）：最上面一张是占多大、放在哪；中间是文档、区块、字数、字符数、阅读时间；最后是文件夹、收藏、最近删除。
 pub fn stats_page(w: &Workspace, _cx: &mut Context<Workspace>) -> AnyElement {
     let docs = w.entries.iter().filter(|e| e.meta.folder.is_none()).count();
     let folders = w.entries.iter().filter(|e| e.meta.folder.is_some()).count();
     let starred = w.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.starred > 0).count();
     let root = crate::store::Store::root_dir();
     let place = space::current(w).map_or("Local", |s| match s.location { Location::ICloud => "iCloud", Location::Local => "Local" });
-    crate::settings::group(None, vec![
-        info_row(tr("文档", "Documents"), docs.to_string()),
-        info_row(tr("文件夹", "Folders"), folders.to_string()),
-        info_row(tr("收藏", "Starred"), starred.to_string()),
-        info_row(tr("最近删除", "Recently deleted"), w.trash.len().to_string()),
-        info_row(tr("占用空间", "Storage used"), bytes(folder_size(&root))),
-        info_row(tr("存放位置", "Location"), place),
-    ]).into_any_element()
+    let [blocks, words, chars] = totals(w, &root);
+    div().w_full().pt(px(8.)).flex().flex_col().gap(px(12.))
+        .child(crate::settings::group(None, vec![
+            stat_row(tr("占用空间", "Storage used"), bytes(folder_size(&root))),
+            stat_row(tr("存放位置", "Location"), place),
+        ]))
+        .child(crate::settings::group(None, vec![
+            stat_row(tr("文档", "Documents"), grouped(docs)),
+            stat_row(tr("区块", "Blocks"), grouped(blocks)),
+            stat_row(tr("字数", "Words"), grouped(words)),
+            stat_row(tr("字符数", "Characters"), grouped(chars)),
+            stat_row(tr("阅读时间", "Reading time"), reading(words)),
+        ]))
+        .child(crate::settings::group(None, vec![
+            stat_row(tr("文件夹", "Folders"), grouped(folders)),
+            stat_row(tr("收藏", "Starred"), grouped(starred)),
+            stat_row(tr("最近删除", "Recently deleted"), grouped(w.trash.len())),
+        ]))
+        .into_any_element()
 }
 
 /// 设置 › 诊断：版本、iCloud 能不能用、日志；日志能导出给人看。

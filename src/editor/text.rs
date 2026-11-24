@@ -279,6 +279,8 @@ enum EqBody {
     /// 日期提醒: the clock icon box (x, y, size), filled when it notifies,
     /// and the date text from `text_x`.
     Reminder { line: ShapedLine, icon: [f32; 3], icon_color: Hsla, filled: bool, text_x: f32 },
+    /// #标签: `#名字` as text, in the font and colour of the text around it.
+    Tag { line: ShapedLine },
 }
 
 enum ObjSrc {
@@ -287,6 +289,8 @@ enum ObjSrc {
     File(crate::model::FileBlock),
     Rem(crate::model::InlineReminder),
     Doc(crate::model::InlineDocLink),
+    /// Its name, and the font and colour its run would have as text.
+    Tag(String, Font, Hsla),
 }
 
 thread_local! {
@@ -333,6 +337,16 @@ fn doc_geom(ix: usize, l: &crate::model::InlineDocLink, spec: &TextSpec, row_w: 
         ext: Some([0., lh]),
         body: EqBody::Doc { line, font, emoji, deleted, icon: [2., (lh - s) / 2., s], text_x },
     }
+}
+
+/// A #标签 reads as text (no chip): `#名字` in its run's own font and colour,
+/// pressable over the whole line box.
+fn tag_geom(ix: usize, name: &str, font: &Font, color: Hsla, spec: &TextSpec, window: &mut Window) -> EqGeom {
+    let text = format!("#{name}");
+    let run = TextRun { len: text.len(), font: font.clone(), color, background_color: None, underline: None, strikethrough: None };
+    let line = window.text_system().shape_line(text.into(), px(spec.size), &[run], None);
+    let w = f32::from(line.width);
+    EqGeom { ix, display: false, adv: w, box_h: spec.line_height, view: [0., 0., w, spec.line_height], placeholder: false, ext: Some([0., spec.line_height]), body: EqBody::Tag { line } }
 }
 
 /// `.docx-reminder-inline-component`: margin-left .25em, padding
@@ -748,6 +762,13 @@ impl Element for RichTextElement {
                     for (i, _) in self.text.text[r.clone()].char_indices() {
                         eq_src.push((r.start + i, ObjSrc::Doc(l.clone())));
                     }
+                } else if let Some(name) = obj.tag() {
+                    // The run over this object, before it is blanked for the stand-in.
+                    let mut off = 0;
+                    let Some((font, color)) = runs.iter().find(|run| { off += run.len; off > r.start }).map(|run| (run.font.clone(), run.color)) else { continue };
+                    for (i, _) in self.text.text[r.clone()].char_indices() {
+                        eq_src.push((r.start + i, ObjSrc::Tag(name.to_string(), font.clone(), color)));
+                    }
                 } else if let Some(&rm) = obj.reminder() {
                     for (i, _) in self.text.text[r.clone()].char_indices() {
                         eq_src.push((r.start + i, ObjSrc::Rem(rm)));
@@ -822,6 +843,7 @@ impl Element for RichTextElement {
                     ObjSrc::File(f) => Rc::new(file_geom(*ix, f, &spec, row_w, window)),
                     ObjSrc::Rem(r) => Rc::new(reminder_geom(*ix, r, &spec, window)),
                     ObjSrc::Doc(l) => Rc::new(doc_geom(*ix, l, &spec, row_w, window)),
+                    ObjSrc::Tag(name, font, color) => Rc::new(tag_geom(*ix, name, font, *color, &spec, window)),
                 })
                 .collect();
             let mut start = 0;
@@ -1046,6 +1068,15 @@ impl Element for RichTextElement {
                 EqBody::File { .. } => self.paint_file(eq, window, cx),
                 EqBody::Doc { .. } => self.paint_doc(eq, window, cx),
                 EqBody::Reminder { .. } => self.paint_reminder(eq, window, cx),
+                EqBody::Tag { line } => {
+                    let ix = eq.geom.ix;
+                    if self.selection.as_ref().is_some_and(|s| s.start <= ix && ix + 3 <= s.end) {
+                        window.paint_quad(fill(eq.view, Theme::selection()));
+                    } else if EQ_PRESSED.get() == Some((self.id, ix)) {
+                        window.paint_quad(fill(eq.view, Theme::fill_pressed()).corner_radii(px(4.)));
+                    }
+                    let _ = line.paint(o, px(self.spec.line_height), window, cx);
+                }
                 EqBody::Text { line, at, icon } => {
                     let top = o.y + px(at[1]) - line.ascent;
                     let _ = line.paint(point(o.x + px(at[0]), top), line.ascent + line.descent, window, cx);

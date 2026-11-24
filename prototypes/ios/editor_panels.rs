@@ -2,10 +2,14 @@
 use gpui::*;
 use crate::{ios::editor_surface::Surface, model::BlockId, settings::{text, tr}};
 use super::view::Editor;
+#[path = "editor_cards.rs"]
+mod cards;
 
 impl Editor {
     pub fn expanded_panel(&self) -> bool {
         self.cat_pinned || self.find.is_some() || matches!(self.menu,Some(super::view::Menu::Lang {..} | super::view::Menu::Equation {..}))
+            // 「添加」的命令面板停在顶上，盖着顶栏那排按钮。
+            || crate::ios::glass::supported() && matches!(self.menu,Some(super::view::Menu::Block { sub: Some(super::view::BlockSub::Add(_)), .. }))
     }
     pub(super) fn phone_link(&self, block: BlockId, start: usize, only_link: bool, window: &Window, cx: &Context<Self>) -> AnyElement {
         let mut panel = Surface::at(block,start);

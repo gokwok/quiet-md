@@ -68,6 +68,8 @@ pub enum InlineKind {
     Button(InlineButton),
     Reminder(InlineReminder),
     DocLink(InlineDocLink),
+    /// `<cite type="tag">#名字</cite>`: a #标签, its name without the `#`.
+    Tag(String),
     /// Kept verbatim and shown as its text (`<cite type="user">`, ...).
     Other { tag: String },
 }
@@ -119,6 +121,13 @@ impl Inline {
     pub fn doc_link(&self) -> Option<&InlineDocLink> {
         match &self.kind {
             InlineKind::DocLink(l) => Some(l),
+            _ => None,
+        }
+    }
+
+    pub fn tag(&self) -> Option<&str> {
+        match &self.kind {
+            InlineKind::Tag(name) => Some(name),
             _ => None,
         }
     }
@@ -189,6 +198,12 @@ impl InlineReminder {
     }
 }
 
+/// Whether `c` may be part of a #标签 name: letters and digits of any
+/// script, `_` and `-`.
+pub fn tag_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
+}
+
 /// @文档 a mention (`<cite type="doc" doc-id file-type>`).
 /// The title is kept as its text, for exports and for a document that is
 /// gone; the live title comes from the library.
@@ -214,21 +229,27 @@ pub struct RichText {
 }
 
 impl RichText {
-    /// The text with equations replaced by their LaTeX source and other inline
-    /// objects dropped.
+    /// The text with equations replaced by their LaTeX source, #标签 by
+    /// `#名字`, and other inline objects dropped.
     pub fn plain_text(&self) -> String {
         if !self.text.contains('\u{fffc}') {
             return self.text.clone();
         }
         let mut out = String::with_capacity(self.text.len());
         for (r, m) in self.spans() {
-            match m.inline.as_ref().and_then(Inline::equation) {
-                Some(src) => {
+            match m.inline.as_ref().map(|i| &i.kind) {
+                Some(InlineKind::Equation(src)) => {
                     for _ in self.text[r].chars() {
                         out.push_str(src);
                     }
                 }
-                None => out.push_str(&self.text[r].replace('\u{fffc}', "")),
+                Some(InlineKind::Tag(name)) => {
+                    for _ in self.text[r].chars() {
+                        out.push('#');
+                        out.push_str(name);
+                    }
+                }
+                _ => out.push_str(&self.text[r].replace('\u{fffc}', "")),
             }
         }
         out
@@ -1144,6 +1165,21 @@ impl Document {
     pub fn reminders(&self) -> Vec<InlineReminder> {
         let mut out = vec![];
         self.for_each_block(|b| out.extend(b.text.runs.iter().filter_map(|r| r.marks.inline.as_ref().and_then(Inline::reminder)).copied()));
+        out
+    }
+
+    /// Its #标签, each with how many times it occurs, in order of first
+    /// appearance.
+    pub fn tags(&self) -> Vec<(String, usize)> {
+        let mut out: Vec<(String, usize)> = vec![];
+        self.for_each_block(|b| {
+            for name in b.text.runs.iter().filter_map(|r| r.marks.inline.as_ref().and_then(Inline::tag).map(|n| (n, r.len / '\u{fffc}'.len_utf8()))) {
+                match out.iter_mut().find(|(n, _)| n == name.0) {
+                    Some(t) => t.1 += name.1,
+                    None => out.push((name.0.to_string(), name.1)),
+                }
+            }
+        });
         out
     }
 

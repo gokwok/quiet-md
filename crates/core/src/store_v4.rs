@@ -10,18 +10,19 @@ struct Preview {
     body: std::sync::Arc<str>,
     reminders: Vec<(i64, i64, bool, bool)>,
     links: Vec<(String, usize, Vec<(String, Option<String>)>)>,
+    tags: Vec<(String, usize)>,
 }
 
 impl Preview {
     fn document(doc: &Document) -> Self {
         Self { title: doc.title.text.clone(), icon: doc.icon.clone(), body: doc.plain_text().into(),
             reminders: doc.reminders().iter().map(|r| (r.expire, r.notify, r.should_notify, r.whole_day)).collect(),
-            links: doc.doc_links().into_iter().map(|l| (l.target, l.block, l.line)).collect() }
+            links: doc.doc_links().into_iter().map(|l| (l.target, l.block, l.line)).collect(), tags: doc.tags() }
     }
     fn parsed(self) -> Parsed {
         Parsed { title: self.title, icon: self.icon, body: self.body,
             reminders: self.reminders.into_iter().map(|(expire, notify, should_notify, whole_day)| crate::model::InlineReminder { expire, notify, should_notify, whole_day }).collect(),
-            links: self.links.into_iter().map(|(target, block, line)| crate::model::DocLink { target, block, line }).collect() }
+            links: self.links.into_iter().map(|(target, block, line)| crate::model::DocLink { target, block, line }).collect(), tags: self.tags }
     }
 }
 
@@ -368,8 +369,8 @@ impl Store {
                 else { Some(Preview { title: self.markdown_title(id), ..Default::default() }) }
             } else { Some(self.v4_state.borrow().previews.get(id).cloned().unwrap_or_default()) };
             let Some(preview) = preview else { continue; };
-            let Parsed { title, icon, body, reminders, links } = preview.parsed();
-            out.push(Entry { download: self.download_state(id), id: id.clone(), meta: meta.clone(), title: meta.folder.clone().or_else(|| meta.name.clone()).unwrap_or(title), icon, body, reminders, links });
+            let Parsed { title, icon, body, reminders, links, tags } = preview.parsed();
+            out.push(Entry { download: self.download_state(id), id: id.clone(), meta: meta.clone(), title: meta.folder.clone().or_else(|| meta.name.clone()).unwrap_or(title), icon, body, reminders, links, tags });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out

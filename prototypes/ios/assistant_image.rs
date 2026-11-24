@@ -1,13 +1,16 @@
 //! 设置 › 助手设置 › 图像：NovelAI 生图。服务商只有 NovelAI（接口地址可以换成同协议的别的服务），API Key 只在设备钥匙串里保存、按地址分开；
-//! 模型可选 V5 和 V4.5，尺寸三种（可视化画幅选择），步数、CFG、采样器固定，种子每次随机。
-//! 下面是画风和人物（`assistant_image_prompts.rs`），「生成」里画幅与质量词，最后「测试生成」（套着现在的画风、质量词，也可带入人物试画，结果可点击全屏查看）。
-use std::{cell::{Cell, RefCell}, collections::HashSet, path::PathBuf, sync::Arc, time::{Duration, Instant}};
+//! 模型可选 V5 和 V4.5（一排横滑的小卡片），尺寸三种，步数、CFG、采样器固定，种子每次随机。
+//! 页面最上面是顶到屏幕边的「画布」：上一次试画的图铺满（没画过是自带的一张），高矮跟着画幅变；
+//! 浮在图下沿的一排原生玻璃是画幅、试画的对象和「试画」（套着现在的画风、质量词，也可带入人物）。
+//! 下面一张圆角的面板压着图的下沿，托着其余设置。静物试画顺手给这个画风存一张样张，画风那排用（`assistant_image_prompts.rs`）。
+//! 连上以后「服务商连接」排到最后；没有 Key 时在最前。
+use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 
 use futures::channel::oneshot;
 use gpui::{prelude::FluentBuilder, *};
 use serde_json::{json, Value};
 
-use crate::{app::Workspace, settings::{prefs, row_chevron, row_ink, tr}, theme::{self, Theme}, ui};
+use crate::{app::Workspace, settings::{prefs, row_chevron, row_ink, tr}, theme::{self, Theme, craft}, ui};
 use crate::ios::{coveredit, general, glass, imagine, menu};
 use super::{Card, Field, Secret};
 
@@ -16,12 +19,12 @@ const SERVICE: &str = "com.s1dashu.quietmd.novelai";
 /// 账户接口也搬到了这个域名，`api.novelai.net` 只回 400。
 const OFFICIAL: &str = "https://image.novelai.net";
 const PATH: &str = "/ai/generate-image";
-/// 四个都用同一种请求体实测出过图（2026-11-21）。
+/// 四个都用同一种请求体实测出过图（2026-11-21）。说明照官方文档（docs.novelai.net/en/image/models）的说法：Full 数据更全，Curated 更干净。
 const MODELS: &[Card] = &[
-    ("image-model-v5-full", DEFAULT_MODEL, "NAI V5", "V5", ("最新一代，题材最广", "Latest, widest range"), ("完整", "Full")),
-    ("image-model-v5-curated", "nai-diffusion-5-curated", "NAI V5 Curated", "V5", ("用精选数据训练", "Trained on curated data"), ("精选", "Curated")),
-    ("image-model-v4-5-full", "nai-diffusion-4-5-full", "NAI V4.5", "V4.5", ("上一代完整模型", "Previous generation"), ("完整", "Full")),
-    ("image-model-v4-5-curated", "nai-diffusion-4-5-curated", "NAI V4.5 Curated", "V4.5", ("上一代精选模型", "Previous generation, curated"), ("精选", "Curated")),
+    ("image-model-v5-full", DEFAULT_MODEL, "NAI V5", "V5", ("数据最全，题材最广", "The broadest dataset"), ("完整", "Full")),
+    ("image-model-v5-curated", "nai-diffusion-5-curated", "NAI V5 Curated", "V5", ("数据更干净，更稳妥", "A cleaner, safer dataset"), ("精选", "Curated")),
+    ("image-model-v4-5-full", "nai-diffusion-4-5-full", "NAI V4.5", "V4.5", ("上一代，数据更全", "Previous, broader dataset"), ("完整", "Full")),
+    ("image-model-v4-5-curated", "nai-diffusion-4-5-curated", "NAI V4.5 Curated", "V4.5", ("上一代，数据更干净", "Previous, cleaner dataset"), ("精选", "Curated")),
 ];
 /// (元素 id, 键, 名称, 比例文字, 宽, 高)。偏好里空的键当 2:3。
 #[allow(clippy::type_complexity)]
@@ -58,6 +61,10 @@ thread_local! {
     static PERSON_ITEMS: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
     /// 测试图在窗口里的位置，点按放大全屏查看用。
     static TEST_FRAME: Cell<Option<Bounds<Pixels>>> = const { Cell::new(None) };
+    /// 画布换画幅时从多高变过来：(第几次, 原来的高, 什么时候点的)。过了动画的时间就不算数（离开再回来不重放）。
+    static MORPH: Cell<(usize, f32, Option<Instant>)> = const { Cell::new((0, 0., None)) };
+    /// 各画风的样张：标签的指纹 → 文件。
+    static THUMBS: RefCell<HashMap<String, PathBuf>> = RefCell::new(HashMap::new());
 }
 
 fn model_of(id: &str) -> &'static Card { MODELS.iter().find(|m| m.1 == id).unwrap_or(&MODELS[0]) }
@@ -159,33 +166,189 @@ fn with_secret<R>(f: impl FnOnce(Secret) -> R) -> R { let account = account(); f
 /// 钥匙串里（现在这个地址的）Key；没有就是还没添加。
 pub(crate) fn key() -> Option<String> { with_secret(super::read_secret) }
 
-pub fn opened() { KEY_SAVED.with(|k| k.set(with_secret(super::key_saved))); }
+pub fn opened() {
+    KEY_SAVED.with(|k| k.set(with_secret(super::key_saved)));
+    scan_thumbs();
+    if TEST.with(|t| matches!(*t.borrow(), Test::Idle)) { rest(); }
+}
 
-/// 可视化画幅选择（三枚按真实长宽比缩放的微缩画框，点一下即切换）。
-fn size_picker(current_key: &str, cx: &mut Context<Workspace>) -> AnyElement {
-    let items = SIZES.iter().map(|&(id, key, label, ratio, w, h)| {
-        let on = key == current_key;
-        let max_side = w.max(h) as f32;
-        let (fw, fh) = (w as f32 / max_side * 40., h as f32 / max_side * 40.);
-        let frame_bg = if on { Theme::block_hover() } else { Theme::bg_body() };
-        let frame_border = if on { Theme::primary() } else { Theme::line_border() };
-        div().id(id).flex_1().min_w_0().py(px(12.)).px(px(6.)).rounded(px(14.))
-            .bg(if on { Theme::block_hover() } else { gpui::transparent_black() })
-            .border_2().border_color(if on { Theme::primary() } else { gpui::transparent_black() })
-            .flex().flex_col().items_center().gap(px(8.))
-            .active(|d| d.bg(Theme::fill_pressed()))
-            .child(div().h(px(44.)).flex().items_center().justify_center()
-                .child(div().w(px(fw)).h(px(fh)).rounded(px(5.)).bg(frame_bg).border_1().border_color(frame_border)
-                    .when(on, |d| d.shadow(theme::shadow_button()))
-                    .flex().items_center().justify_center()
-                    .child(div().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(if on { Theme::primary() } else { Theme::text_placeholder() }).child(ratio))))
-            .child(div().flex().flex_col().items_center().gap(px(1.))
-                .child(div().text_size(px(14.)).line_height(px(18.)).font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
-                    .text_color(if on { Theme::primary() } else { row_ink() }).child(tr(label.0, label.1)))
-                .child(div().text_size(px(11.)).line_height(px(15.)).text_color(Theme::text_caption()).child(format!("{w}×{h}"))))
-            .on_click(cx.listener(move |w, _, _, cx| if !on { glass::haptic(); w.set_pref(|p| p.image_size = key.into(), cx); }))
+// ---- 上一张试画（临时目录，系统清掉了就是没有）和画风样张
+
+fn last_png() -> PathBuf { std::env::temp_dir().join("margin-image-test.png") }
+fn last_meta() -> PathBuf { last_png().with_extension("json") }
+/// 样张和头像照片放一处（只在这台设备上，系统不会清）：一张样张是一次生成换来的。
+fn thumbs_dir() -> PathBuf { crate::store::Store::home_dir().join("assistant-style-thumbs") }
+
+/// 没在试画时画布上放什么：上一张还在就是它，不在就是白纸。
+fn rest() {
+    let last = (|| {
+        let v: Value = serde_json::from_slice(&std::fs::read(last_meta()).ok()?).ok()?;
+        let n = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n as u32);
+        let (secs, size, meta) = (v.get("secs")?.as_f64()? as f32, (n("width")?, n("height")?), v.get("meta")?.as_str()?.to_owned());
+        let png = std::fs::read(last_png()).ok()?;
+        Some(Test::Done { secs, size, meta, image: Arc::new(Image::from_bytes(ImageFormat::Png, png)), path: Some(last_png()) })
+    })();
+    TEST.with(|t| *t.borrow_mut() = last.unwrap_or(Test::Idle));
+}
+/// 换了地址或 Key：上一张不算数了。
+fn forget() {
+    let _ = std::fs::remove_file(last_png());
+    let _ = std::fs::remove_file(last_meta());
+    TEST.with(|t| *t.borrow_mut() = Test::Idle);
+}
+
+/// 画风的指纹：标识加标签。改了标签就对不上，旧样张等于没有。
+fn fingerprint(id: &str, positive: &str, negative: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (id, positive.trim(), negative.trim()).hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+/// 文件名是 `<指纹>-<毫秒>.png`（每次换名字，图片缓存才认得是新的）；同一个指纹只留最新的一张。
+fn scan_thumbs() {
+    let mut found: HashMap<String, PathBuf> = HashMap::new();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(thumbs_dir()).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    files.sort();
+    for path in files {
+        let Some(key) = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.split('-').next()).map(str::to_owned) else { continue };
+        if let Some(old) = found.insert(key, path) { let _ = std::fs::remove_file(old); }
+    }
+    THUMBS.with(|t| *t.borrow_mut() = found);
+}
+/// 这个画风的样张（用它画过静物才有）。
+pub(super) fn style_thumb(id: &str, positive: &str, negative: &str) -> Option<PathBuf> {
+    THUMBS.with(|t| t.borrow().get(&fingerprint(id, positive, negative)).cloned())
+}
+/// 样张：居中裁成 3:2，缩到卡片三倍大小。
+fn thumbnail(png: &[u8]) -> Option<Vec<u8>> {
+    let picture = ::image::load_from_memory_with_format(png, ::image::ImageFormat::Png).ok()?;
+    let (w, h) = (picture.width(), picture.height());
+    let (cw, ch) = if w * 2 > h * 3 { (h * 3 / 2, h) } else { (w, w * 2 / 3) };
+    let small = picture.crop_imm((w - cw) / 2, (h - ch) / 2, cw, ch).resize_exact(450, 300, ::image::imageops::FilterType::Triangle);
+    let mut out = Vec::new();
+    small.write_to(&mut std::io::Cursor::new(&mut out), ::image::ImageFormat::Png).ok()?;
+    Some(out)
+}
+
+const MORPH_TIME: Duration = Duration::from_millis(360);
+/// 画布的高：竖的高、横的矮（图铺满，裁着看）。
+fn stage((w, h): (u32, u32)) -> f32 { if w > h { 340. } else if w == h { 410. } else { 500. } }
+
+/// 没画过时画布上的图：每种画幅一张，自带的（`canvas/*.webp`，编进二进制，只这一页用）。
+fn sample(key: &str) -> Arc<Image> {
+    thread_local! { static IMAGES: RefCell<[Option<Arc<Image>>; 3]> = const { RefCell::new([None, None, None]) }; }
+    let (i, bytes): (usize, &[u8]) = match key {
+        "landscape" => (1, include_bytes!("canvas/landscape.webp")),
+        "square" => (2, include_bytes!("canvas/square.webp")),
+        _ => (0, include_bytes!("canvas/portrait.webp")),
+    };
+    IMAGES.with(|images| images.borrow_mut()[i].get_or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Webp, bytes.to_vec()))).clone())
+}
+
+/// 画布：顶到屏幕上沿和左右两边。试画过的图铺满（点开看全图）；试画中是扫光的占位；没画过或失败是这种画幅自带的一张图（`sample`）。
+/// 图的上沿盖一道很淡的底色，让页名看得清。换画幅时高矮变过去。
+/// 下沿浮着一排玻璃：左边三格画幅，右边试画的对象（静物或一个写了外貌的人物，系统菜单）和「试画」。没有 Key 时没有右边两颗。
+fn studio(saved: bool, cx: &mut Context<Workspace>) -> AnyElement {
+    let top = crate::ios::chrome_top();
+    let page = crate::ios::home_bg();
+    let test = TEST.with(|t| t.borrow().clone());
+    let running = matches!(test, Test::Running(_));
+    let (_, now) = current();
+    let key = size_key();
+    let ph = stage(if let Test::Running(s) = test { s } else { now });
+    let (epoch, from, at) = MORPH.with(Cell::get);
+    let fh = if at.is_some_and(|t| t.elapsed() < MORPH_TIME) { from } else { ph };
+    let glass = glass::supported();
+    let ink = Theme::text();
+    let hero = div().relative().mx(px(-8.)).mt(px(-top)).overflow_hidden();
+    let hero = match &test {
+        Test::Running(_) => hero.child(imagine::developing(460., ph, 0.)),
+        Test::Done { image, path, .. } => {
+            let path = path.clone();
+            hero.child(img(image.clone()).absolute().inset_0().size_full().object_fit(ObjectFit::Cover))
+                .child(canvas(|b, _, _| TEST_FRAME.with(|f| f.set(Some(b))), |_, _, _, _| {}).absolute().inset_0())
+                .when(path.is_some(), |d| d.child(div().id("image-test-preview").absolute().top(px(top)).bottom_0().left_0().right_0().on_click(cx.listener(move |_, _, _, _| {
+                    glass::haptic();
+                    if let (Some(p), Some(frame)) = (path.as_ref(), TEST_FRAME.with(Cell::get)) { coveredit::view(p, frame, 0.); }
+                }))))
+        }
+        Test::Idle | Test::Failed(_) => hero.child(img(sample(key)).absolute().inset_0().size_full().object_fit(ObjectFit::Cover)),
+    };
+    let hero = hero.when(!running, |d| d.child(div().absolute().top_0().left_0().right_0().h(px(top + 36.)).bg(linear_gradient(180., linear_color_stop(page.opacity(0.72), 0.), linear_color_stop(page.opacity(0.), 1.)))));
+    // 下沿那一排。
+    let picked = SIZES.iter().position(|s| s.1 == key).unwrap_or(0);
+    let sizes = div().relative().flex_none().w(px(144.)).h(px(48.)).rounded_full().occlude()
+        .map(|d| if glass {
+            d.child(glass::page_tab_pane("image-size-glass", vec![("sf:rectangle.portrait", 19., ink), ("sf:rectangle", 19., ink), ("sf:square", 19., ink)],
+                Some((picked, theme::ca(craft::N1000, 0.12))), SIZES.iter().map(|s| s.0).collect()))
+        } else {
+            d.bg(Theme::bg_body()).p(px(4.)).flex().children(SIZES.iter().enumerate().map(|(i, &(id, _, _, ratio, ..))| div().id(id).flex_1().h_full().rounded_full()
+                .flex().items_center().justify_center().text_size(px(13.)).font_weight(FontWeight::MEDIUM)
+                .when(i == picked, |d| d.bg(theme::ca(craft::N1000, 0.1))).text_color(if i == picked { ink } else { Theme::text_caption() }).child(ratio)
+                .on_click(cx.listener(move |w, _, _, cx| { menu_action(id, w, cx); }))))
+        });
+    let people = testable_people();
+    let chosen = selected_test_person(&people);
+    let subject = (saved && !people.is_empty() && !running).then(|| {
+        let mut items = vec![menu::Item::new(TEST_SUBJECT_SCENE, tr("静物场景", "Still Life"), "photo", 0).checked(chosen.is_none())];
+        for c in &people {
+            items.push(menu::Item::new(person_item(&c.id), c.name.clone(), "person", 1).checked(chosen.as_ref().is_some_and(|x| x.id == c.id)));
+        }
+        // 一颗只有字的胶囊：「静物」或人物的名字（长的截短）。点了出系统菜单（菜单按钮透明，盖在玻璃上）。
+        let name: String = chosen.as_ref().map_or_else(|| tr("静物", "Scene").to_owned(), |c| if c.name.chars().count() > 5 { c.name.chars().take(4).chain(['…']).collect() } else { c.name.clone() });
+        let text_w: f32 = name.chars().map(|c| if c.is_ascii() { 9. } else { 17. }).sum();
+        div().relative().flex_none().w(px(20. + text_w + 20.)).h(px(48.)).rounded_full().occlude()
+            .map(|d| if glass { d.child(glass::page_pane("image-test-subject-glass", None, None, Some((name.into(), ink)))) }
+                else { d.bg(Theme::bg_body()).flex().items_center().justify_center().text_size(px(16.)).text_color(ink).child(name) })
+            .child(menu::page_button("image-test-subject", items))
     });
-    div().w_full().px(px(12.)).py(px(12.)).flex().items_center().gap(px(6.)).children(items).into_any_element()
+    let go = (saved || running).then(|| {
+        let label = if running { tr("停止", "Stop") } else { tr("试画", "Test Draw") };
+        // 和旁边两颗一样的透明玻璃，只有字：不要图标，也不反色。胶囊按字的宽度定。
+        let text_w: f32 = label.chars().map(|c| if c.is_ascii() { 9. } else { 17. }).sum();
+        div().id("image-test").relative().flex_none().w(px(22. + text_w + 22.)).h(px(48.)).rounded_full().occlude()
+            .map(|d| if glass { d.child(glass::page_pane_heavy("image-test-glass", None, None, Some((label.into(), ink)))) }
+                else { d.bg(Theme::bg_body()).flex().items_center().justify_center().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(label) })
+            .on_click(cx.listener(move |_, _, _, cx| { glass::haptic(); glass::pulse("image-test-glass"); if running { stop(); rest(); } else { run_test(cx); } cx.notify(); }))
+    });
+    hero.child(div().absolute().left(px(16.)).right(px(16.)).bottom(px(44.)).h(px(48.)).flex().items_center().gap(px(10.))
+            .child(sizes).child(div().flex_1()).children(subject).children(go))
+        .with_animation(("image-canvas", epoch), Animation::new(MORPH_TIME).with_easing(crate::ios::assist::ease_out_quint()), move |d, t| d.h(px(fh + (ph - fh) * t)))
+        .into_any_element()
+}
+
+/// 模型小方块的底图：每一代一张（`canvas/model-5.webp` 蓝天、`model-45.webp` 土路，从画布的自带图里裁的）。
+fn plate(old: bool) -> Arc<Image> {
+    thread_local! { static IMAGES: RefCell<[Option<Arc<Image>>; 2]> = const { RefCell::new([None, None]) }; }
+    let bytes: &[u8] = if old { include_bytes!("canvas/model-45.webp") } else { include_bytes!("canvas/model-5.webp") };
+    IMAGES.with(|images| images.borrow_mut()[old as usize].get_or_insert_with(|| Arc::new(Image::from_bytes(ImageFormat::Webp, bytes.to_vec()))).clone())
+}
+
+/// 模型：一排四个带底图的小方块，大数字是哪一代，下面小字是完整 / 精选；选中的外面描一圈。
+/// 上面一行写选中那个的名字和一句说明（照官方文档的说法）。
+fn models(cx: &mut Context<Workspace>) -> AnyElement {
+    const R: f32 = 16.;
+    let current = model_of(&prefs().image_model).1;
+    let caption = MODELS.iter().find(|m| m.1 == current).map(|&(_, _, _, version, line, tag)| (format!("{version} {}", tr(tag.0, tag.1)), tr(line.0, line.1)));
+    let tiles = MODELS.iter().map(|&(action, model, _, version, _, tag)| {
+        let on = model == current;
+        let old = version != "V5";
+        div().id(action).flex_1().min_w_0().h(px(92.)).p(px(3.)).rounded(px(R + 5.)).border_2().border_color(if on { Theme::text() } else { transparent_black() })
+            .child(div().relative().size_full().rounded(px(R)).overflow_hidden()
+                .child(img(plate(old)).absolute().inset_0().size_full().rounded(px(R)).object_fit(ObjectFit::Cover))
+                .child(div().absolute().inset_0().rounded(px(R)).bg(black().opacity(if old { 0.26 } else { 0.14 })))
+                .child(div().absolute().left(px(11.)).bottom(px(9.)).flex().flex_col()
+                    .child(div().text_size(px(27.)).line_height(px(30.)).font_weight(FontWeight::BOLD).text_color(white()).child(version.trim_start_matches('V')))
+                    .child(div().text_size(px(12.)).line_height(px(16.)).font_weight(FontWeight::MEDIUM).text_color(white().opacity(0.92)).child(tr(tag.0, tag.1)))))
+            .on_click(cx.listener(move |w, _, _, cx| if !on { glass::haptic(); w.set_pref(move |p| p.image_model = model.into(), cx); }))
+    });
+    div().w_full().flex().flex_col()
+        .child(super::roles::header(tr("模型", "Model")))
+        .children(caption.map(|(name, line)| div().px(px(27.)).pb(px(8.)).flex().items_baseline().gap(px(8.))
+            .child(div().flex_none().text_size(px(15.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(name))
+            .child(div().min_w_0().truncate().text_size(px(14.)).line_height(px(20.)).text_color(Theme::text_caption()).child(line))))
+        .child(div().id("image-models").w_full().px(px(5.)).flex().children(tiles))
+        .into_any_element()
 }
 
 pub fn page(cx: &mut Context<Workspace>) -> AnyElement {
@@ -203,21 +366,40 @@ pub fn page(cx: &mut Context<Workspace>) -> AnyElement {
         .on_click(cx.listener(|w, _, _, cx| open_key(w, cx))).into_any_element();
     let address = super::writing::line("novelai-url", tr("接口地址", "Address"), custom().map_or_else(|| tr("官方", "Official").to_owned(), |u| host(&u)), true)
         .on_click(cx.listener(|w, _, _, cx| open_url(w, cx))).into_any_element();
-    let p = prefs();
-    let size = size_of(&p.image_size);
-    let mut gen_rows = vec![size_picker(size.1, cx)];
-    gen_rows.extend(super::prompts::quality_rows(cx));
-    div().w_full().pt(px(18.)).pb(px(28.)).flex().flex_col().gap(px(32.))
-        .child(general::titled(Some(tr("服务商连接", "Provider Connection")), vec![provider, address]))
-        .child(super::model_cards("image-models", tr("图像模型", "Image Model"), MODELS, model_of(&p.image_model).1, |p, id| p.image_model = id.into(), cx))
-        .child(super::prompts::styles(cx))
-        .child(super::prompts::people(cx))
-        .child(general::titled(Some(tr("生成", "Generation")), gen_rows))
-        .child(general::titled(None, test_rows(saved == Some(true), cx)))
+    let connected = saved == Some(true);
+    // 面板的抬头：大字是现在的画风。平时下面什么都不写；试画中、失败了才多一行。
+    let style = super::prompts::lib().current_style(prefs().english).map_or_else(|| tr("默认", "Default").to_owned(), |s| s.name);
+    let note = TEST.with(|t| match &*t.borrow() {
+        Test::Running(_) => Some((tr("正在生成…", "Generating…").to_owned(), false)),
+        Test::Failed(e) => Some((e.clone(), true)),
+        _ => None,
+    });
+    let head = div().px(px(18.)).flex().flex_col().gap(px(3.))
+        .child(div().text_size(px(24.)).line_height(px(30.)).font_weight(FontWeight::BOLD).text_color(Theme::text()).child(style))
+        .children(note.map(|(text, bad)| div().text_size(px(14.)).line_height(px(19.)).text_color(if bad { Theme::danger() } else { Theme::text_caption() }).child(text))).into_any_element();
+    let mut sections = vec![head, models(cx), super::prompts::styles(cx), super::prompts::people(cx),
+        general::titled(Some(tr("生成", "Generation")), super::prompts::quality_rows(cx)).into_any_element()];
+    // 还没连上时，先连。
+    sections.insert(if connected { sections.len() } else { 1 }, general::titled(Some(tr("服务商连接", "Provider Connection")), vec![provider, address]).into_any_element());
+    div().w_full().flex().flex_col()
+        .child(studio(connected, cx))
+        .child(div().relative().mx(px(-8.)).mt(px(-28.)).px(px(8.)).pt(px(22.)).rounded_t(px(28.)).bg(crate::ios::home_bg()).flex().flex_col().gap(px(30.)).children(sections))
         .into_any_element()
 }
 
-pub fn menu_action(action: &str, cx: &mut Context<Workspace>) -> bool {
+pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
+    if let Some(m) = MODELS.iter().find(|m| m.0 == action) {
+        if prefs().image_model != m.1 { w.set_pref(|p| p.image_model = m.1.into(), cx); }
+        return true;
+    }
+    if let Some(s) = SIZES.iter().find(|s| s.0 == action) {
+        if size_key() != s.1 {
+            glass::haptic();
+            MORPH.with(|m| m.set((m.get().0 + 1, stage(current().1), Some(Instant::now()))));
+            w.set_pref(|p| p.image_size = s.1.into(), cx);
+        }
+        return true;
+    }
     if action == TEST_SUBJECT_SCENE {
         TEST_PERSON.with(|p| *p.borrow_mut() = None);
         cx.notify();
@@ -260,7 +442,7 @@ fn open_url(w: &mut Workspace, cx: &mut Context<Workspace>) {
             let url = if url == OFFICIAL || url == format!("{OFFICIAL}{PATH}") { String::new() } else { url };
             if prefs().image_url != url { w.set_pref(move |p| p.image_url = url, cx); }
             stop();
-            TEST.with(|t| *t.borrow_mut() = Test::Idle);
+            forget();
             opened();
             cx.notify();
         });
@@ -271,7 +453,7 @@ fn open_url(w: &mut Workspace, cx: &mut Context<Workspace>) {
 
 fn key_result(status: i32, saved: bool) {
     let ok = status == 0 || !saved && status == super::ITEM_NOT_FOUND;
-    if ok { KEY_SAVED.with(|k| k.set(Some(saved))); stop(); TEST.with(|t| *t.borrow_mut() = Test::Idle); }
+    if ok { KEY_SAVED.with(|k| k.set(Some(saved))); stop(); forget(); }
     else { log::warn!("NovelAI Keychain update returned {status}"); }
     menu::dispatch(move |w, _, cx| {
         if ok { cx.notify(); } else {
@@ -281,7 +463,6 @@ fn key_result(status: i32, saved: bool) {
     });
 }
 
-fn seconds(s: f32) -> String { if prefs().english { format!("{s:.1} s") } else { format!("{s:.1} 秒") } }
 
 /// 试画可选的人物（写了外貌的才能入画）。
 fn testable_people() -> Vec<fdl_ai::imagine::Character> {
@@ -303,75 +484,6 @@ fn person_item(id: &str) -> &'static str {
 fn selected_test_person(people: &[fdl_ai::imagine::Character]) -> Option<fdl_ai::imagine::Character> {
     let id = TEST_PERSON.with(|p| p.borrow().clone())?;
     people.iter().find(|c| c.id == id).cloned()
-}
-
-/// 测试：用现在的模型、尺寸、画风和质量词生成一张图（默认窗边静物，也可以选已建人物试画），
-/// 生成中用按目标比例呈现的扫光呼吸占位，生成后点击图片可全屏放大查看。没有 Key 时灰着。
-fn test_rows(saved: bool, cx: &mut Context<Workspace>) -> Vec<AnyElement> {
-    let test = TEST.with(|t| t.borrow().clone());
-    let running = matches!(test, Test::Running(_));
-    let people = testable_people();
-    let chosen = selected_test_person(&people);
-    let subject_btn = (!people.is_empty() && !running).then(|| {
-        let mut items = vec![menu::Item::new(TEST_SUBJECT_SCENE, tr("静物场景", "Still Life"), "photo", 0).checked(chosen.is_none())];
-        for c in &people {
-            items.push(menu::Item::new(person_item(&c.id), c.name.clone(), "person", 1).checked(chosen.as_ref().is_some_and(|x| x.id == c.id)));
-        }
-        let label = chosen.as_ref().map_or_else(|| tr("静物场景", "Still Life").to_owned(), |c| c.name.clone());
-        div().relative().flex_none().h(px(30.)).px(px(10.)).rounded_full().bg(Theme::bg_body()).border_1().border_color(Theme::line_divider())
-            .flex().items_center().gap(px(4.))
-            .child(div().max_w(px(110.)).truncate().text_size(px(13.)).text_color(Theme::text_caption()).child(label))
-            .child(ui::icon("chevron-up-down", 12., row_chevron()))
-            .child(menu::button("image-test-subject", items))
-    });
-    let action = div().w_full().h(px(52.)).px(px(18.)).flex().items_center().gap(px(10.))
-        .child(div().id("image-test").flex_1().h_full().flex().items_center()
-            .text_size(px(17.)).font_weight(FontWeight::MEDIUM)
-            .text_color(if running { Theme::danger() } else { Theme::primary() })
-            .child(if running { tr("停止生成", "Stop") } else { tr("测试生成", "Test Generation") })
-            .when(!saved && !running, |d| d.opacity(0.4))
-            .when(saved || running, |d| d.active(|d| d.opacity(0.6))
-                .on_click(cx.listener(move |_, _, _, cx| { glass::haptic(); if running { stop(); } else { run_test(cx); } cx.notify(); }))))
-        .children(subject_btn);
-    let mut rows = vec![action.into_any_element()];
-    let (model, _) = current();
-    let name = model_of(model).2;
-    let line = |title: String, meta: AnyElement| div().w_full().min_h(px(48.)).px(px(18.)).py(px(10.)).flex().items_center().gap(px(10.))
-        .child(div().flex_1().min_w_0().truncate().text_size(px(15.)).text_color(Theme::text_caption()).child(title))
-        .child(div().flex_none().child(meta));
-    match test {
-        Test::Idle => {}
-        Test::Running((w, h)) => {
-            let k = 260. / w.max(h) as f32;
-            let (pw, ph) = (w as f32 * k, h as f32 * k);
-            rows.push(div().w_full().flex().flex_col()
-                .child(line(name.to_owned(), div().text_size(px(14.)).text_color(Theme::text_caption()).child(tr("正在生成…", "Generating…")).into_any_element()))
-                .child(div().w_full().px(px(18.)).pb(px(18.)).flex().justify_center()
-                    .child(div().relative().w(px(pw)).h(px(ph)).rounded(px(14.)).overflow_hidden().child(imagine::developing(pw, ph, 14.))))
-                .into_any_element());
-        }
-        Test::Done { secs, size: (w, h), meta, image, path } => {
-            let k = 280. / w.max(h) as f32;
-            let (pw, ph) = (w as f32 * k, h as f32 * k);
-            let view_path = path.clone();
-            rows.push(div().w_full().flex().flex_col()
-                .child(line(meta, div().text_size(px(14.)).text_color(Theme::text_caption()).child(crate::localized_format!("可用 · {}", "OK · {}", seconds(secs))).into_any_element()))
-                .child(div().w_full().px(px(18.)).pb(px(18.)).flex().justify_center()
-                    .child(div().id("image-test-preview").relative().w(px(pw)).h(px(ph)).rounded(px(14.)).overflow_hidden().shadow(theme::shadow_card())
-                        .child(img(image).size_full().rounded(px(14.)))
-                        .child(canvas(|b, _, _| TEST_FRAME.with(|f| f.set(Some(b))), |_, _, _, _| {}).absolute().inset_0())
-                        .when(view_path.is_some(), |d| d.active(|d| d.opacity(0.88)).on_click(cx.listener(move |_, _, _, _| {
-                            glass::haptic();
-                            if let (Some(p), Some(frame)) = (view_path.as_ref(), TEST_FRAME.with(Cell::get)) { coveredit::view(p, frame, 14.); }
-                        })))))
-                .into_any_element());
-        }
-        Test::Failed(e) => rows.push(div().w_full().flex().flex_col()
-            .child(line(name.to_owned(), div().text_size(px(14.)).text_color(Theme::danger()).child(tr("不可用", "Failed")).into_any_element()))
-            .child(div().px(px(18.)).pb(px(14.)).text_size(px(14.)).line_height(px(19.)).text_color(Theme::danger()).child(e))
-            .into_any_element()),
-    }
-    rows
 }
 
 /// 停下正在进行的测试：请求跟着断开，回来的结果不要了。
@@ -398,23 +510,35 @@ fn run_test(cx: &mut Context<Workspace>) {
     if let Some(s) = &style { parts.push(s.name.clone()); }
     if let Some(c) = &person { parts.push(c.name.clone()); }
     let meta = parts.join(" · ");
-    // 上一张的临时文件不要了。
-    TEST.with(|t| if let Test::Done { path: Some(p), .. } = &*t.borrow() { let _ = std::fs::remove_file(p); });
+    // 静物才给画风留样张：各画风画的是同一样东西，摆在一排才好比。
+    let sample = person.is_none().then(|| fingerprint(style.as_ref().map_or("", |s| &s.id), style.as_ref().map_or("", |s| &s.positive), style.as_ref().map_or("", |s| &s.negative)));
     let started = Instant::now();
     TEST.with(|t| *t.borrow_mut() = Test::Running(size));
     let (tx, rx) = oneshot::channel();
     let url = endpoint();
-    let call = super::llm::runtime().spawn(async move { let _ = tx.send(generate(&url, &key, model, size, &request).await); });
+    let wants = sample.is_some();
+    let call = super::llm::runtime().spawn(async move {
+        let result = generate(&url, &key, model, size, &request).await;
+        let thumb = result.as_ref().ok().filter(|_| wants).and_then(|png| thumbnail(png));
+        let _ = tx.send((result, thumb));
+    });
     TEST_CALL.with(|c| *c.borrow_mut() = Some(call.abort_handle()));
     cx.spawn(async move |this, cx| {
-        let result = rx.await.unwrap_or_else(|_| Err(tr("请求中断了", "The request was interrupted").into()));
+        let (result, thumb) = rx.await.unwrap_or_else(|_| (Err(tr("请求中断了", "The request was interrupted").into()), None));
         if TEST_RUN.with(Cell::get) != run { return; }
         TEST_CALL.with(|c| c.borrow_mut().take());
         let test = match result {
             Ok(png) => {
-                let path = std::env::temp_dir().join(format!("margin-image-test-{run}.png"));
-                let saved_path = std::fs::write(&path, &png).ok().map(|()| path);
-                Test::Done { secs: started.elapsed().as_secs_f32(), size, meta, image: Arc::new(Image::from_bytes(ImageFormat::Png, png)), path: saved_path }
+                let secs = started.elapsed().as_secs_f32();
+                let saved_path = std::fs::write(last_png(), &png).ok().map(|()| last_png());
+                let _ = std::fs::write(last_meta(), json!({ "secs": secs, "width": size.0, "height": size.1, "meta": meta }).to_string());
+                if let (Some(key), Some(thumb)) = (sample, thumb) {
+                    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+                    let _ = std::fs::create_dir_all(thumbs_dir());
+                    let _ = std::fs::write(thumbs_dir().join(format!("{key}-{millis:013}.png")), thumb);
+                    scan_thumbs();
+                }
+                Test::Done { secs, size, meta, image: Arc::new(Image::from_bytes(ImageFormat::Png, png)), path: saved_path }
             }
             Err(e) => Test::Failed(e),
         };

@@ -397,7 +397,7 @@ fn page_step(c: &mut Core, rng: &mut Rng) -> String {
 /// Inline objects: insert one at the caret, or edit the one under it.
 fn object_step(c: &mut Core, rng: &mut Rng) -> String {
     let p = c.sel.head;
-    match rng.below(5) {
+    match rng.below(9) {
         0 => {
             c.insert_equation(rng.pick(&["x^2", "a<b", ""]));
             "insert_equation".into()
@@ -413,6 +413,22 @@ fn object_step(c: &mut Core, rng: &mut Rng) -> String {
         3 => {
             c.insert_doc_link(&InlineDocLink { id: "doc1".into(), title: "文档 & <一>".into() });
             "insert_doc_link".into()
+        }
+        4 => {
+            c.insert_tag(rng.pick(&["标签", "a-b_1", "", "不 行"]));
+            "insert_tag".into()
+        }
+        5 => {
+            c.set_tag(p, rng.pick(&["换", "x"]));
+            format!("set_tag({p:?})")
+        }
+        6 => {
+            c.tag_to_text(p);
+            format!("tag_to_text({p:?})")
+        }
+        7 => {
+            if rng.chance(50) { c.convert_tag_before_caret(); } else { c.convert_tag_ending_at(Pos::new(p.block, p.offset.saturating_sub(1))); }
+            "convert_tag".into()
         }
         _ => {
             c.set_equation_source(p, rng.pick(&["y", "\\frac{1}{2}", "x^2"]));

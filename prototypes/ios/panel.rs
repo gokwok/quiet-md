@@ -136,6 +136,8 @@ pub enum Node {
     Dots { fills: Vec<Option<Hsla>>, picked: Option<usize>, act: String },
     /// 一行格子（格式面板），行高 `h`；`rule`：下面一条细线。
     Cells { cells: Vec<Slot>, h: f64, rule: bool },
+    /// 一行统计（文档信息）：左边名目，右边数；`rule`：下面一条细线。
+    Stat { label: String, value: String, rule: bool },
 }
 
 pub const PAD: f32 = 16.;
@@ -184,6 +186,7 @@ fn node_h(node: &Node, w: f64) -> f64 {
         Node::FixedScroll { height, .. } => *height,
         Node::Empty(..) => 110.,
         Node::Cells { h, .. } => *h,
+        Node::Stat { .. } => 44.,
         Node::Dots { fills, .. } => rows(fills.len(), 8) * 48. + 6.,
     }
 }
@@ -410,7 +413,7 @@ unsafe fn pulled(g: *mut AnyObject) {
                 // 有标题栏的子页：✕ 是回上一层，面板留着；第一页没有标题栏，整个收起。
                 let back = PANEL.with(|p| p.borrow().as_ref().and_then(|p| p.nodes.iter().find_map(|n| if let Node::Header { close, .. } = n { Some(close.clone()) } else { None })));
                 let (view_ptr, size) = (view as usize, { let b: CGRect = msg_send![view, bounds]; b.size.height });
-                let to = if go && back.is_none() { shift(size + 120.) } else { IDENTITY };
+                let to = if go && back.as_deref().is_none_or(|b| b == "info-close") { shift(size + 120.) } else { IDENTITY };
                 let body = block2::RcBlock::new(move || { let _: () = msg_send![view_ptr as *mut AnyObject, setTransform: to]; });
                 let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: if go { 0.25f64 } else { 0.35f64 }, delay: 0f64, usingSpringWithDamping: if go { 1f64 } else { 0.8f64 }, initialSpringVelocity: 0f64, options: 0usize, animations: &*body, completion: std::ptr::null_mut::<AnyObject>()];
                 if go {
@@ -880,18 +883,30 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                     let track = plain(content, rect(pad, y + 13., inner, 36.));
                     let _: () = msg_send![track, setBackgroundColor: well];
                     round(track, 18.);
-                    let pattern = act == "pat-tab:";
+                    // 浅色胶囊（Craft 的统计卡片）：换段时从上一段滑过来。
+                    let info = act == "info-tab:";
+                    let pattern = act == "pat-tab:" || info;
                     for i in 0..n {
                         let on = i == *picked;
                         let frame = rect(pad + cell * i as f64, y + 13., cell, 36.);
                         if on {
                             let inset = if pattern { 2. } else { 0. };
-                            let pill = plain(content, rect(frame.origin.x + inset, frame.origin.y + inset, cell - 2. * inset, 36. - 2. * inset));
-                            let surface = if pattern { ui(c"systemBackgroundColor") } else { primary };
+                            let at = |i: usize| rect(pad + cell * i as f64 + inset, y + 13. + inset, cell - 2. * inset, 36. - 2. * inset);
+                            let pill = plain(content, at(i));
+                            let surface = if info { super::glass::ui_color(white().opacity(if crate::theme::dark() { 0.18 } else { 1. })) } else if pattern { ui(c"systemBackgroundColor") } else { primary };
                             let _: () = msg_send![pill, setBackgroundColor: surface];
                             round(pill, 18.);
+                            if info {
+                                let before = SEG_PICK.with(|f| f.replace(Some((act.clone(), i)))).filter(|(a, p)| a == act && *p != i);
+                                if let Some((_, p)) = before {
+                                    let _: () = msg_send![pill, setFrame: at(p)];
+                                    let (view, to) = (pill as usize, at(i));
+                                    let body = block2::RcBlock::new(move || { let _: () = msg_send![view as *mut AnyObject, setFrame: to]; });
+                                    let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.36f64, delay: 0f64, usingSpringWithDamping: 0.86f64, initialSpringVelocity: 0f64, options: 0usize, animations: &*body, completion: std::ptr::null_mut::<AnyObject>()];
+                                }
+                            }
                         }
-                        let ink = if on && pattern { primary }
+                        let ink = if on && pattern || info { primary }
                             else if on { if crate::theme::dark() { ui(c"blackColor") } else { ui(c"whiteColor") } } else { secondary };
                         match (symbols.get(i), titles.get(i)) {
                             (Some(name), Some(title)) if on => {
@@ -1387,6 +1402,16 @@ unsafe fn build(content: *mut AnyObject, nodes: &[Node], w: f64, offset: CGPoint
                         tap(content, frame, format!("{act}{i}"));
                     }
                 }
+                Node::Stat { label: name, value, rule } => {
+                    // 照 Craft：两头各缩 24，名目灰、数是正文色，15 / 16 号字。
+                    let at = |w: f64| rect(24., y, w - 48., 44.);
+                    label(content, at(w * 0.5), name, font(15., 0., ""), secondary, 0);
+                    label(content, at(w), value, font(16., 0., ""), primary, 2);
+                    if *rule {
+                        let line = plain(content, rect(24., y + 44. - 1. / 3., w - 48., 1. / 3.));
+                        let _: () = msg_send![line, setBackgroundColor: ui(c"separatorColor")];
+                    }
+                }
                 Node::Cells { cells, h, rule } => {
                     let total: f64 = cells.iter().map(|c| c.span).sum::<f64>().max(1.);
                     let gap = 8.;
@@ -1486,9 +1511,9 @@ unsafe fn wheel(content: *mut AnyObject, frame: CGRect, color: Option<Hsla>) {
     }
 }
 
-/// 控件被点了：回到 GPUI。格式面板的动作都以 `fmt-` 开头，其余是样式面板的。
+/// 控件被点了：回到 GPUI。格式面板的动作都以 `fmt-` 开头，文档信息的以 `info-` 开头，其余是样式面板的。
 fn send(act: String) {
-    super::menu::dispatch(move |w, window, cx| if act.starts_with("fmt-") { super::format::action(&act, w, window, cx) } else { super::stylepanel::action(&act, w, window, cx) });
+    super::menu::dispatch(move |w, window, cx| if act.starts_with("info-") { super::info::action(&act, w, cx) } else if act.starts_with("fmt-") { super::format::action(&act, w, window, cx) } else { super::stylepanel::action(&act, w, window, cx) });
 }
 
 unsafe fn ns_string(s: &str) -> *mut AnyObject {

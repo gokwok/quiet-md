@@ -440,7 +440,7 @@ impl Editor {
     }
 }
 
-/// 块选中。桌面靠手柄菜单和 Shift 点击；手机上选中整块后底部升起一条矮的动作栏，改类型再点「格式」展开块菜单，
+/// 块选中。桌面靠手柄菜单和 Shift 点击；手机上选中整块后底部升起一条矮的动作栏，改类型点「格式」（`ios::format`），
 /// 选中块右边有一颗圆点，点它取消选择，左右横滑切换选择（照 Craft，可以隔着选：`Core::toggle_pick`）。
 impl Editor {
     pub(super) fn block_bar_on(&self) -> bool {
@@ -489,9 +489,11 @@ impl Editor {
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| { cx.stop_propagation(); window.prevent_default(); if glass { crate::ios::glass::pulse(id); } })
         };
         let item = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla| tile(id, ic, label, tint, false);
-        let open = |sub: Option<BlockSub>| cx.listener(move |e: &mut Editor, _: &ClickEvent, _, cx| {
+        let open = |sub: Option<BlockSub>| cx.listener(move |e: &mut Editor, _: &ClickEvent, window, cx| {
             let Some(block) = e.core.block_sel_ids().first().copied() else { return };
             e.menu = Some(Menu::Block { block, sub });
+            // 键盘归「添加」的筛选框。
+            if crate::ios::glass::supported() { window.blur(cx); }
             e.size_pick = (0, 0);
             e.slash_scroll.set_offset(Point::default());
             cx.notify();
@@ -1042,7 +1044,8 @@ const SLASH_CATS: &[(&str, &str, &str, &[Pick])] = {
         ("删除区块", "Delete Block", "trash-2", &[A("delete", "删除区块", "Delete Block", "trash-2")]),
     ]
 };
-const SLASH_CARD_W: f32 = 285.;
+// 照 Craft（录屏 2026-11-24）：271 上下。
+const SLASH_CARD_W: f32 = 272.;
 // 点进了哪一类：记着是哪一次「/」（块和触发的位置），换一次就从头来。
 thread_local! { static SLASH_CAT: std::cell::Cell<Option<(BlockId, usize, usize)>> = const { std::cell::Cell::new(None) }; }
 
@@ -1054,6 +1057,10 @@ impl Editor {
     pub(super) fn slash_reset(&self) { SLASH_CAT.with(|c| c.set(None)); }
     /// 打字触发的「/」菜单这会儿是不是分着级的（还没打筛选的字）。
     pub(super) fn slash_leveled(&self) -> bool { self.compact() && self.slash.is_some() && self.slash_query().is_empty() }
+    /// 「/」紧跟在字后面（and/or、图/表）：回车照常换行，不替人选第一条。
+    pub(super) fn slash_glued(&self) -> bool {
+        self.compact() && self.slash.as_ref().is_some_and(|s| self.core.text_of(s.block).and_then(|t| t.text.get(..s.trigger)).is_some_and(|b| b.ends_with(char::is_alphanumeric)))
+    }
     /// 退格：在某一类里先回到分类那一级（返回真，这一下不删字）。
     pub(super) fn slash_up(&mut self) -> bool {
         if !self.slash_leveled() || self.slash_cat().is_none() { return false; }
@@ -1062,83 +1069,131 @@ impl Editor {
         true
     }
 
-    pub(super) fn phone_slash(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// 「/」菜单这会儿的行（分类、某一类、打了字的筛选结果），和它是哪一级。照 Craft：图标都是灰的，删除是红的；
+    /// 「助手」的 ¶ 和「配图」的星框是朱红的（两样 AI 的一家）。
+    fn slash_look(&self) -> crate::ios::cmdmenu::Look {
         use super::menus::SLASH_ITEMS;
-        let s = self.slash.as_ref()?;
-        let (p, lh) = self.point_of(super::core::Pos::new(s.block, s.trigger))?;
+        use crate::ios::cmdmenu::Kind;
         // 任务、高亮块在桌面的两组里各有一份：这里每种只留一份。
         let mut items: Vec<usize> = vec![];
         for i in self.slash_results() { if !items.iter().any(|j| SLASH_ITEMS[*j].kind == SLASH_ITEMS[i].kind) { items.push(i); } }
+        let find = |k: super::menus::SlashKind| items.iter().copied().find(|i| SLASH_ITEMS[*i].kind == k);
+        let usable = |p: &Pick| match p { Pick::K(k) => find(*k).is_some(), Pick::A(..) => true };
+        let pick = |p: Pick| match p {
+            Pick::K(k) => { let i = find(k).unwrap_or(0); let it = &SLASH_ITEMS[i]; command_row(Kind::Pick, it.icon, crate::settings::label(it.label), format!("k:{i}"), false) }
+            Pick::A(act, zh, en, glyph) => command_row(Kind::Pick, glyph, crate::settings::tr(zh, en), format!("a:{act}"), act == "delete"),
+        };
         let leveled = self.slash_query().is_empty();
-        let cat = self.slash_cat().filter(|_| leveled);
-        let row = |id: ElementId| div().id(id).flex_none().h(px(44.)).mx(px(8.)).px(px(12.)).flex().items_center().rounded(px(14.)).active(|s| s.bg(Theme::fill_hover()));
-        let label = |text: SharedString| div().ml(px(14.)).flex_1().min_w_0().text_size(px(16.)).line_height(px(22.)).text_color(Theme::text()).whitespace_nowrap().overflow_hidden().text_ellipsis().child(text);
-        let (block, trigger) = (s.block, s.trigger);
-        let mut list = div().id("slash-card-list").py(px(6.)).flex().flex_col().overflow_y_scroll().track_scroll(&self.slash_scroll);
-        let mut n = 0usize;
-        // 一行：图标、名字，点进一类的行尾一个小箭头。照 Craft：图标都是灰的，删除是红的；「助手」的 ¶ 和「配图」的星框是朱红的（两样 AI 的一家）。
-        let pick_row = |id: ElementId, glyph: &'static str, text: SharedString, more: bool, danger: bool| {
-            let tint = if danger { crate::feishu_theme::c(0xd83931) } else { Theme::icon() };
-            let ink = if matches!(glyph, "assistant" | "imagine") { crate::ios::assist::mark() } else { tint };
-            row(id).child(icon(glyph, 19., ink)).child(label(text).when(danger, |d| d.text_color(tint))).when(more, |d| d.child(icon("chevron-right", 14., Theme::text_caption())))
-        };
-        let has = |k: super::menus::SlashKind| items.iter().any(|i| SLASH_ITEMS[*i].kind == k);
-        let usable = |p: &Pick| match p { Pick::K(k) => has(*k), Pick::A(..) => true };
-        let run = |p: Pick| cx.listener(move |e: &mut Editor, _: &MouseDownEvent, window, cx| {
-            cx.stop_propagation();
-            window.prevent_default();
-            let composing = e.marked.take().is_some();
-            match p { Pick::K(kind) => e.run_slash(kind, window, cx), Pick::A(act, ..) => e.slash_act(act, window, cx) }
-            if composing { window.notify_text_input_changed(&e.focus); }
-        });
-        let pick_el = |ix: usize, p: Pick| match p {
-            Pick::K(k) => { let it = SLASH_ITEMS.iter().find(|it| it.kind == k).unwrap(); pick_row(("slash-pick", ix).into(), it.icon, crate::settings::label(it.label).into(), false, false) }
-            Pick::A(act, zh, en, glyph) => pick_row(("slash-pick", ix).into(), glyph, crate::settings::tr(zh, en).into(), false, act == "delete"),
-        };
-        if leveled && cat.is_none() {
-            for (c, (zh, en, glyph, picks)) in SLASH_CATS.iter().enumerate() {
-                let picks: Vec<Pick> = picks.iter().copied().filter(|p| usable(p)).collect();
-                if picks.is_empty() { continue; }
-                n += 1;
-                // 只有一项的类直接就是那一项。
-                if let [only] = picks.as_slice() {
-                    let danger = matches!(only, Pick::A("delete", ..));
-                    list = list.child(pick_row(("slash-cat", c).into(), glyph, crate::settings::tr(zh, en).into(), false, danger).on_mouse_down(MouseButton::Left, run(*only)));
-                    continue;
-                }
-                list = list.child(pick_row(("slash-cat", c).into(), glyph, crate::settings::tr(zh, en).into(), true, false)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |e: &mut Editor, _: &MouseDownEvent, window, cx| {
-                        cx.stop_propagation();
-                        window.prevent_default();
-                        SLASH_CAT.with(|s| s.set(Some((block, trigger, c))));
-                        e.slash_scroll.set_offset(Point::default());
-                        cx.notify();
-                    })));
-            }
-        } else if let Some(c) = cat {
-            let (zh, en, _, picks) = SLASH_CATS[c];
-            list = list.child(row("slash-back".into()).h(px(36.)).child(icon("chevron-left", 14., Theme::text_caption()))
-                .child(div().ml(px(6.)).text_size(px(13.)).line_height(px(18.)).text_color(Theme::text_caption()).child(crate::settings::tr(zh, en)))
-                .on_mouse_down(MouseButton::Left, cx.listener(|e: &mut Editor, _: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    window.prevent_default();
-                    if e.slash_up() { cx.notify(); }
-                })));
-            for (ix, p) in picks.iter().copied().filter(|p| usable(p)).enumerate() {
-                n += 1;
-                list = list.child(pick_el(ix, p).on_mouse_down(MouseButton::Left, run(p)));
-            }
-        } else {
-            for (ix, i) in items.iter().enumerate() {
+        let glued = self.slash_glued();
+        let (page, rows) = match self.slash_cat().filter(|_| leveled) {
+            _ if !leveled => ("query".into(), items.iter().enumerate().map(|(ix, i)| {
                 let it = &SLASH_ITEMS[*i];
-                let kind = it.kind;
-                n += 1;
                 // 打了字时回车选的是第一条，给它一层底。
-                list = list.child(pick_row(("slash-item", ix).into(), it.icon, crate::settings::label(it.label).into(), false, false).when(ix == 0, |d| d.bg(Theme::fill_hover()))
-                    .on_mouse_down(MouseButton::Left, run(Pick::K(kind))));
+                crate::ios::cmdmenu::Row { hot: ix == 0 && !glued, ..command_row(Kind::Pick, it.icon, crate::settings::label(it.label), format!("k:{i}"), false) }
+            }).collect()),
+            Some(c) => {
+                let (zh, en, _, picks) = SLASH_CATS[c];
+                let mut rows = vec![command_row(Kind::Back, "chevron-left", crate::settings::tr(zh, en), "back".into(), false)];
+                rows.extend(picks.iter().copied().filter(|p| usable(p)).map(pick));
+                (format!("cat{c}"), rows)
             }
+            None => ("cats".into(), SLASH_CATS.iter().enumerate().filter_map(|(c, (zh, en, glyph, picks))| {
+                let picks: Vec<Pick> = picks.iter().copied().filter(|p| usable(p)).collect();
+                Some(match picks.as_slice() {
+                    [] => return None,
+                    // 只有一项的类直接就是那一项。
+                    [only] => { let row = pick(*only); crate::ios::cmdmenu::Row { icon: *glyph, label: crate::settings::tr(zh, en).into(), ..row } }
+                    _ => command_row(Kind::Into, glyph, crate::settings::tr(zh, en), format!("cat:{c}"), false),
+                })
+            }).collect()),
+        };
+        crate::ios::cmdmenu::Look { page, rows, filter: false }
+    }
+
+    /// 命令列表里点了一行（`ios::cmdmenu`）。菜单已经不在了的不算。
+    pub fn command(&mut self, act: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let adding = matches!(self.menu, Some(Menu::Block { sub: Some(BlockSub::Add(_)), .. }));
+        let numbering = matches!(self.menu, Some(Menu::OrderedNumber { .. }));
+        let drop = matches!(self.menu, Some(Menu::TurnInto | Menu::TbMore));
+        if self.slash.is_none() && !adding && !numbering && !drop && self.mention.is_none() { return; }
+        let (name, arg) = act.split_once(':').unwrap_or((act, ""));
+        let n: usize = arg.parse().unwrap_or(0);
+        match name {
+            "cat" => if let Some(s) = &self.slash { SLASH_CAT.with(|c| c.set(Some((s.block, s.trigger, n)))); self.slash_scroll.set_offset(Point::default()); },
+            "back" if self.slash.is_some() => { self.slash_up(); }
+            "close" => self.menu = None,
+            "num" if numbering => self.phone_number_pick(n, window, cx),
+            "turn" if drop => if let Some(it) = super::menus::TURN_ITEMS.get(n) { self.menu = None; self.turn((it.kind)(), false, window, cx); },
+            "find" if drop => {
+                self.menu = None;
+                let q = self.core.selected_text();
+                if n == 1 { cx.open_url(&format!("https://www.baidu.com/s?wd={}", super::link::encode_query(&q))); } else { cx.emit(super::view::EditorEvent::Search(q)); }
+            }
+            "doc" if self.mention.is_some() => if let Some(d) = self.mention_results().get(n).cloned() {
+                let composing = self.marked.take().is_some();
+                self.pick_mention(d, window, cx);
+                if composing { window.notify_text_input_changed(&self.focus); }
+            },
+            // 添加：表格、分栏、按钮点进下一级；在下一级里接着打筛选的字就回到第一级。
+            "pick" | "back" | "query" => if let Some(Menu::Block { sub: Some(BlockSub::Add(selected)), .. }) = &mut self.menu { *selected = if name == "pick" { n } else { usize::MAX }; self.size_pick = (0, 0); },
+            "grid" => self.run_slash_sized(super::menus::SlashKind::Grid, Some((1, n)), window, cx),
+            "btn" => if let Some(act) = super::button::ACTIONS.get(n) { self.run_slash_button(*act, window, cx); },
+            "k" | "a" => {
+                let composing = self.marked.take().is_some();
+                if name == "a" { self.slash_act(arg, window, cx); } else if let Some(it) = super::menus::SLASH_ITEMS.get(n) { self.run_slash(it.kind, window, cx); }
+                if composing { window.notify_text_input_changed(&self.focus); }
+            }
+            _ => {}
         }
-        if n == 0 { return None; }
+        cx.notify();
+    }
+
+    /// 块动作栏的「添加」：屏幕顶上一张玻璃命令面板（照 Craft 的命令面板，录屏 2026-11-24），第一行筛选，下面是能插的东西；
+    /// 表格、分栏、按钮点了换成选大小、选类型的那块（还在底部）。插在选中的块下面。不支持玻璃时返回 `None`，照旧是底部面板。
+    pub(super) fn phone_add(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use super::menus::{SlashKind as K, SLASH_ITEMS};
+        use crate::ios::cmdmenu::{self, Kind};
+        let Some(Menu::Block { sub: Some(BlockSub::Add(selected)), .. }) = &self.menu else { return None };
+        if !self.compact() || !crate::ios::glass::supported() { return None; }
+        let (_, safe, viewport) = crate::ios::layout();
+        let at_top = |look: cmdmenu::Look| {
+            // 露出三行半（Craft 的面板 197 高）：看得出还能滚，选中的块也还露着。
+            let h = cmdmenu::height(&look).min(cmdmenu::FIELD + cmdmenu::PAD + cmdmenu::ROW * 3.5);
+            at(self.rel(point(px(20.), safe.top + px(4.))), Anchor::TopLeft, div().w(viewport.width - px(40.)).h(px(h)).child(cmdmenu::slot(look)))
+        };
+        if let Some(it) = SLASH_ITEMS.get(*selected) {
+            // 表格的大小要点格子，是底部的一张卡片（键盘收起）。
+            if it.kind == K::Table { return Some(self.phone_table_size(window, cx)); }
+            let mut rows = vec![command_row(Kind::Back, "chevron-left", crate::settings::label(it.label), "back".into(), false)];
+            if it.kind == K::Button {
+                rows.extend(super::button::ACTIONS.into_iter().enumerate().map(|(i, act)| command_row(Kind::Pick, super::button::action_icon(act), crate::settings::text(act.label()), format!("btn:{i}"), false)));
+            } else {
+                rows.extend((2..=5).map(|n| command_row(Kind::Pick, it.icon, if crate::settings::english() { format!("{n} columns") } else { format!("{n} 栏") }, format!("grid:{n}"), false)));
+            }
+            return Some(at_top(cmdmenu::Look { page: format!("add{selected}"), rows, filter: true }));
+        }
+        let query = cmdmenu::query();
+        let found = super::menus::filter_slash(&query);
+        let mut items: Vec<usize> = vec![];
+        // 按原来面板的顺序；筛选时按匹配的好坏。
+        let usable = self.slash_results();
+        let order = if query.is_empty() { usable.clone() } else { found.into_iter().filter(|i| usable.contains(i)).collect() };
+        for i in order { if !items.iter().any(|j| SLASH_ITEMS[*j].kind == SLASH_ITEMS[i].kind) { items.push(i); } }
+        let mut rows: Vec<_> = items.iter().enumerate().map(|(ix, &i)| {
+            let it = &SLASH_ITEMS[i];
+            let more = matches!(it.kind, K::Table | K::Grid | K::Button);
+            cmdmenu::Row { hot: ix == 0 && !query.is_empty(), ..command_row(if more { Kind::Into } else { Kind::Pick }, it.icon, crate::settings::label(it.label), format!("{}:{i}", if more { "pick" } else { "k" }), false) }
+        }).collect();
+        if rows.is_empty() { rows.push(command_row(Kind::Note, "", crate::settings::text("未能找到相关结果"), String::new(), false)); }
+        let look = cmdmenu::Look { page: "add".into(), rows, filter: true };
+        Some(at_top(look))
+    }
+
+    pub(super) fn phone_slash(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let s = self.slash.as_ref()?;
+        let (p, lh) = self.point_of(super::core::Pos::new(s.block, s.trigger))?;
+        let look = self.slash_look();
+        if look.rows.is_empty() { return None; }
         let view = self.list.viewport_bounds();
         let vh = f32::from(crate::ios::visible_height(window));
         let top_edge = f32::from(view.top()) + 4. + crate::ios::doc_top();
@@ -1146,11 +1201,51 @@ impl Editor {
         let down = below >= 180. || below >= above;
         let w = SLASH_CARD_W.min(f32::from(view.size.width) - 32.);
         let x = f32::from(p.x).clamp(f32::from(view.left()) + 16., f32::from(view.right()) - 16. - w);
-        let card = menu().id("slash-card").occlude().w(px(w)).rounded(px(22.)).overflow_hidden().shadow(crate::theme::shadow_dialog())
+        let max = if down { below } else { above }.clamp(120., 300.);
+        let place = |card: AnyElement| if down { at(self.rel(point(px(x), p.y + lh + px(6.))), Anchor::TopLeft, card) } else { at(self.rel(point(px(x), p.y - px(6.))), Anchor::BottomLeft, card) };
+        if crate::ios::glass::supported() {
+            // 点了「完成」、正文放开了焦点：这次「/」就算完了。
+            if !self.focus.is_focused(window) {
+                let editor = cx.entity().downgrade();
+                window.on_next_frame(move |window, cx| { let _ = editor.update(cx, |e, cx| if !e.focus.is_focused(window) && e.slash.take().is_some() { cx.notify(); }); });
+                return None;
+            }
+            // 原生的卡片不会被正文区裁掉：「/」滚到顶栏下面、键盘后面时就不出。
+            if f32::from(p.y + lh) < top_edge || f32::from(p.y) > vh { return None; }
+            // 露出半行，看得出还能滚。
+            let full = crate::ios::cmdmenu::height(&look);
+            let cap = ((max - crate::ios::cmdmenu::PAD) / crate::ios::cmdmenu::ROW - 0.5).floor() + 0.5;
+            let h = if full <= max { full } else { cap * crate::ios::cmdmenu::ROW + crate::ios::cmdmenu::PAD };
+            return Some(place(div().w(px(w)).h(px(h)).child(crate::ios::cmdmenu::slot(look)).into_any_element()));
+        }
+        let mut list = div().id("slash-card-list").py(px(6.)).flex().flex_col().overflow_y_scroll().track_scroll(&self.slash_scroll);
+        for (ix, row) in look.rows.into_iter().enumerate() {
+            use crate::ios::cmdmenu::Kind;
+            let back = row.kind == Kind::Back;
+            let act = row.act;
+            list = list.child(div().id(("slash-row", ix)).flex_none().h(px(if back { 36. } else { 44. })).mx(px(8.)).px(px(12.)).flex().items_center().rounded(px(14.)).when(row.hot, |d| d.bg(Theme::fill_hover())).active(|s| s.bg(Theme::fill_hover()))
+                .child(icon(row.icon, if back { 14. } else { 19. }, row.icon_color))
+                .child(div().ml(px(if back { 6. } else { 14. })).flex_1().min_w_0().text_size(px(if back { 13. } else { 16. })).line_height(px(22.)).text_color(row.color).whitespace_nowrap().overflow_hidden().text_ellipsis().child(row.label))
+                .when(row.kind == Kind::Into, |d| d.child(icon("chevron-right", 14., Theme::text_caption())))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |e: &mut Editor, _: &MouseDownEvent, window, cx| { cx.stop_propagation(); window.prevent_default(); e.command(&act, window, cx); })));
+        }
+        Some(place(menu().id("slash-card").occlude().w(px(w)).rounded(px(22.)).overflow_hidden().shadow(crate::theme::shadow_dialog())
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(list.max_h(px(if down { below } else { above }.clamp(120., 300.))));
-        Some(if down { at(self.rel(point(px(x), p.y + lh + px(6.))), Anchor::TopLeft, card) } else { at(self.rel(point(px(x), p.y - px(6.))), Anchor::BottomLeft, card) })
+            .child(list.max_h(px(max))).into_any_element()))
     }
+}
+
+/// 手机上「/」跟在字、标点后面也出菜单（中文词之间没有空格）；网址、路径里的和数字后面的（1/2、日期）不出，「、」照旧只在行首、空白后面。
+pub(super) fn slash_after(before: &str, trigger: &str) -> bool {
+    trigger == "/" && before.chars().last().is_some_and(|c| !matches!(c, '/' | ':' | '~') && !c.is_ascii_digit())
+}
+
+pub(super) fn command_row(kind: crate::ios::cmdmenu::Kind, glyph: &'static str, label: impl Into<String>, act: String, danger: bool) -> crate::ios::cmdmenu::Row {
+    use crate::ios::cmdmenu::Kind;
+    let tint = if danger { crate::feishu_theme::c(0xd83931) } else { Theme::icon() };
+    let quiet = matches!(kind, Kind::Back | Kind::Note);
+    let icon_color = if matches!(glyph, "assistant" | "imagine") { crate::ios::assist::mark() } else if quiet { Theme::text_caption() } else { tint };
+    crate::ios::cmdmenu::Row { kind, icon: glyph, label: label.into(), icon_color, color: if danger { tint } else if quiet { Theme::text_caption() } else { Theme::text() }, act, hot: false, extra: Default::default() }
 }
 
 // ---- 助手的预览
