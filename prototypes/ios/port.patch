@@ -4986,7 +4986,26 @@
              .with_priority(2).into_any_element()]
 --- a/src/home.rs
 +++ b/src/home.rs
-@@ -205,7 +205,7 @@
+@@ -152,13 +152,15 @@
+             let ratio = width.unwrap_or(690.).max(1.) / height.unwrap_or(460.).max(1.);
+             node = match b.align { crate::model::Align::Left => node.items_start(), crate::model::Align::Center => node.items_center(), crate::model::Align::Right => node.items_end() };
+             // Reserve the proportional height at the available width before loading.
+-            let media = div().relative().flex_none().w_full().max_w_full().overflow_hidden().when_some(*width, |d, w| d.w(px(w * s)))
++            // 宽度和比例分在两层：同一层又给宽又限最大宽时，高度按没限之前的宽算，图下面空出一大截。
++            let media = div().relative().flex_none().w_full().overflow_hidden()
+                 .map(|mut d| { d.style().aspect_ratio = Some(ratio); d });
+-            node = node.child(if let Some(path) = path {
++            let wrap = div().flex_none().w_full().when_some(*width, |d, w| d.max_w(px(w * s)));
++            node = node.child(wrap.child(if let Some(path) = path {
+                 media.child(img(path).doc_picture().absolute().inset_0().size_full().min_w_0().min_h_0().rounded(px(bs::RADIUS * s)).object_fit(ObjectFit::Contain)).into_any_element()
+             } else {
+                 media.rounded(px(bs::RADIUS * s)).bg(bs::code_surface()).flex().items_center().justify_center().child(icon("image-broken", 24. * s, Theme::text_disabled())).into_any_element()
+-            });
++            }));
+             return node.when_some(caption.as_ref().filter(|c| !c.is_empty()), |d, caption| d.child(div().w_full().max_w_full().when_some(*width, |d, w| d.w(px(w * s))).mt(px(6. * s)).text_size(px(13. * s)).line_height(px(20. * s)).text_color(Theme::text_caption()).text_center().child(caption.clone()))).into_any_element();
+         }
+         BlockKind::Divider { .. } => return node.h(px(25. * s)).justify_center().child(div().h(px(s)).w_full().bg(Theme::line_divider())).into_any_element(),
+@@ -205,7 +207,7 @@
          }
          BlockKind::Table(table) => {
              let widths: Vec<f32> = table.col_widths.iter().map(|w| w * s).collect();
@@ -4995,7 +5014,16 @@
              for (r, c, value) in table.cells() {
                  let (rs, cs) = (value.rowspan as usize, value.colspan as usize);
                  let header = r < table.header_rows || (table.header_col && c == 0);
-@@ -398,9 +398,8 @@
+@@ -245,7 +247,7 @@
+     }
+     if b.kind.has_text() {
+         let runs = b.text.runs.iter().map(|r| {
+-            let mut f = font(if r.marks.code { theme::MONO_FONT } else { theme::UI_FONT });
++            let mut f = if r.marks.code { font(theme::MONO_FONT) } else { crate::ios::style::thumb_font() };
+             f.weight = if r.marks.bold { FontWeight::BOLD } else { bs::weight(&b.kind) };
+             if r.marks.italic || quote { f.style = FontStyle::Italic; }
+             let mut ink = if r.marks.link.is_some() { Theme::link() } else { r.marks.text_color.as_ref().and_then(|c| theme::text_color(&c.0)).map(bs::display_ink).unwrap_or(color) };
+@@ -398,9 +400,8 @@
  
  /// A document's icon: its emoji, or the monochrome page glyph.
  fn entry_icon(e: &Entry) -> AnyElement {
@@ -5006,7 +5034,7 @@
          Some(em) => div().size(px(24.)).mr(px(12.)).flex_none().flex().items_center().justify_center().text_size(px(18.)).child(em.clone()).into_any_element(),
          None => doc_icon().mr(px(12.)).into_any_element(),
      }
-@@ -409,6 +408,10 @@
+@@ -409,6 +410,10 @@
  impl Workspace {
      /// In 批量管理 a click checks or unchecks; otherwise it opens.
      fn home_click(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -5017,7 +5045,7 @@
          if self.batch.is_none() { return self.open(id, window, cx) }
          if !self.toggle_check(id) {
              self.show_toast_kind(crate::ui::ToastKind::Error, &crate::localized_format!("一次最多选择 {} 项", "Select up to {} items at a time", crate::sidebar::BATCH_LIMIT), cx);
-@@ -417,7 +420,7 @@
+@@ -417,7 +422,7 @@
      }
  
      /// The row's / card's checkbox while 批量管理 is on.
@@ -5026,7 +5054,7 @@
          use crate::sidebar::{BATCH_LIMIT, Check, checkbox};
          let sel = self.batch.as_ref()?;
          let on = sel.contains(&e.id);
-@@ -427,6 +430,15 @@
+@@ -427,6 +432,15 @@
      pub(crate) fn home_entries(&self) -> Vec<Entry> {
          match self.home.tab {
              // 我的文档 is the library's top level.
@@ -5042,7 +5070,7 @@
              HomeTab::Recent => self.level_entries(None),
              HomeTab::Starred => self.sorted_entries(self.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.starred > 0).cloned().collect()),
          }
-@@ -484,7 +496,7 @@
+@@ -484,7 +498,7 @@
          fn subpages(blocks: &mut [crate::model::Block], entries: &[&Entry], budget: &mut usize) {
              for b in blocks {
                  if matches!(b.kind, BlockKind::SubPageList) {
@@ -5051,7 +5079,7 @@
                      *budget -= b.children.len();
                  } else {
                      subpages(&mut b.children, entries, budget);
-@@ -495,7 +507,8 @@
+@@ -495,7 +509,8 @@
          let mut budget = 64;
          let mut eqnos = HashMap::new();
          let mut cover = None;
@@ -5061,7 +5089,7 @@
              cover = doc.cover.clone();
              let numbers = crate::editor::equation_numbers(&doc);
              thumb_blocks(&doc.blocks, &mut budget, 0, &numbers, &mut eqnos)
-@@ -515,14 +528,14 @@
+@@ -515,14 +530,14 @@
      fn open_row_menu(&mut self, id: &str, key: &str, cx: &mut Context<Self>) {
          let b = self.more_bounds.borrow().get(key).copied();
          let Some(b) = b else { return };
@@ -5078,7 +5106,7 @@
          div()
              .id(SharedString::from(key.clone()))
              .relative()
-@@ -580,7 +593,7 @@
+@@ -580,7 +595,7 @@
  
      /// A newly opened folder page starts at its top.
      pub(crate) fn reset_folder_scroll(&self) {
@@ -5087,7 +5115,7 @@
          self.home.folder_list_scroll.set_offset(point(px(0.), px(0.)));
      }
  
-@@ -603,19 +616,25 @@
+@@ -603,19 +618,25 @@
          // Too narrow for the search box: a search icon beside +, in the same style.
          let search = self.header_search(window, cx);
          let narrow = search.is_none();
@@ -5117,7 +5145,7 @@
          // Tabs as segmented items: the current one on a quiet fill, no accent.
          let tab = |id: &'static str, label: &'static str, t: HomeTab| {
              let on = self.home.tab == t;
-@@ -641,8 +660,10 @@
+@@ -641,8 +662,10 @@
          };
          // 批量管理: the sidebar's 批量操作 selection, entered and shown here
          // too, with a toolbar of its own.
@@ -5129,7 +5157,7 @@
                  .text_size(px(13.)).line_height(px(20.))
                  .text_color(if enabled { Theme::text() } else { Theme::text_disabled() })
                  .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())))
-@@ -676,33 +697,50 @@
+@@ -676,33 +699,50 @@
                      .when(n > 0, |d| d.on_click(cx.listener(|w, _, window, cx| w.batch_move(window, cx)))))
                  .child(text_btn("home-batch-delete", "bin", crate::settings::text("删除"), n > 0).ml(px(4.))
                      .when(n > 0, |d| d.on_click(cx.listener(|w, _, _, cx| w.ask_batch_delete(cx)))))
@@ -5186,7 +5214,7 @@
          };
          div()
              .flex_1()
-@@ -710,19 +748,24 @@
+@@ -710,19 +750,24 @@
              .h_full()
              .flex()
              .flex_col()
@@ -5215,7 +5243,7 @@
          // The list: 13pt tertiary headers over a hairline; the
          // sorted column in the text colour, semibold, with its arrow.
          let mut header = div()
-@@ -769,7 +812,10 @@
+@@ -769,7 +814,10 @@
              );
          }
          header = header.child(div().w(px(60.)).flex_none());
@@ -5227,7 +5255,7 @@
          if entries.is_empty() {
              rows = rows.child(div().pt(px(72.)).child(empty_state("illus/empty-list.svg", crate::settings::text("当前列表暂无内容"))));
          }
-@@ -787,10 +833,11 @@
+@@ -787,10 +835,11 @@
                  .hover(row_hover)
                  .when(menu_on, |d| d.bg(Theme::fill_hover()).border_color(transparent_black()).rounded(px(ROW_RADIUS)))
                  .on_click(cx.listener(move |w, _, window, cx| w.home_click(&id, window, cx)))
@@ -5240,7 +5268,7 @@
                          cx.notify();
                      }),
                  ))
-@@ -812,58 +859,87 @@
+@@ -812,58 +861,90 @@
              row = row.child(div().w(px(60.)).flex_none().flex().justify_end().pr(px(12.)).when(self.batch.is_none(), |d| d.child(self.home_more(e, format!("home-more-{}", e.id), cx))));
              rows = rows.child(row);
          }
@@ -5274,7 +5302,7 @@
 +            let scroll = grid_scroll.0.borrow().base_handle.clone();
 +            let top = 14. + if lead.is_some() { crate::ios::home_lead_h() } else { 0. };
 +            let bottom = if crate::ios::floating() { crate::ios::dock_bottom() } else { 16. };
-+            let body = crate::ios::masonry::grid(self, &entries, n, side, gap, avail, top, bottom, lead, &scroll, window, cx);
++            let body = crate::ios::masonry::grid(entries, n, side, gap, avail, top, bottom, lead, &scroll, cx);
 +            return div().relative().flex_1().min_h_0().flex().flex_col()
 +                .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, _, cx| w.track_home_press(ev, cx)))
 +                .on_scroll(cx.listener(|w, ev: &ScrollEvent, _, cx| crate::ios::pick::scroll(w, ev, cx)))
@@ -5340,11 +5368,14 @@
          }
          let thumb = self.thumb(e);
 -        if thumb.blocks.is_empty() && e.title.trim().is_empty() {
++        // 手机：缩略图里的字也用文档的字体。
++        crate::ios::style::set_thumb_font(e.meta.style.as_ref());
++        let title = crate::ios::masonry::title_size(pad);
 +        if thumb.blocks.iter().all(|b| matches!(b.kind, BlockKind::Text) && b.text.text.trim().is_empty() && b.children.is_empty()) && e.title.trim().is_empty() {
                  div()
                      .size_full()
                      .flex()
-@@ -874,33 +950,175 @@
+@@ -874,33 +955,177 @@
                      .child(div().mt(px(4.)).text_size(px(14.)).line_height(px(22.)).text_color(Theme::text_placeholder()).child(crate::settings::text("空白文档")))
              } else {
                  let mut p = div().size_full().p(px(pad)).overflow_hidden().flex().flex_col();
@@ -5353,7 +5384,7 @@
 -                    .child(div().min_w_0().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::BOLD).child(e.title.clone())));
 +                p = p.child(div().flex_none().flex().items_start().gap(px(6.)).mb(px(10.))
 +                    .when_some(e.icon.as_ref(), |d, emoji| d.child(div().flex_none().text_size(px(15.)).line_height(px(21.)).child(emoji.clone())))
-+                    .child(div().min_w_0().flex_1().text_size(px(15.)).line_height(px(21.)).font_weight(FontWeight::BOLD).when_some(ink, |d, c| d.text_color(c)).child(e.title.clone()))
++                    .child(div().min_w_0().flex_1().text_size(px(title)).line_height(px(21.)).font(crate::ios::style::thumb_font().bold()).when_some(ink, |d, c| d.text_color(c)).child(e.title.clone()))
 +                    // 手机：收藏的文档在标题那一行的末尾一颗金色的星（照 Craft），标题在它前面换行，跟着卡片一起缩放。
 +                    .when(crate::ios::floating() && e.meta.starred > 0, |d| d.child(div().flex_none().h(px(21.)).flex().items_center().child(icon("star-fill", 15., crate::ios::star_color()))))
 +                    // 手机：标签页只看一个标签时，行末是它在这篇里出现几次的角标（照 Craft）。
@@ -5501,12 +5532,14 @@
 -            let page = self.thumb_page(e, 18.);
 +            // 手机：纸色和字色跟文档的样式。
 +            let (paper, ink) = if crate::ios::is_compact() { crate::ios::style::card_look(e.meta.style.as_ref()) } else { (None, None) };
-+            let page = self.thumb_page_inked(e, 18., ink);
++            let page = self.thumb_page_inked(e, crate::ios::masonry::pad(), ink);
              let cover = thumb.cover.as_ref().and_then(|c| crate::store::image_path(&c.src));
 -            let frame = 4.;
 +            // 手机：外面那一圈是文档样式的背景，和封面无关（封面画在纸里，见 `thumb_page`）；没有背景就不留框，页面铺满卡片。
 +            let ring = if crate::ios::is_compact() { e.meta.style.as_ref().and_then(crate::ios::style::backdrop_of) } else { None };
 +            let cover = if crate::ios::is_compact() { None } else { cover };
++            // 有背景的文档，纸的下角不圆，一直铺到卡片的圆角（照 Craft）：往下多伸一截，剪掉。
++            let under = if ring.is_some() { 24. } else { 0. };
 +            let frame = if ring.is_some() { 5. } else if crate::ios::floating() && cover.is_none() { 0. } else { 4. };
              let menu_on = self.row_menu.as_ref().is_some_and(|m| m.id == e.id);
              let check = self.home_check(e);
@@ -5528,7 +5561,7 @@
                      .child(crate::ui::continuous_surface(20., Theme::fill_hover()).size_full())
                      .into_any_element();
              }
-@@ -908,25 +1126,38 @@
+@@ -908,25 +1133,38 @@
                      .id(SharedString::from(format!("home-card-{}", e.id)))
                      .when(check.is_none(), |d| d.on_mouse_down(MouseButton::Left, cx.listener(move |w, ev: &MouseDownEvent, _, cx| w.arm_home_drag(&arm, ev.position, cx))))
                      .child(self.record_home_card(&e.id))
@@ -5558,9 +5591,9 @@
 -                    .child(crate::ui::continuous_corner_mask(20., Theme::bg_body()))
 -                    .when_some(check, |d, c| d.child(div().absolute().top(px(12.)).left(px(12.)).child(c)))
 +                    .children(ring)
-+                    .child(crate::ui::continuous_surface(20. - frame, paper.unwrap_or_else(Theme::bg_body)).size_full().overflow_hidden().relative().child(page.relative())
-+                        // 手机（照 Craft）：纸的下沿一段渐隐，写不下的字慢慢淡进纸色，而不是一刀切断。
-+                        .when(crate::ios::is_compact(), |d| { let c = paper.unwrap_or_else(Theme::bg_body); d.child(div().absolute().left_0().right_0().bottom_0().h(px(64.)).bg(linear_gradient(180., linear_color_stop(c.opacity(0.), 0.), linear_color_stop(c, 0.85)))) }))
++                    .child(crate::ui::continuous_surface(20. - frame, paper.unwrap_or_else(Theme::bg_body)).size_full().when(under > 0., |d| d.h(px(card_h - frame + under))).overflow_hidden().relative().child(page.relative())
++                        // 手机：纸的下沿渐隐，整篇都放下了就不用。
++                        .when(crate::ios::is_compact(), |d| { let c = paper.unwrap_or_else(Theme::bg_body); d.when(!crate::ios::masonry::whole(), |d| d.child(crate::ios::masonry::fade(c).bottom(px(under)))) }))
 +                    .child(crate::ui::continuous_corner_mask(20., crate::ios::home_bg()))
 +                    // 手机（照 Craft）：选中的卡片外面一圈强调色，不放勾选框；没选的照常。
 +                    .when(!crate::ios::floating(), |d| d.when_some(check, |d, c| d.child(div().absolute().top(px(12.)).left(px(12.)).child(c))))
@@ -5572,7 +5605,7 @@
                      .when(self.batch.is_none(), |d| d.child(
                          div().absolute().top(px(8.)).right(px(8.))
                              .when(!menu_on, |d| d.opacity(0.).group_hover("home-card", |s| s.opacity(1.)))
-@@ -937,13 +1168,32 @@
+@@ -937,13 +1175,32 @@
  
      /// 显示设置 and the sort dropdown: the menu panel; the sort item is a
      /// native menu row.
@@ -5607,7 +5640,7 @@
          };
          if self.home.sort_menu
              && let Some(b) = self.home.anchor("home-sort") {
-@@ -959,7 +1209,7 @@
+@@ -959,7 +1216,7 @@
                              w.home.sort = order;
                              w.save_home();
                              w.home.sort_menu = false;
@@ -5616,7 +5649,7 @@
                              w.home.list_scroll.set_offset(point(px(0.), px(0.)));
                              cx.notify();
                          })));
-@@ -969,7 +1219,7 @@
+@@ -969,7 +1226,7 @@
                      .child(menu_label(crate::settings::tr("文件夹优先", "Folders first"), g.clone(), gpui::white()).flex_1())
                      .when(self.home.folders_first && self.home.sort != HomeSort::Manual, |d| d.child(menu_glyph("check", 14., g)))
                      .on_click(cx.listener(|w, _, _, cx| { if w.home.sort == HomeSort::Manual { return; } w.home.folders_first = !w.home.folders_first; w.save_home(); w.home.sort_menu = false; cx.notify(); })));

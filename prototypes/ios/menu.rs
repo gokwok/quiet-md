@@ -53,6 +53,7 @@ thread_local! { static TARGET: RefCell<Option<(AsyncApp, AnyWindowHandle, WeakEn
 pub fn begin(allowed: bool, window: &Window, cx: &mut Context<Workspace>) {
     ALLOWED.with(|a| a.set(allowed));
     REGIONS.with(|r| r.borrow_mut().clear());
+    super::press::begin();
     super::files::attach(window);
     follow_appearance(window);
     follow_accent(window);
@@ -304,6 +305,8 @@ pub fn context(target: impl Into<SharedString>, title: impl Into<SharedString>, 
         REGIONS.with(|r| r.borrow_mut().push(Region { bounds, target, title, radius, items }));
     }, |_, _, _, _| {}).absolute().inset_0()
 }
+/// 页面上的东西这一帧接不接触摸（开着面板、搜索页时不接）。
+pub(super) fn pressable() -> bool { ALLOWED.with(|a| a.get()) && !FIND_ONLY.with(|f| f.get()) }
 /// 长按落在能出上下文菜单的地方：GPUI 自己的长按（当右键）就不要再管了。
 pub fn context_at(at: Point<Pixels>) -> bool { REGIONS.with(|r| r.borrow().iter().any(|g| g.bounds.contains(&at))) }
 /// 上下文菜单是给谁弹的。
@@ -356,14 +359,15 @@ define_class!(
 
         #[unsafe(method(contextMenuInteraction:configuration:highlightPreviewForItemWithIdentifier:))]
         fn highlight(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, _id: *mut AnyObject) -> *mut AnyObject {
-            let p = preview();
+            // 按着缩小了（`press`）：就从缩小的样子浮起来。
+            let p = preview(CONTEXT_FOR.with(|c| c.borrow().as_ref().map_or(1., |c| super::press::scale_now(c.1))));
             // 系统从这一刻起把浮起的那张盖在原处：GPUI 那份可以空出来了。
-            if !p.is_null() && CONTEXT_SNAP.with(|c| c.borrow().is_some()) && !CONTEXT_HIDE.with(|h| h.replace(true)) { dispatch(|_, _, cx| cx.notify()); }
+            if !p.is_null() && CONTEXT_SNAP.with(|c| c.borrow().is_some()) && !CONTEXT_HIDE.with(|h| h.replace(true)) { super::press::hand_over(); dispatch(|_, _, cx| cx.notify()); }
             p
         }
 
         #[unsafe(method(contextMenuInteraction:configuration:dismissalPreviewForItemWithIdentifier:))]
-        fn dismissal(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, _id: *mut AnyObject) -> *mut AnyObject { preview() }
+        fn dismissal(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, _id: *mut AnyObject) -> *mut AnyObject { preview(1.) }
 
         #[unsafe(method(contextMenuInteraction:willEndForConfiguration:animator:))]
         fn will_end(&self, _interaction: *mut AnyObject, _configuration: *mut AnyObject, animator: *mut AnyObject) {
@@ -423,7 +427,8 @@ pub(super) fn finish_frame(window: &Window) {
 }
 
 /// 浮起来的那张：长按那一刻拍下的那一块，按它的圆角剪，放回原处（系统负责浮起和落回的动画）。
-fn preview() -> *mut AnyObject {
+/// `s` 是它这一刻在屏幕上缩到几分之几。
+fn preview(s: f64) -> *mut AnyObject {
     let Some((_, bounds, radius)) = CONTEXT_FOR.with(|c| c.borrow().clone()) else { return std::ptr::null_mut(); };
     let Some(clip) = CONTEXT_SNAP.with(|c| c.borrow().as_ref().map(|(p, _)| p.clone())) else { return std::ptr::null_mut(); };
     let Some(container) = super::shot::container() else { return std::ptr::null_mut(); };
@@ -436,7 +441,7 @@ fn preview() -> *mut AnyObject {
         let _: () = msg_send![params, setBackgroundColor: clear];
         let center = bounds.center();
         let target: *mut AnyObject = msg_send![AnyClass::get(c"UIPreviewTarget").unwrap(), alloc];
-        let target: *mut AnyObject = msg_send![target, initWithContainer: container, center: CGPoint::new(f64::from(center.x), f64::from(center.y))];
+        let target: *mut AnyObject = msg_send![target, initWithContainer: container, center: CGPoint::new(f64::from(center.x), f64::from(center.y)), transform: super::shot::scale(s)];
         let preview: *mut AnyObject = msg_send![AnyClass::get(c"UITargetedPreview").unwrap(), alloc];
         let preview: *mut AnyObject = msg_send![preview, initWithView: &*clip, parameters: params, target: target];
         let _: () = msg_send![params, release];

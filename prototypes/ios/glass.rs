@@ -63,6 +63,12 @@ pub fn begin(allowed: bool, window: &Window) {
     window.on_next_frame(|_, _| PANES.with(|p| for pane in p.borrow_mut().iter_mut() { if !pane.seen { pane.set_shown(false); } }));
 }
 
+/// 助手底部那块玻璃和它的内容：换内容、收起时先让旧的淡掉，不是一下消失。
+fn fades(key: &str) -> bool { key.starts_with("assist-") }
+thread_local! { static NOW: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+/// 这块接下来那一次露面不长出来，当场就在（从别的玻璃手里接过来）。
+pub(super) fn at_once(key: &'static str) { NOW.with(|n| n.set(Some(key))); }
+
 impl Pane {
     fn set_shown(&mut self, on: bool) {
         use super::shot::Turn;
@@ -76,7 +82,17 @@ impl Pane {
             let content: *mut AnyObject = msg_send![self.view, contentView];
             let (view, content, key) = (self.view as usize, content as usize, self.key);
             let glass = self.look.as_ref().filter(|l| !l.bare).map_or(std::ptr::null_mut(), |l| effect(l)) as usize;
-            if on {
+            if on && NOW.with(|n| n.get()) == Some(key) {
+                NOW.with(|n| n.set(None));
+                let body = block2::RcBlock::new(move || {
+                    let layer: *mut AnyObject = msg_send![view as *mut AnyObject, layer];
+                    let _: () = msg_send![layer, removeAllAnimations];
+                    let _: () = msg_send![view as *mut AnyObject, setEffect: glass as *mut AnyObject];
+                    let _: () = msg_send![content as *mut AnyObject, setAlpha: 1f64];
+                    let _: () = msg_send![view as *mut AnyObject, setHidden: false];
+                });
+                let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), performWithoutAnimation: &*body];
+            } else if on {
                 // 露面时玻璃从没有长出来、里面的内容一起淡入，和换页、收面板的过渡接上。只动图层的不透明度管不住玻璃：
                 // 内容先没了，空的玻璃块还在原处（录屏 2026-11-25 07-05-17）。
                 let start = block2::RcBlock::new(move || {
@@ -91,16 +107,19 @@ impl Pane {
                 let ui = AnyClass::get(c"UIView").unwrap();
                 let _: () = msg_send![ui, performWithoutAnimation: &*start];
                 let none: Option<&block2::Block<dyn Fn(objc2::runtime::Bool)>> = None;
-                // 交接时晚一点开始：原处那颗先走（照 Craft）。4 = BeginFromCurrentState。
-                let _: () = msg_send![ui, animateWithDuration: 0.24f64, delay: if turn == Turn::Soft { 0.06f64 } else { 0. }, options: 4usize, animations: &*body, completion: none];
-            } else if turn == Turn::Soft {
+                // 交接时晚一点开始：原处那颗先走（照 Craft）。4 = BeginFromCurrentState；助手那块走后回来的不用它：
+                // 当初是一下藏起的，屏幕上的不透明度还是 1，从那里起就等于没淡入。
+                let _: () = msg_send![ui, animateWithDuration: 0.24f64, delay: if fades(key) && glass == 0 { 0.08f64 } else if turn == Turn::Soft { 0.06 } else { 0. }, options: if super::assist::just_left() { 0usize } else { 4 }, animations: &*body, completion: none];
+            } else if turn == Turn::Soft || fades(key) && ALLOWED.with(|a| a.get()) {
                 let body = block2::RcBlock::new(move || {
                     let _: () = msg_send![view as *mut AnyObject, setEffect: std::ptr::null_mut::<AnyObject>()];
                     let _: () = msg_send![content as *mut AnyObject, setAlpha: 0f64];
                 });
+                // 助手那块收起时略缩一点。
+                if fades(key) && glass != 0 { let layer: *mut AnyObject = msg_send![self.view, layer]; let shrink = super::shot::basic("transform.scale", 1., 0.94, 0.18, [0.2, 0., 0.6, 1.]); let _: () = msg_send![layer, addAnimation: shrink, forKey: ns_string("shrink")]; }
                 // 散完还没被叫回来才真的藏起。
                 let done = block2::RcBlock::new(move |_: objc2::runtime::Bool| PANES.with(|p| if p.try_borrow().is_ok_and(|p| p.iter().any(|p| p.key == key && !p.shown)) { let _: () = msg_send![view as *mut AnyObject, setHidden: true]; }));
-                let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.18f64, delay: 0f64, options: 4usize, animations: &*body, completion: &*done];
+                let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: if turn != Turn::Soft && glass == 0 { 0.12f64 } else { 0.18 }, delay: 0f64, options: 4usize, animations: &*body, completion: &*done];
             } else {
                 // 藏起是立刻的，免得压在新盖上来的东西上。
                 let _: () = msg_send![self.view, setHidden: true];

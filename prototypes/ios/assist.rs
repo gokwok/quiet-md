@@ -54,10 +54,22 @@ struct Job {
     /// 跟着写（`follow`）：还跟不跟，和上一帧看到的列表位置（对不上就是手指动过）。
     follow: bool,
     seen: Option<ListOffset>,
+    pushed: Option<Instant>,
 }
+
+/// 丢弃、重写、失败时撤下来的预览：不进文档，原处淡掉、让出地方，然后就没了。
+struct Ghost { doc: Option<String>, anchor: Option<BlockId>, blocks: Vec<Block>, at: Instant }
+/// 先淡出，再收起高度（两段叠着一点）。
+const GHOST_FADE: f32 = 0.18;
+const GHOST_HOLD: f32 = 0.1;
+const GHOST_FOLD: f32 = 0.3;
+/// 还没走完的那份预览这一帧的样子：不透明度、剩多高（0..1）。
+#[derive(Clone, Copy)]
+pub struct Fading { pub opacity: f32, pub height: f32 }
 
 thread_local! {
     static JOB: RefCell<Option<Job>> = const { RefCell::new(None) };
+    static GHOST: RefCell<Option<Ghost>> = const { RefCell::new(None) };
     static TURN: Cell<u64> = const { Cell::new(0) };
     /// 这一帧在看的文档（`frame` 每帧记下）。
     static SHOWING: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -85,7 +97,7 @@ pub fn open(ed: &mut Editor, anchor: Option<BlockId>, window: &mut Window, cx: &
     let busy = JOB.with(|j| j.borrow().as_ref().is_some_and(|j| matches!(j.phase, Phase::Thinking | Phase::Writing)));
     if busy { return toast(tr("助手还在写上一段", "The assistant is still writing").into()); }
     let doc = SHOWING.with(|s| s.borrow().clone());
-    JOB.with(|j| *j.borrow_mut() = Some(Job { doc, anchor, phase: Phase::Composing, input: String::new(), gen_id: String::new(), turn: 0, blocks: vec![], total: 0, shown: 0., tick: None, record: None, live: None, since: Instant::now(), follow: true, seen: None }));
+    JOB.with(|j| *j.borrow_mut() = Some(Job { doc, anchor, phase: Phase::Composing, input: String::new(), gen_id: String::new(), turn: 0, blocks: vec![], total: 0, shown: 0., tick: None, record: None, live: None, since: Instant::now(), follow: true, seen: None, pushed: None }));
     // 整个退出选块（不只清掉选中：横滑、块菜单这些状态一起收）。
     ed.finish_block_selection(window, cx);
     // 键盘交给卡片里的输入框：编辑器先放开焦点，键盘上方的工具条跟着收起。
@@ -99,6 +111,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
     // 栏刚变形（停止的位置换成了别的按钮）时的点击不算：防止想点停止却点到了别的。
     if matches!(id, INSERT | AGAIN | DISCARD) && JOB.with(|j| j.borrow().as_ref().is_some_and(|j| j.since.elapsed() < MORPH + Duration::from_millis(150))) { return true; }
     let Some(editor) = w.editor.clone() else { return true };
+    let barred = JOB.with(|j| j.borrow().as_ref().is_some_and(|j| j.phase != Phase::Composing));
     match id {
         SEND => {
             let input = card::text();
@@ -108,7 +121,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
             if let Err(e) = s.save(&dir()) { log::warn!("Could not save assistant settings: {e}"); }
             editor.update(cx, |ed, cx| start(ed, input, cx));
         }
-        CLOSE | DISCARD => { JOB.with(|j| j.borrow_mut().take()); editor.update(cx, |_, cx| cx.notify()); }
+        CLOSE | DISCARD => { if let Some(mut job) = JOB.with(|j| j.borrow_mut().take()) { ghost(&mut job); } editor.update(cx, |_, cx| cx.notify()); }
         STOP => {
             // 停下（丢掉 live 就断开请求）：写出来的留着，可以插入；什么都还没写就整个收起。字还在放时点的，直接放完。
             JOB.with(|j| {
@@ -126,6 +139,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         INSERT => editor.update(cx, |ed, cx| insert(ed, window, cx)),
         _ => {}
     }
+    if barred && JOB.with(|j| j.borrow().is_none()) { LEFT.with(|l| l.set(Some(Instant::now()))); }
     true
 }
 
@@ -169,7 +183,8 @@ fn start(ed: &mut Editor, input: String, cx: &mut Context<Editor>) {
     JOB.with(|j| {
         let mut slot = j.borrow_mut();
         let Some(job) = slot.as_mut() else { return };
-        *job = Job { doc: job.doc.clone(), anchor, phase: Phase::Thinking, input, gen_id, turn, blocks: vec![], total: 0, shown: 0., tick: None, record: Some(record), live: Some(Live { ticket, call: call.abort_handle() }), since: Instant::now(), follow: true, seen: None };
+        ghost(job);
+        *job = Job { doc: job.doc.clone(), anchor, phase: Phase::Thinking, input, gen_id, turn, blocks: vec![], total: 0, shown: 0., tick: None, record: Some(record), live: Some(Live { ticket, call: call.abort_handle() }), since: Instant::now(), follow: true, seen: None, pushed: None };
     });
     cx.notify();
     cx.spawn(async move |_, _| {
@@ -256,7 +271,7 @@ fn apply(job: &mut Job, u: Update) {
             if let Some(l) = &job.live { l.ticket.fail(); }
             job.live = None;
             // 写了一半的不留：失败栏只给重试和关闭，留着一段插不进去的预览只会让人困惑。想留一半的，在写的时候点停止。
-            job.blocks.clear();
+            ghost(job);
             job.phase = Phase::Failed(e);
             job.since = Instant::now();
         }
@@ -267,7 +282,7 @@ fn apply(job: &mut Job, u: Update) {
 fn halted(turn: u64) {
     JOB.with(|j| if let Some(job) = j.borrow_mut().as_mut().filter(|j| j.turn == turn && j.live.is_some()) {
         job.live = None;
-        job.blocks.clear();
+        ghost(job);
         job.phase = Phase::Failed(tr("后台生成被停止了", "Background generation was stopped").into());
     });
     refresh();
@@ -296,6 +311,12 @@ fn insert(ed: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
 
 // ---- 每帧
 
+/// 预览不要了：已经放出来的那些交给 `GHOST` 淡掉。
+fn ghost(job: &mut Job) {
+    let blocks = cut(&std::mem::take(&mut job.blocks), job.shown, false);
+    if !blocks.is_empty() { GHOST.with(|g| *g.borrow_mut() = Some(Ghost { doc: job.doc.clone(), anchor: job.anchor, blocks, at: Instant::now() })); }
+}
+
 /// 匀速放字：每秒 30 字，积压的 0.4 秒内追平。
 fn advance(job: &mut Job) -> bool {
     let now = Instant::now();
@@ -308,35 +329,50 @@ fn advance(job: &mut Job) -> bool {
     true
 }
 
+/// 放出来的前 `shown` 个字。`wet`：最后几个字是灰的，像墨还没干。
+fn cut(blocks: &[Block], shown: f32, wet: bool) -> Vec<Block> {
+    let mut budget = shown.floor() as usize;
+    let mut out = vec![];
+    for b in blocks {
+        if budget == 0 { break; }
+        let n = chars(b);
+        if n <= budget { out.push(b.clone()); budget -= n; continue; }
+        // 写到一半的这块：只放出前面的字，子块不放。
+        let mut part = b.clone();
+        let at = |n: usize| part.text.text.char_indices().nth(n).map_or(part.text.text.len(), |(i, _)| i);
+        let (end, from) = (at(budget), at(budget.saturating_sub(3)));
+        part.text = part.text.slice(0..end);
+        if wet { part.text.update_marks(from..end, |m| m.text_color = Some(crate::model::ColorName("gray".into()))); }
+        part.children.clear();
+        out.push(part);
+        break;
+    }
+    out
+}
+
 /// 预览：锚点下面（锚点没了就在最后一块下面）排出已经放出来的字。`last` 是这块是不是文档的最后一块。
-pub fn preview(id: BlockId, last: bool, exists: impl Fn(BlockId) -> bool) -> Option<(Vec<Block>, bool)> {
+/// 第二个是要不要接着出帧，第三个有就是撤下来正在淡掉的那份。
+pub fn preview(id: BlockId, last: bool, exists: impl Fn(BlockId) -> bool) -> Option<(Vec<Block>, bool, Option<Fading>)> {
+    let below = |anchor: Option<BlockId>| match anchor { Some(a) if exists(a) => a == id, _ => last };
     JOB.with(|j| {
         let mut slot = j.borrow_mut();
         let job = slot.as_mut().filter(|j| here(j) && !matches!(j.phase, Phase::Composing) && !j.blocks.is_empty())?;
-        let at = match job.anchor { Some(a) if exists(a) => a == id, _ => last };
-        if !at { return None; }
+        // 新的一份来了，旧的不再占地方。
+        GHOST.with(|g| *g.borrow_mut() = None);
+        if !below(job.anchor) { return None; }
         let moving = advance(job);
-        let mut budget = job.shown.floor() as usize;
-        let mut out = vec![];
-        for b in &job.blocks {
-            if budget == 0 { break; }
-            let n = chars(b);
-            if n <= budget { out.push(b.clone()); budget -= n; continue; }
-            // 写到一半的这块：只放出前面的字，子块不放；最后几个字是灰的，像墨还没干。
-            let mut part = b.clone();
-            let at = |n: usize| part.text.text.char_indices().nth(n).map_or(part.text.text.len(), |(i, _)| i);
-            let (end, wet) = (at(budget), at(budget.saturating_sub(3)));
-            part.text = part.text.slice(0..end);
-            part.text.update_marks(wet..end, |m| m.text_color = Some(crate::model::ColorName("gray".into())));
-            part.children.clear();
-            out.push(part);
-            break;
-        }
-        Some((out, moving || matches!(job.phase, Phase::Thinking | Phase::Writing)))
-    })
+        Some((cut(&job.blocks, job.shown, true), moving || matches!(job.phase, Phase::Thinking | Phase::Writing), None))
+    }).or_else(|| GHOST.with(|g| {
+        let mut slot = g.borrow_mut();
+        let t = slot.as_ref()?.at.elapsed().as_secs_f32();
+        if t >= GHOST_HOLD + GHOST_FOLD { *slot = None; return None; }
+        let ghost = slot.as_ref().filter(|g| SHOWING.with(|s| *s.borrow() == g.doc) && below(g.anchor))?;
+        let fold = ease_out_quint()(((t - GHOST_HOLD) / GHOST_FOLD).clamp(0., 1.));
+        Some((ghost.blocks.clone(), true, Some(Fading { opacity: (1. - t / GHOST_FADE).max(0.), height: 1. - fold })))
+    }))
 }
 
-/// 跟着写：预览的底边落到底部那块玻璃后面，就把正文往上推，每帧补上差距的四分之一（新块冒出来时不跳）。
+/// 跟着写：预览的底边落到底部那块玻璃后面，就把正文往上推，每 1/60 秒补上差距的四分之一（新块冒出来时不跳；按时间算，120Hz 下一样快）。
 /// 手指一动（列表不在上一帧留下的位置）就不跟了；滚回来、预览的底边露出来，又接着跟。`top` 是列表现在的位置，
 /// 返回要推多少；推完用 `pushed` 记下推到了哪里。
 pub fn follow(bottom: Pixels, top: ListOffset) -> Option<Pixels> {
@@ -347,40 +383,83 @@ pub fn follow(bottom: Pixels, top: ListOffset) -> Option<Pixels> {
         job.seen = Some(top);
         // 玻璃高 70（58 加上下各 6），再空出 16。
         let limit = super::sheet_point().y - px(70. + 16.);
-        if bottom <= limit { job.follow = true; return None; }
-        job.follow.then(|| ((bottom - limit) * 0.25).max(px(1.)))
+        if bottom <= limit { (job.follow, job.pushed) = (true, None); return None; }
+        let now = Instant::now();
+        let dt = job.pushed.map_or(1. / 60., |t| now.duration_since(t).as_secs_f32()).min(1. / 20.) * 60.;
+        job.pushed = Some(now);
+        let gap = bottom - limit;
+        job.follow.then(|| (gap * (1. - 0.75f32.powf(dt))).max(px(dt)).min(gap))
     })
 }
 pub fn pushed(top: ListOffset) { JOB.with(|j| if let Some(job) = j.borrow_mut().as_mut() { job.seen = Some(top); }); }
 
 /// 底部那块玻璃：在想 / 在写（带停止），写完（插入、重写、丢弃），失败（重试、关闭）。卡片打开时是卡片。
 pub fn overlay() -> Option<AnyElement> {
+    if leaving() { refresh(); }
     let (phase, since, revealing, shown) = JOB.with(|j| j.borrow_mut().as_mut().filter(|j| here(j)).map(|j| {
         // 预览那块可能不在屏幕上，放字也在这里推一下。
         let revealing = j.phase == Phase::Done && advance(j);
         (j.phase.clone(), j.since, revealing, j.shown)
-    }))?;
-    if phase == Phase::Composing { return Some(card::slot()); }
+    })).or_else(|| { BAR.with(|b| b.set(None)); None })?;
+    if phase == Phase::Composing { BAR.with(|b| b.set(None)); return Some(card::slot()); }
     // 网络先写完、字还在放：栏仍是「正在写」，放完再变。
     let phase = if revealing { Phase::Writing } else { phase };
     let ink = ink(&phase, since, shown);
-    Some(bar(phase, since, revealing, ink))
+    Some(bar(phase, revealing, ink))
+}
+
+/// 底部那块玻璃现在的样子：宽、高、圆角，和底边在窗口里的位置。四个数各是一根弹簧，目标换了就从现在的样子接着走：
+/// 输入卡收成胶囊、胶囊长成整条、点「重写」又收回来，都是同一块玻璃。
+#[derive(Clone, Copy)]
+struct Glass { x: [f32; 4], v: [f32; 4] }
+/// 收起之后这么久，底下原来的按钮才回来：先让这块淡掉，不叠着。
+const LEAVE: Duration = Duration::from_millis(140);
+thread_local! { static LEFT: Cell<Option<Instant>> = const { Cell::new(None) }; }
+pub fn leaving() -> bool { LEFT.with(|l| l.get()).is_some_and(|t| t.elapsed() < LEAVE) }
+/// 刚让完：回来的按钮淡入，不是一下出现。
+pub fn just_left() -> bool { LEFT.with(|l| l.get()).is_some_and(|t| t.elapsed() < LEAVE * 3) }
+
+thread_local! { static BAR: Cell<Option<(Glass, Instant)>> = const { Cell::new(None) }; }
+/// 各根弹簧的阻尼比和快慢。宽的略过头再回来；底边不过头，跟在落下去的键盘后面。
+const SPRINGS: [(f32, f32); 4] = [(0.8, 11.), (0.9, 14.), (1., 14.), (1., 16.)];
+
+/// 往目标走一帧，返回这一帧的样子和还在不在动。
+fn glass_to(goal: [f32; 4]) -> ([f32; 4], bool) {
+    let now = Instant::now();
+    let (held, waiting) = (BAR.with(|b| b.get()), card::waiting());
+    // 刚从卡片接过来的，从卡片的样子开始；写完停着不出帧，隔了一阵再动，也从停着的样子接着走，只是那段时间不算。
+    let (mut g, idle) = match (card::hand_over(), held) {
+        (Some(card), _) => (Glass { x: card, v: [0.; 4] }, f32::MAX),
+        (None, Some((g, t))) => (g, now.duration_since(t).as_secs_f32()),
+        (None, None) => (Glass { x: goal, v: [0.; 4] }, f32::MAX),
+    };
+    let mut dt = if waiting || idle > 0.3 { 0. } else { idle.min(0.05) };
+    while dt > 0. {
+        let h = dt.min(1. / 240.);
+        for (i, (z, w)) in SPRINGS.into_iter().enumerate() {
+            g.v[i] += (w * w * (goal[i] - g.x[i]) - 2. * z * w * g.v[i]) * h;
+            g.x[i] += g.v[i] * h;
+        }
+        dt -= h;
+    }
+    let moving = (0..4).any(|i| (goal[i] - g.x[i]).abs() > 0.1 || g.v[i].abs() > 2.);
+    if !moving { g = Glass { x: goal, v: [0.; 4] }; }
+    BAR.with(|b| b.set(Some((g, now))));
+    (g.x, moving)
 }
 
 /// 这一格点了交给工作区（和原生按钮走同一条路）。
 fn tap(id: &'static str) -> impl Fn(&ClickEvent, &mut Window, &mut App) + 'static { move |_, _, _| menu::chosen(id) }
 
-fn bar(phase: Phase, since: Instant, revealing: bool, ink: Ink) -> AnyElement {
+fn bar(phase: Phase, revealing: bool, ink: Ink) -> AnyElement {
     let glass = super::glass::supported();
     let (compact, _, viewport) = super::layout();
     let full = if compact { viewport.width - px(super::SHEET_INSET * 2.) } else { px(420.) };
     let pill = px(236.);
     let wide = matches!(phase, Phase::Done | Phase::Failed(_));
-    // 从胶囊长成整条（或反过来）：一块玻璃变形，弹簧收尾。
-    let t = (since.elapsed().as_secs_f32() / MORPH.as_secs_f32()).min(1.);
-    let e = spring(t);
-    let (from, to) = if wide { (pill, full) } else { (pill, pill) };
-    let w = from + (to - from) * e;
+    // 一块玻璃变形：从卡片收成胶囊，胶囊长成整条，或反过来。底边另外走，内容跟着整块一起。
+    let floor = f32::from(super::sheet_point().y);
+    let ([w, h, r, bottom], morphing) = glass_to([f32::from(if wide { full } else { pill }), 70., 24., floor]);
     let tile = |id: &'static str, ic: &'static str, label: &'static str, tint: Hsla| {
         div().id(id).flex_1().min_w_0().h(px(58.)).flex().flex_col().items_center().justify_center().gap(px(3.)).rounded(px(16.)).relative()
             .active(|s| s.bg(Theme::fill_pressed()))
@@ -390,9 +469,11 @@ fn bar(phase: Phase, since: Instant, revealing: bool, ink: Ink) -> AnyElement {
             .on_click(tap(id))
             .with_animation(id, Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.opacity(t))
     };
-    let mut row = div().id("assist-bar").occlude().relative().w(w).h(px(70.)).p(px(6.)).flex().items_center().gap(px(4.)).rounded(px(24.))
+    let mut row = div().id("assist-bar").occlude().relative().top(px(bottom - floor)).w(px(w)).h(px(h)).p(px(6.)).flex().items_center().gap(px(4.)).rounded(px(r))
         .when(!glass, |d| d.bg(crate::theme::raised(Theme::bg_body())).shadow(crate::theme::shadow_menu()))
-        .when(glass, |d| d.child(super::glass::panel("assist-bar-glass", 24.)))
+        .when(glass, |d| d.child(super::glass::panel("assist-bar-glass", r)))
+        // 排在玻璃后面：玻璃头一回建好时盖在卡片上面，卡片要再提上来。
+        .child(canvas(move |b, _, _| card::ride(b), |_, _, _, _| {}).absolute().inset_0())
         .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); });
     let ink_color = Theme::text();
     row = match &phase {
@@ -419,7 +500,7 @@ fn bar(phase: Phase, since: Instant, revealing: bool, ink: Ink) -> AnyElement {
             .child(div().flex_none().w(px(72.)).child(tile(DISCARD, "x", tr("关闭", "Close"), ink_color))),
         Phase::Composing => row,
     };
-    let moving = t < 1. || revealing || matches!(phase, Phase::Thinking | Phase::Writing);
+    let moving = morphing || revealing || matches!(phase, Phase::Thinking | Phase::Writing);
     row.when(moving, |d| d.child(canvas(|_, window, _| window.request_animation_frame(), |_, _, _, _| {}).absolute().size_0()))
         .into_any_element()
 }
@@ -510,19 +591,11 @@ fn paint(shape: super::glass::Shape) -> impl IntoElement {
     }).size(px(size)).flex_none()
 }
 
-/// 底部那块玻璃从胶囊长成整条的时长。
+/// 底部那块玻璃从胶囊长成整条要这么久（`menu_action` 防误点）。
 const MORPH: Duration = Duration::from_millis(420);
 
 /// 助手的颜色：应用图标的朱红（`icons/margin.svg` 的底色 #D9472B）。
 pub fn mark() -> Hsla { crate::theme::c(0xd9472b) }
-
-/// 欠阻尼的弹簧（阻尼比 0.8），0..1 → 0..1，略过头再回来。
-fn spring(t: f32) -> f32 {
-    let (z, w) = (0.8f32, 11.);
-    let wd = w * (1. - z * z).sqrt();
-    let s = t * 0.42;
-    1. - (-z * w * s).exp() * ((wd * s).cos() + z * w / wd * (wd * s).sin())
-}
 
 /// 预览里的块淡入、写完时整体落定用的曲线。
 pub fn ease_out_quint() -> impl Fn(f32) -> f32 { |t| 1. - (1. - t).powi(5) }

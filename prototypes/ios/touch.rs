@@ -454,7 +454,9 @@ impl Editor {
         // 助手开着时，底部是它的卡片或那块玻璃（贴着键盘或底边）。
         if let Some(el) = crate::ios::assist::overlay() {
             let (_, safe, viewport) = crate::ios::layout();
-            return Some(rise_at("sheet-assist", self.rel(point(viewport.width / 2., viewport.height - safe.bottom - px(crate::ios::SHEET_INSET))), el));
+            let at = self.rel(point(viewport.width / 2., viewport.height - safe.bottom - px(crate::ios::SHEET_INSET)));
+            if !crate::ios::glass::supported() { return Some(rise_at("sheet-assist", at, el)); }
+            return Some(super::overlays::at(at, Anchor::BottomCenter, crate::ios::rise_glass("sheet-assist", el)));
         }
         if let Some(el) = crate::ios::imagine::overlay() {
             let (_, safe, viewport) = crate::ios::layout();
@@ -1257,7 +1259,7 @@ impl super::render::R<'_> {
         use std::{cell::RefCell, collections::{HashMap, HashSet}, rc::Rc};
         let core = &self.ed.core;
         let last = core.doc.blocks.last().map(|x| x.id) == Some(b.id);
-        let (blocks, moving) = crate::ios::assist::preview(b.id, last, |a| core.path(a).is_some())?;
+        let (blocks, moving, fading) = crate::ios::assist::preview(b.id, last, |a| core.path(a).is_some())?;
         let r = super::render::R {
             ed: self.ed, units: Rc::new(vec![]), eqnos: self.eqnos.clone(), focused: false, selected: Rc::new(HashSet::new()), targets: RefCell::new(vec![]),
             flat: None, cache: Rc::new(RefCell::new(HashMap::new())), bounds: Rc::new(RefCell::new(HashMap::new())), ghost: true,
@@ -1280,7 +1282,21 @@ impl super::render::R<'_> {
         }
         // 点在预览上什么都不发生：不落到锚点块里（光标进锚点、键盘弹起来），也不落到预览里的勾选框、链接上
         // （那些块不在文档里）。捕获阶段就截下，比里面的处理先到。不用 occlude，那样手指在预览上就滚不动了。
+        // 撤下来的那份：原处淡掉，高度跟着收，底下的正文平着移上来。收的是量好的整高。
+        thread_local! { static FULL: std::cell::Cell<Pixels> = const { std::cell::Cell::new(px(0.)) }; }
+        if let Some(f) = fading {
+            return Some(div().relative().w_full().opacity(f.opacity)
+                .child(div().w_full().overflow_hidden().h(FULL.with(|c| c.get()) * f.height).child(col))
+                .child(div().absolute().left(px(-12.)).top(px(6.)).bottom(px(4.)).w(px(2.)).rounded_full().bg(crate::ios::assist::mark().opacity(0.5)))
+                .capture_any_mouse_down(|_, w, cx| { w.prevent_default(); cx.stop_propagation(); })
+                .child({
+                    let ed = cx.weak_entity();
+                    canvas(move |_, window, _| window.on_next_frame(move |_, cx| { let _ = ed.update(cx, |_, cx| cx.notify()); }), |_, _, _, _| {}).absolute().size_0()
+                })
+                .into_any_element());
+        }
         Some(div().relative().w_full().child(col)
+            .child(canvas(|b, _, _| FULL.with(|c| c.set(b.size.height)), |_, _, _, _| {}).absolute().inset_0())
             .capture_any_mouse_down(|_, w, cx| { w.prevent_default(); cx.stop_propagation(); })
             .child(div().absolute().left(px(-12.)).top(px(6.)).bottom(px(4.)).w(px(2.)).rounded_full().bg(crate::ios::assist::mark().opacity(0.5)))
             // 在放字时跟着往下推（`assist::follow`）。列表这一帧正在排，推要等到下一帧开头。

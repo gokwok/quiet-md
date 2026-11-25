@@ -18,6 +18,7 @@ pub mod editmenu;
 pub mod editor_surface;
 pub mod files;
 pub mod pick;
+pub mod press;
 pub mod general;
 pub mod lock;
 pub mod folder_icons;
@@ -174,6 +175,10 @@ impl IntoElement for Sheet {
 pub fn rise(key: &'static str, el: impl IntoElement) -> impl IntoElement {
     div().relative().child(el).child(shot::sheet_marker(std::panic::Location::caller())).with_animation(key, Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t))
 }
+/// 同 `rise`，但面板是原生玻璃：自己会淡掉，收起时不拍快照滑出去（拍到的是玻璃底下的正文，看着是正文多出一份往下滑）。
+pub fn rise_glass(key: &'static str, el: impl IntoElement) -> impl IntoElement {
+    div().relative().child(el).with_animation(key, Animation::new(Duration::from_millis(260)).with_easing(ease_out_quint()), |d, t| d.top(px((1. - t) * 44.)).opacity(0.3 + 0.7 * t))
+}
 
 /// 换页时谁在动。`Enter`：新页从右（往里走）或原地（标签页之间）淡入；`Back`：返回，旧页的快照往右滑走，
 /// 这一页带视差从左边回来（从已经滑过的比例开始）；`Follow`：跟手返回，跟着手指；`Return`：跟手返回没过半，
@@ -227,7 +232,7 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>, sub_dep
         // 旧页滑走的这段时间里一直出帧：只属于这一页的玻璃要等它走完才露面。
         .child(canvas(
             |_, window, _| { shot::below_drawn(); let parked = shot::parked_tick(); if parked || shot::sliding() { window.request_animation_frame() } },
-            |_, _, window, _| menu::finish_frame(window),
+            |_, _, window, _| { menu::finish_frame(window); press::finish_frame(); },
         ).absolute().size_0());
     if !is_compact() || epoch == 0 { return page.into_any_element(); }
     match motion {
@@ -719,7 +724,7 @@ pub fn row_context(w: &Workspace, id: &str, radius: f32) -> Option<AnyElement> {
 /// 同上，长按的这一处用 `key`（「id#位置」）区分：同一篇文档出现在别处的那一块不会跟着藏起来。
 pub fn row_context_at(w: &Workspace, id: &str, key: &str, radius: f32) -> Option<AnyElement> {
     if !floating() { return None; }
-    // 「最近删除」的卡片：恢复、彻底删除。
+    // 「最近删除」的卡片：恢复、彻底删除。点了不打开，没有点触。
     if w.view == View::Trash {
         let title = hub::trash_entries(w).into_iter().find(|e| e.id == id).map(|e| crate::settings::display_title(&e.title))?;
         return trash_context_r(id, title.into(), radius);
@@ -728,6 +733,8 @@ pub fn row_context_at(w: &Workspace, id: &str, key: &str, radius: f32) -> Option
     use menu::Item;
     let e = w.entries.iter().find(|e| e.id == id)?;
     let title = crate::settings::display_title(&e.title);
+    // 按住缩小一点（`press`）。文件夹卡片的影子和前片画到格子外面。
+    let mark = press::mark(SharedString::from(key.to_string()), if e.meta.folder.is_some() && radius == FOLDER_CARD_R { 8. } else { 0. });
     let items = if e.meta.folder.is_some() {
         // 照 Craft（IMG_9173–9175）：没有标题；编辑… / 排序方式（下面一行是当前的排法，点开就地选）/ 移动到…、
         // 把里面的东西导出为 Markdown / 删除。排法和文件夹页「…」里的是同一个。
@@ -751,7 +758,7 @@ pub fn row_context_at(w: &Workspace, id: &str, key: &str, radius: f32) -> Option
         items.push(Item::new("ctx-delete", tr("删除", "Delete"), "trash", 3).danger());
         items
     } else if e.meta.local() {
-        return None;
+        return Some(mark.into_any_element());
     } else {
         let (pinned, starred) = (e.meta.pinned, e.meta.starred > 0);
         let mut download = vec![];
@@ -769,8 +776,10 @@ pub fn row_context_at(w: &Workspace, id: &str, key: &str, radius: f32) -> Option
     };
     // 文件夹的菜单照 Craft 不带标题。
     let title = if e.meta.folder.is_some() { String::new() } else { title };
-    Some(menu::context(SharedString::from(key.to_string()), title, radius, items).into_any_element())
+    Some(div().absolute().inset_0().child(menu::context(SharedString::from(key.to_string()), title, radius, items)).child(mark).into_any_element())
 }
+/// `render_folder_card` 报的圆角。
+const FOLDER_CARD_R: f32 = 10.;
 /// 回收站的行：恢复、彻底删除。
 pub fn trash_context(id: &str, title: SharedString) -> Option<AnyElement> { trash_context_r(id, title, 10.) }
 /// 同上，浮起来的那块圆角是 `radius`（「最近删除」的卡片是 20）。

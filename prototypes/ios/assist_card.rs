@@ -18,11 +18,14 @@ const PAD: f64 = 14.;
 const CHIP: f64 = 32.;
 const TEXT: f64 = 104.;
 const SEND: f64 = 36.;
+const RADIUS: f64 = 28.;
 
-struct Card { view: *mut AnyObject, chips: [*mut AnyObject; 3], text: *mut AnyObject, hint: *mut AnyObject, send: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, shown: bool }
+struct Card { view: *mut AnyObject, chips: [*mut AnyObject; 3], text: *mut AnyObject, hint: *mut AnyObject, send: *mut AnyObject, frame: Bounds<Pixels>, dark: Option<bool>, shown: bool, handed: bool, riding: bool }
 thread_local! {
     static CARD: RefCell<Option<Card>> = const { RefCell::new(None) };
     static SEEN: Cell<bool> = const { Cell::new(false) };
+    /// 键盘刚让收起，这一帧画完它才动。
+    static FALLING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 每帧开头调用：这一帧没有占位，卡片就收起。
@@ -37,9 +40,60 @@ fn hide() {
     CARD.with(|c| if let Some(card) = c.borrow_mut().as_mut().filter(|card| card.shown) { unsafe {
         card.shown = false;
         let _: bool = msg_send![card.view, endEditing: true];
-        let _: () = msg_send![card.view, setHidden: true];
+        // 玻璃已经交出去的，剩下的内容正在淡出，淡完自己藏（`hand_over`）。
+        if std::mem::take(&mut card.handed) { FALLING.with(|f| f.set(true)); } else { dissolve(card, true); }
     } });
 }
+
+/// 内容（`glass`：连玻璃）淡掉，淡完还没重新打开才真的藏（重新打开会清掉 `riding`）。
+unsafe fn dissolve(card: &mut Card, glass: bool) {
+    card.riding = true;
+    unsafe {
+        let content: *mut AnyObject = msg_send![card.view, contentView];
+        let (view, content) = (card.view as usize, content as usize);
+        let body = block2::RcBlock::new(move || {
+            if glass { let _: () = msg_send![view as *mut AnyObject, setEffect: std::ptr::null_mut::<AnyObject>()]; }
+            let _: () = msg_send![content as *mut AnyObject, setAlpha: 0f64];
+        });
+        let done = block2::RcBlock::new(move |_: objc2::runtime::Bool| if CARD.with(|c| c.try_borrow_mut().is_ok_and(|mut c| c.as_mut().is_some_and(|c| std::mem::take(&mut c.riding)))) { let _: () = msg_send![view as *mut AnyObject, setHidden: true]; });
+        let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: if glass { 0.18f64 } else { 0.1 }, delay: 0f64, options: 4usize, animations: &*body, completion: &*done];
+    }
+}
+
+/// 发出去了：卡片的玻璃交给底部那块接着变形（`assist::glass_to`），返回它的宽、高、圆角和底边。只交一次。
+/// 同一帧里卡片这边的玻璃拿掉、那边的当场露面，看着是同一块；卡片里的内容跟着玻璃走（`ride`）、很快淡掉。键盘照旧下一帧才收（`begin`）。
+pub(super) fn hand_over() -> Option<[f32; 4]> {
+    if !super::super::glass::supported() { return None; }
+    CARD.with(|c| {
+        let mut slot = c.borrow_mut();
+        let card = slot.as_mut().filter(|c| c.shown && !c.handed)?;
+        card.handed = true;
+        unsafe {
+            let _: () = msg_send![card.view, setClipsToBounds: true];
+            let _: () = msg_send![card.view, setEffect: std::ptr::null_mut::<AnyObject>()];
+            dissolve(card, false);
+        }
+        // 下次打开要重新摆。
+        let f = std::mem::take(&mut card.frame);
+        super::super::glass::at_once("assist-bar-glass");
+        Some([f32::from(f.size.width), f32::from(f.size.height), RADIUS as f32, f32::from(f.bottom())])
+    })
+}
+
+/// 玻璃这一帧在哪（窗口里），还没淡完的内容跟着它。
+pub(super) fn ride(b: Bounds<Pixels>) {
+    CARD.with(|c| if let Some(card) = c.borrow().as_ref().filter(|c| c.riding) { unsafe {
+        let ui = AnyClass::get(c"UIView").unwrap();
+        let (view, rect) = (card.view as usize, CGRect::new(CGPoint::new(f64::from(b.origin.x), f64::from(b.origin.y)), CGSize::new(f64::from(b.size.width), f64::from(b.size.height))));
+        let body = block2::RcBlock::new(move || { let _: () = msg_send![view as *mut AnyObject, setFrame: rect]; });
+        let _: () = msg_send![ui, performWithoutAnimation: &*body];
+        let parent: *mut AnyObject = msg_send![card.view, superview];
+        let _: () = msg_send![parent, bringSubviewToFront: card.view];
+    } });
+}
+
+/// 键盘还没开始落：收键盘那一下会占住一帧，玻璃等它一起走，不抢到键盘后面去。
+pub(super) fn waiting() -> bool { FALLING.with(|f| f.take()) || CARD.with(|c| c.borrow().as_ref().is_some_and(|c| c.shown && c.handed)) }
 
 /// 输入框里写的要求，发送时取。拼音还没选字就点了发送：先把在拼的字提交（和系统「信息」一样），再去掉拼音键盘插在音节间的 U+2006。
 pub fn text() -> String {
@@ -101,6 +155,16 @@ fn place(frame: Bounds<Pixels>, window: &Window) {
             let _: () = msg_send![card.text, setText: ns_string(&last)];
             changed(card.text as usize, card.hint as usize, card.send as usize);
             let _: () = msg_send![parent, bringSubviewToFront: card.view];
+            (card.handed, card.riding) = (false, false);
+            let _: () = msg_send![card.view, setClipsToBounds: false];
+            if let Some(class) = AnyClass::get(c"UIGlassEffect") {
+                let effect: *mut AnyObject = msg_send![class, effectWithStyle: 0isize];
+                let _: () = msg_send![card.view, setEffect: effect];
+            }
+            let content: *mut AnyObject = msg_send![card.view, contentView];
+            let inner: *mut AnyObject = msg_send![content, layer];
+            let _: () = msg_send![inner, removeAllAnimations];
+            let _: () = msg_send![content, setAlpha: 1f64];
             let _: () = msg_send![card.view, setHidden: false];
             // 从下面浮上来：淡入，同时由 0.96 弹到 1。
             let layer: *mut AnyObject = msg_send![card.view, layer];
@@ -127,10 +191,11 @@ fn place(frame: Bounds<Pixels>, window: &Window) {
 unsafe fn build(parent: *mut AnyObject) -> Option<Card> {
     unsafe {
         let view: *mut AnyObject = msg_send![AnyClass::get(c"UIVisualEffectView")?, alloc];
-        let effect: *mut AnyObject = msg_send![AnyClass::get(c"UIGlassEffect")?, effectWithStyle: 0isize];
-        let view: *mut AnyObject = msg_send![view, initWithEffect: effect];
+        // 玻璃在露面时装上（`place`）。没有玻璃的系统不建卡片。
+        AnyClass::get(c"UIGlassEffect")?;
+        let view: *mut AnyObject = msg_send![view, initWithEffect: std::ptr::null_mut::<AnyObject>()];
         if let (Some(corners), Some(corner)) = (AnyClass::get(c"UICornerConfiguration"), AnyClass::get(c"UICornerRadius")) {
-            let fixed: *mut AnyObject = msg_send![corner, fixedRadius: 28f64];
+            let fixed: *mut AnyObject = msg_send![corner, fixedRadius: RADIUS];
             let config: *mut AnyObject = msg_send![corners, configurationWithUniformRadius: fixed];
             let _: () = msg_send![view, setCornerConfiguration: config];
         }
@@ -185,7 +250,7 @@ unsafe fn build(parent: *mut AnyObject) -> Option<Card> {
         let center: *mut AnyObject = msg_send![AnyClass::get(c"NSNotificationCenter").unwrap(), defaultCenter];
         let _: *mut AnyObject = msg_send![center, addObserverForName: ns_string("UITextViewTextDidChangeNotification"), object: text, queue: std::ptr::null_mut::<AnyObject>(), usingBlock: &*block];
         let _: () = msg_send![parent, addSubview: view];
-        Some(Card { view, chips, text, hint, send, frame: Bounds::default(), dark: None, shown: false })
+        Some(Card { view, chips, text, hint, send, frame: Bounds::default(), dark: None, shown: false, handed: false, riding: false })
     }
 }
 

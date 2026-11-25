@@ -219,6 +219,7 @@ pub fn capture_page() {
         let _: () = msg_send![layer, setMasksToBounds: true];
         let _: () = msg_send![&*snap, setFrame: CGRect::new(CGPoint::new(0., 0.), frame.size)];
         let _: () = msg_send![&*clip, addSubview: &*snap];
+        super::press::adopt(&clip);
         if let Some(band) = super::veil::band() {
             let copy: Option<Retained<AnyObject>> = msg_send![band, snapshotViewAfterScreenUpdates: false];
             if let Some(copy) = copy {
@@ -284,8 +285,9 @@ pub enum Turn { Later, Plain, Soft }
 /// 一律原样停着，`Later` 就是下一帧再问。页面里别处的：要藏的在原处淡出，要露面的等页面停稳。
 pub fn turn(view: *mut AnyObject, on: bool) -> Turn {
     let bar = in_bar(view);
-    if held() && (on || bar) || on && sliding() && !bar { Turn::Later }
-    else if sliding() || just_slid() || soft() && !on { Turn::Soft } else { Turn::Plain }
+    // 助手那块刚收起：它先淡掉，底下原来的按钮再回来。
+    if held() && (on || bar) || on && (sliding() && !bar || super::assist::leaving()) { Turn::Later }
+    else if sliding() || just_slid() || on && super::assist::just_left() || soft() && !on { Turn::Soft } else { Turn::Plain }
 }
 /// 按 `turn` 让一个系统按钮露面或藏起；还不到时候就返回假。
 pub fn show(view: *mut AnyObject, on: bool) -> bool {
@@ -802,11 +804,13 @@ pub fn snapshot(b: Bounds<Pixels>) -> Option<Retained<AnyObject>> {
     let metal = metal()?;
     let (x, y, w, h) = (f64::from(b.origin.x), f64::from(b.origin.y), f64::from(b.size.width), f64::from(b.size.height));
     if w < 1. || h < 1. { return None; }
+    let s = super::press::scale_now(b);
+    let from = at_pressed(CGRect::new(CGPoint::new(x, y), CGSize::new(w, h)), s).origin;
     unsafe {
         let snap: Option<Retained<AnyObject>> = msg_send![metal, snapshotViewAfterScreenUpdates: false];
         let snap = snap?;
         let full: CGRect = msg_send![metal, frame];
-        let _: () = msg_send![&*snap, setFrame: CGRect::new(CGPoint::new(-x, -y), full.size)];
+        let _: () = msg_send![&*snap, setFrame: CGRect::new(CGPoint::new(-from.x / s, -from.y / s), CGSize::new(full.size.width / s, full.size.height / s))];
         let clip: Retained<AnyObject> = msg_send![AnyClass::get(c"UIView").unwrap(), new];
         let _: () = msg_send![&*clip, setUserInteractionEnabled: false];
         let _: () = msg_send![&*clip, setClipsToBounds: true];
@@ -814,6 +818,11 @@ pub fn snapshot(b: Bounds<Pixels>) -> Option<Retained<AnyObject>> {
         let _: () = msg_send![&*clip, addSubview: &*snap];
         Some(clip)
     }
+}
+/// `r` 按着缩到了 `s`（`press`）时在屏幕上的位置。
+fn at_pressed(r: CGRect, s: f64) -> CGRect {
+    let (w, h) = (r.size.width * s, r.size.height * s);
+    CGRect::new(CGPoint::new(r.origin.x + (r.size.width - w) / 2., r.origin.y + (r.size.height - h) / 2.), CGSize::new(w, h))
 }
 /// 快照放进去的那一层（GPUI 视图的父视图，坐标和 GPUI 的一样）。
 pub fn container() -> Option<*mut AnyObject> { superview() }
@@ -892,6 +901,8 @@ pub fn from_card(id: &str) {
     let (cx, cy) = (r.origin.x + r.size.width / 2., r.origin.y + r.size.height / 2.);
     if r.size.width < 20. || !(0. ..w).contains(&cx) || !(0. ..h).contains(&cy) { return; }
     // 拍成一张真的图：Metal 视图的轻量快照（`snapshotView`）过一会儿再拿出来用就是空的，返回时要用的就是它。
+    // 按着缩小了（`press`）：就从缩小的样子开始放大。
+    let r = at_pressed(r, super::press::scale_now(b));
     let Some(face) = bitmap(r) else { return };
     unsafe { let layer: *mut AnyObject = msg_send![&*face, layer]; let _: () = msg_send![layer, setCornerRadius: CARD_RADIUS]; let _: () = msg_send![layer, setCornerCurve: ns_string("continuous")]; }
     FACE.with(|f| *f.borrow_mut() = Some((id.to_string(), r, face)));
@@ -909,6 +920,7 @@ pub fn from_card(id: &str) {
             let _: () = msg_send![&**u, performSelector: objc2::sel!(removeFromSuperview), withObject: std::ptr::null_mut::<AnyObject>(), afterDelay: 0.9f64];
         }
     }
+    super::press::drop_now();
     UNDER.with(|u| *u.borrow_mut() = under);
     OPENING.with(|o| o.set(true));
 }
@@ -1031,9 +1043,9 @@ fn screen() -> (f64, f64) { metal().map_or((0., 0.), |m| unsafe { let f: CGRect 
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Affine { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 }
+pub(super) struct Affine { a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64 }
 unsafe impl objc2::Encode for Affine { const ENCODING: Encoding = Encoding::Struct("CGAffineTransform", &[const { Encoding::Double }; 6]); }
-fn scale(s: f64) -> Affine { Affine { a: s, b: 0., c: 0., d: s, tx: 0., ty: 0. } }
+pub(super) fn scale(s: f64) -> Affine { Affine { a: s, b: 0., c: 0., d: s, tx: 0., ty: 0. } }
 
 /// 快照外面那层摆成：中心 `center`，未缩放的大小 `w`×`h`（高度变小就是把底下剪掉），缩放 `s`，圆角 `radius`（屏幕上看到的）。
 /// 在 `UIView` 的动画里调用就是动画到这个样子。
@@ -1160,7 +1172,7 @@ unsafe fn set_value(layer: *mut AnyObject, path: &str, v: f64) {
         let _: () = msg_send![ca, commit];
     }
 }
-unsafe fn basic(path: &str, from: f64, to: f64, dur: f64, curve: [f32; 4]) -> *mut AnyObject {
+pub(super) unsafe fn basic(path: &str, from: f64, to: f64, dur: f64, curve: [f32; 4]) -> *mut AnyObject {
     unsafe {
         let anim: *mut AnyObject = msg_send![AnyClass::get(c"CABasicAnimation").unwrap(), animationWithKeyPath: ns_string(path)];
         let _: () = msg_send![anim, setFromValue: number(from)];

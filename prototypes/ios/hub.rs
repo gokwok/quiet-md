@@ -29,11 +29,12 @@ thread_local! { static SCROLL: ScrollHandle = ScrollHandle::new(); }
 
 /// 一行去处：图标、名字，右边可选的数目和箭头。
 fn row(id: SharedString, icon: impl IntoElement, title: String, count: Option<usize>, chevron: bool) -> Stateful<Div> {
-    div().id(id).w_full().h(px(ROW_H)).px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(17.)).rounded(px(10.)).active(|s| s.bg(Theme::fill_pressed()))
+    div().id(id.clone()).w_full().h(px(ROW_H)).relative().px(px(16.)).flex().items_center().gap(px(12.)).text_size(px(17.)).rounded(px(10.))
         .child(div().size(px(22.)).flex_none().flex().items_center().justify_center().child(icon))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
         .children(count.map(|n| div().flex_none().text_size(px(16.)).text_color(Theme::text_caption()).child(n.to_string())))
         .when(chevron, |d| d.child(crate::ui::icon("chevron-right", 14., Theme::text_caption())))
+        .child(super::press::mark(id, 0.))
 }
 
 /// 一组行：直接铺在页面的底色上，不进卡片，行与行之间一道细线，左边和字对齐，右边离屏幕 16（走查 V4；设置页的 `settings::group` 是带描边的卡片）。
@@ -116,6 +117,7 @@ fn folder_rows(w: &Workspace, e: &Entry, depth: usize, out: &mut Vec<(AnyElement
         r = r.child(div().flex_none().text_size(px(16.)).text_color(Theme::text_caption()).child(n.to_string()))
             // 箭头的点击区比箭头大，伸到行的右边缘；点它不进文件夹。
             .child(div().id(SharedString::from(format!("hub-fold-{}", e.id))).flex_none().h_full().w(px(36.)).mr(px(-12.)).flex().items_center().justify_center()
+                .relative().child(super::press::shield())
                 .child(crate::ui::icon(if open { "chevron-down" } else { "chevron-right" }, 14., Theme::text_caption()))
                 .on_click(cx.listener(move |_, _, _, cx| { cx.stop_propagation(); toggle(&flip); cx.notify(); })));
     }

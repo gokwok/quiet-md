@@ -130,6 +130,16 @@ pub mod cjk {
     }
 }
 
+thread_local! { static THUMB_FONT: RefCell<Option<&'static str>> = const { RefCell::new(None) }; }
+/// 接下来画的缩略图是这个样式的文档（`thumb_font`）。
+pub fn set_thumb_font(style: Option<&DocStyle>) { let f = if super::is_compact() { style.and_then(|s| s.font.as_deref()).and_then(family) } else { None }; THUMB_FONT.with(|t| *t.borrow_mut() = f); }
+/// 缩略图的字体：手机上跟着文档的样式，中文后备同编辑器（`editor::text`）。
+pub fn thumb_font() -> Font {
+    let mut f = font(THUMB_FONT.with(|t| *t.borrow()).unwrap_or(crate::theme::UI_FONT));
+    if let Some(cjk) = THUMB_FONT.with(|t| *t.borrow()).and_then(cjk::fallback) { f.fallbacks = Some(FontFallbacks::from_fonts(vec![cjk.into(), "PingFang SC".into(), "Apple Color Emoji".into()])); }
+    f
+}
+
 /// 打开着的那篇文档的样式（在文档页时）。
 pub fn of(w: &Workspace) -> Option<DocStyle> {
     if w.view != View::Doc { return None; }
