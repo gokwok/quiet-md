@@ -38,7 +38,7 @@ impl Item {
     pub fn stay(mut self) -> Self { self.stay = true; self }
 }
 
-struct Button { key: &'static str, view: *mut AnyObject, frame: Bounds<Pixels>, items: Vec<Item>, dark: bool, seen: bool, shown: bool }
+struct Button { key: &'static str, view: *mut AnyObject, frame: Bounds<Pixels>, items: Vec<Item>, face: Option<(&'static str, Hsla)>, tap: Option<(&'static str, &'static str)>, dark: bool, seen: bool, shown: bool }
 
 thread_local! { static BUTTONS: RefCell<Vec<Button>> = const { RefCell::new(Vec::new()) }; }
 thread_local! { static ALLOWED: Cell<bool> = const { Cell::new(false) }; }
@@ -73,21 +73,26 @@ impl Button {
 /// 按钮本身不画东西，图标仍由下面的 GPUI 元素画。
 /// 按钮在能滚的一排里时只留露出来的那部分（滚出去的部分不接点按）。
 pub fn button(key: &'static str, items: Vec<Item>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, bounds.intersect(&window.content_mask().bounds), None, items.clone(), window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, bounds.intersect(&window.content_mask().bounds), None, None, items.clone(), window), |_, _, _, _| {}).absolute().inset_0()
 }
 /// 同上，但按钮自己就是一颗系统的玻璃圆钮（图标是 SF Symbols 里的 `symbol`）：菜单从这颗玻璃里变出来。
 pub fn glass_button(key: &'static str, symbol: &'static str, color: Hsla, items: Vec<Item>) -> impl IntoElement {
-    canvas(move |bounds, window, _| place(key, bounds, Some((symbol, color)), items.clone(), window), |_, _, _, _| {}).absolute().inset_0()
+    canvas(move |bounds, window, _| place(key, bounds, Some((symbol, color)), None, items.clone(), window), |_, _, _, _| {}).absolute().inset_0()
+}
+/// 同 `glass_button`，但没有菜单：点了把 `action` 交给 `ios::menu_action`。和有菜单的共用一个位置（`glass::slot`）时是同一颗，
+/// 换页时留在原处不动。
+pub fn glass_tap(key: &'static str, symbol: &'static str, color: Hsla, action: &'static str, label: &'static str) -> impl IntoElement {
+    canvas(move |bounds, window, _| place(key, bounds, Some((symbol, color)), Some((action, label)), vec![], window), |_, _, _, _| {}).absolute().inset_0()
 }
 
 /// 同 `button`，但放在会滚动的页面内容里：滚进顶栏那一条、或出了屏幕底就藏起。
 pub fn page_button(key: &'static str, items: Vec<Item>) -> impl IntoElement {
     canvas(move |bounds, window, _| {
         if bounds.origin.y < px(super::chrome_top()) || bounds.bottom() > window.viewport_size().height { return; }
-        place(key, bounds, None, items.clone(), window)
+        place(key, bounds, None, None, items.clone(), window)
     }, |_, _, _, _| {}).absolute().inset_0()
 }
-fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, Hsla)>, items: Vec<Item>, window: &Window) {
+fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, Hsla)>, tap: Option<(&'static str, &'static str)>, items: Vec<Item>, window: &Window) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else { return; };
     let RawWindowHandle::UiKit(handle) = handle.as_raw() else { return; };
     let parent = super::shot::overlay(handle.ui_view.as_ptr() as *mut AnyObject);
@@ -113,9 +118,14 @@ fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, 
                     None => msg_send![class, buttonWithType: 0isize],
                 };
                 let _: () = msg_send![view, setShowsMenuAsPrimaryAction: true];
+                // 没有菜单时才轮到它（`tap`）。
+                let handler = block2::RcBlock::new(move |_action: *mut AnyObject| if let Some((id, _)) = BUTTONS.with(|b| b.borrow().iter().find(|b| b.key == key).and_then(|b| b.tap)) { chosen(id) });
+                let action: *mut AnyObject = msg_send![AnyClass::get(c"UIAction").unwrap(), actionWithTitle: ns_string(""), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), handler: &*handler];
+                // 64 = UIControlEventTouchUpInside
+                let _: () = msg_send![view, addAction: action, forControlEvents: 64usize];
                 let _: () = msg_send![view, setHidden: true];
                 let _: () = msg_send![parent, addSubview: view];
-                buttons.push(Button { key, view, frame: Bounds::default(), items: vec![], dark: !dark, seen: false, shown: false });
+                buttons.push(Button { key, view, frame: Bounds::default(), items: vec![], face: glass, tap: None, dark: !dark, seen: false, shown: false });
                 buttons.len() - 1
             }
         };
@@ -132,8 +142,27 @@ fn place(key: &'static str, frame: Bounds<Pixels>, glass: Option<(&'static str, 
             let _: () = msg_send![button.view, setOverrideUserInterfaceStyle: if dark { 2isize } else { 1isize }];
             button.dark = dark;
         }
+        // 共用一颗的几处，图标和颜色可能不一样。
+        if button.face != glass && let Some((symbol, color)) = glass {
+            let config: *mut AnyObject = msg_send![button.view, configuration];
+            if !config.is_null() {
+                let image: *mut AnyObject = msg_send![AnyClass::get(c"UIImage").unwrap(), systemImageNamed: ns_string(symbol)];
+                let _: () = msg_send![config, setImage: image];
+                let _: () = msg_send![config, setBaseForegroundColor: super::glass::ui_color(color)];
+                let _: () = msg_send![button.view, setConfiguration: config];
+            }
+            button.face = glass;
+        }
+        if button.tap != tap {
+            let _: () = msg_send![button.view, setShowsMenuAsPrimaryAction: tap.is_none()];
+            let (id, label) = match tap { Some((id, label)) => (ns_string(id), ns_string(label)), None => (std::ptr::null_mut(), std::ptr::null_mut()) };
+            let _: () = msg_send![button.view, setAccessibilityIdentifier: id];
+            let _: () = msg_send![button.view, setAccessibilityLabel: label];
+            button.tap = tap;
+        }
         if button.items != items {
-            let _: () = msg_send![button.view, setMenu: menu("", std::ptr::null_mut(), &items, false)];
+            let m = if items.is_empty() { std::ptr::null_mut() } else { menu("", std::ptr::null_mut(), &items, false) };
+            let _: () = msg_send![button.view, setMenu: m];
             button.items = items;
         }
     });

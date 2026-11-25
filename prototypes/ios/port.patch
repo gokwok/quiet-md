@@ -591,11 +591,11 @@
 +        let glass = compact && !editor_sheet && (!covered || alert) && !crate::ios::sheet_open() && self.rename.is_none() && crate::ios::new_folder_parent().is_none() && !self.home.sort_menu && self.create_menu.is_none() && self.import_menu.is_none() && self.theme_menu.is_none() && self.trash_menu.is_none();
 +        crate::ios::glass::begin(glass, window);
 +        // 首页和文档共用顶部玻璃；首页的滚动阈值在绘制时读取，和惯性滚动同步。
-+        // 首页在换页滑动（含跟手返回）时不要玻璃：它和带子上的空间头像是钉在屏幕上的原生视图，不会跟着页面滑，滑完再淡入。
-+        let veiled = glass && crate::ios::glass::supported() && ((self.view == View::Home && crate::ios::home_page() == crate::ios::HomePage::Hub && self.batch.is_none() && !crate::ios::shot::sliding())
++        // 首页在换页还没动起来（含跟手返回）时不要玻璃：它和带子上的空间头像是钉在屏幕上的原生视图，不会跟着页面滑，一松手才和别的按钮一起交接。
++        let veiled = glass && crate::ios::glass::supported() && ((self.view == View::Home && crate::ios::home_page() == crate::ios::HomePage::Hub && self.batch.is_none() && !crate::ios::shot::held())
 +            // 设置第一级也一样：往上滚过头像后顶上是磨砂玻璃和居中的「设置」。
 +            // 子页也是：内容滚到顶栏下面时是同一种磨砂。
-+            || (self.view == View::Settings && !crate::ios::shot::sliding())
++            || (self.view == View::Settings && !crate::ios::shot::held())
 +            || (self.view == View::Doc && self.editor.as_ref().is_some_and(|e| e.read(cx).title_scrolled()
 +                || (crate::ios::style::of(self).is_some_and(|s| s.background.is_some()) && e.read(cx).paper_top() < crate::ios::chrome_top()))));
 +        crate::ios::veil::begin(veiled, window);

@@ -26,6 +26,7 @@ pub mod hub;
 pub mod keybar;
 pub mod masonry;
 pub mod menu;
+pub mod pace;
 pub mod panel;
 pub mod shot;
 pub mod spaces;
@@ -72,6 +73,7 @@ pub fn run() {
     lock::install();
     crate::logging::write(&format!("library {}", crate::store::Store::root_dir().display()));
     gpui_platform::application().with_assets(crate::assets::Assets).run(|cx| {
+        pace::install();
         crate::editor::math::load_fonts(cx);
         crate::editor::image::init_pictures(cx);
         crate::input::bind_keys(cx);
@@ -177,7 +179,7 @@ pub fn rise(key: &'static str, el: impl IntoElement) -> impl IntoElement {
 /// 这一页带视差从左边回来（从已经滑过的比例开始）；`Follow`：跟手返回，跟着手指；`Return`：跟手返回没过半，
 /// 滑回去；`Still`：取消后恢复原来那页，不动。
 #[derive(Clone, Copy, PartialEq)]
-enum Motion { Enter(f32), Back(f32), Follow, Return(f32), Still }
+enum Motion { Enter(f32), Follow, Return, Still }
 /// 一页是哪一页：同一摞（主页、文件夹、文档是一摞；回收站、设置各是一摞）里越往里 `depth` 越大，
 /// 文件夹再按它是哪一个分开。
 #[derive(Clone, Copy, PartialEq)]
@@ -187,7 +189,8 @@ thread_local! { static PAGE: std::cell::Cell<(Option<PageKey>, usize, Motion)> =
 thread_local! { static GESTURE: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) }; }
 // 下一次换页是跟手返回取消后的恢复。
 thread_local! { static RESTORING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-/// 换页的过渡：进文档、进文件夹从右边滑入淡入；返回时旧页往右滑走（`shot`），这一页带视差回来；标签页之间只淡入。
+/// 换页的过渡，都在 `shot` 里用原生视图做，这一页照停稳的位置画：往里走时新页整张从右边滑进来、旧页左移变暗；
+/// 返回时旧页往右滑走，这一页带视差回来；同一层的两页之间旧的淡掉。
 /// `folder`：文件夹页是哪一个、在第几层。
 pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>, sub_depth: i32) -> AnyElement {
     let key = match view {
@@ -206,17 +209,20 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>, sub_dep
             if let Some(last) = last {
                 epoch += 1;
                 let dir = if last.stack == key.stack { (key.depth - last.depth).signum() as f32 } else { 0. };
+                // 没经过 `capture_page` 的换页（点开一行文档、首页的子页）：屏幕上还是旧页，现在拍还来得及。
+                if !restoring && !shot::page_pending() && GESTURE.with(|g| g.get()).is_none() && !shot::opening() { shot::capture_page(); }
                 motion = if restoring { Motion::Still } else if GESTURE.with(|g| g.get()).is_some() { Motion::Follow }
-                    else if dir < 0. && shot::slide_out(0.) { Motion::Back(0.) }
+                    else if dir < 0. && shot::slide_out(0.) { Motion::Still }
                     // 从卡片打开：文档从卡片放大（`shot::open_zoom`），这一页自己不滑入。
-                    else if dir > 0. && shot::open_zoom() { Motion::Still } else { Motion::Enter(dir) };
+                    else if dir > 0. && (shot::open_zoom() || shot::push()) { Motion::Still }
+                    else if dir == 0. && shot::page_pending() { shot::park_page(2); Motion::Still } else { Motion::Enter(dir) };
             }
             p.set((Some(key), epoch, motion));
         }
         (epoch, motion)
     });
     // 拍了快照却不是返回（或者没换成页，比如被「先保存」拦下了）：拿掉。
-    if shot::page_pending() && !matches!(motion, Motion::Follow | Motion::Return(_)) { shot::drop_page(); }
+    if shot::page_pending() && !matches!(motion, Motion::Follow | Motion::Return) { shot::drop_page(); }
     let page = div().flex_1().min_w_0().h_full().flex().relative().child(main)
         // 旧页滑走的这段时间里一直出帧：只属于这一页的玻璃要等它走完才露面。
         .child(canvas(
@@ -224,17 +230,10 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>, sub_dep
             |_, _, window, _| menu::finish_frame(window),
         ).absolute().size_0());
     if !is_compact() || epoch == 0 { return page.into_any_element(); }
-    let w = f32::from(LAYOUT.with(|l| l.get().2.width));
-    let off = move |p: f32| px(-shot::PARALLAX * w * (1. - p));
-    let slide = |span: f32| Animation::new(shot::slide_time(span)).with_easing(shot::ease_out_cubic);
     match motion {
+        // 拍不到快照时的退路。
         Motion::Enter(dir) => page.with_animation(("page", epoch), Animation::new(Duration::from_millis(300)).with_easing(ease_out_quint()), move |d, t| d.left(px(dir * (1. - t) * 72.)).opacity(t)).into_any_element(),
-        // 缩回卡片（`shot::zooming`）时下面那页原地不动。
-        Motion::Back(_) | Motion::Return(_) | Motion::Follow if shot::zooming() => page.into_any_element(),
-        Motion::Back(from) => page.with_animation(("page", epoch), slide(1. - from), move |d, t| d.left(off(from + (1. - from) * t))).into_any_element(),
-        Motion::Return(from) => page.with_animation(("page", epoch), slide(from), move |d, t| d.left(off(from * (1. - t)))).into_any_element(),
-        Motion::Follow => page.left(off(GESTURE.with(|g| g.get()).unwrap_or(0.))).into_any_element(),
-        Motion::Still => page.into_any_element(),
+        Motion::Follow | Motion::Return | Motion::Still => page.into_any_element(),
     }
 }
 
@@ -279,9 +278,9 @@ impl Element for Cull {
 thread_local! { static SETTINGS_DETAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 /// 手机上设置是两级：先是一页分类的列表，点进去才是那一类的设置。这里记着现在在不在第二级。
 pub fn settings_detail() -> bool { SETTINGS_DETAIL.with(|d| d.get()) }
-/// 进出第二级。回第一级时先拍下这一页（`ios::page` 把它滑走）。
+/// 进出第二级。先拍下这一页（`ios::page` 把它滑走，或者垫到下面）。
 pub fn set_settings_detail(on: bool) {
-    if settings_detail() && !on { shot::capture_page(); }
+    if settings_detail() != on { shot::capture_page(); }
     SETTINGS_DETAIL.with(|d| d.set(on));
 }
 
@@ -449,7 +448,7 @@ pub fn dock() -> impl IntoElement {
         .child(div().id("doc-tools").absolute().left(px(20.)).top_0().w(px(160.)).h_full().rounded_full().occlude()
             .child(glass::tab_pane("doc-tools", vec![("sf:arrow.uturn.backward.circle", 24., ink), ("sf:paintbrush", 23., ink), ("sf:pencil", 24., ink)], None, vec!["doc-history", "doc-style", "doc-append"])))
         .child(div().id("doc-add").absolute().right(px(20.)).top_0().size(px(48.)).rounded_full().occlude()
-            .child(menu::glass_button("doc-add", "plus", ink, vec![
+            .child(menu::glass_button("doc-add", "plus", Theme::text(), vec![
                 Item::new("doc-add-more", crate::settings::tr("更多", "More"), "ellipsis", 0),
                 Item::new("doc-add-file", crate::settings::tr("文件", "File"), "folder", 1),
                 Item::new("doc-add-image", crate::settings::tr("图库", "Photos"), "photo.on.rectangle", 2),
@@ -489,9 +488,9 @@ pub fn large_title_icon(title: impl Into<SharedString>, icon: Option<AnyElement>
 pub enum HomePage { Hub, All, Folders, Starred, Tags }
 thread_local! { static HOME_PAGE: std::cell::Cell<HomePage> = const { std::cell::Cell::new(HomePage::Hub) }; }
 pub fn home_page() -> HomePage { HOME_PAGE.with(|p| p.get()) }
-/// 换页。回首页时先拍下这一页（`ios::page` 把它滑走）。
+/// 换页。先拍下这一页（`ios::page` 把它滑走，或者垫到下面）。
 pub fn set_home_page(page: HomePage) {
-    if home_page() != page && page == HomePage::Hub { shot::capture_page(); }
+    if home_page() != page { shot::capture_page(); }
     HOME_PAGE.with(|p| p.set(page));
 }
 
@@ -1085,7 +1084,7 @@ pub fn new_button(view: View, cx: &mut Context<Workspace>) -> impl IntoElement {
                 menu::Item::new("fab-new-doc", crate::settings::tr("新建文档", "New document"), "doc.badge.plus", 0),
                 menu::Item::new("fab-new-folder", crate::settings::tr("新建文件夹", "New folder"), "folder.badge.plus", 0),
             ])) }
-            else if floating() { d.bottom(dock_inset()).size(px(48.)).child(glass::tap_pane("fab", ("plus", 24., glass::ink()), "new-doc", crate::settings::text("新建文档"))) }
+            else if floating() { d.bottom(dock_inset()).size(px(48.)).child(menu::glass_tap("fab", "plus", Theme::text(), "new-doc", crate::settings::text("新建文档"))) }
             else { d.bottom(px(16.)).size(px(56.)).bg(Theme::primary()).shadow(crate::theme::shadow_dialog()).active(|s| s.bg(crate::theme::c(crate::theme::craft::B700))).child(crate::ui::icon("plus", 26., gpui::white())) })
         .occlude().on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx)))
 }
@@ -1217,20 +1216,19 @@ pub fn back(w: &mut Workspace, ev: &BackGestureEvent, window: &mut Window, cx: &
             return;
         }
         BackGesturePhase::Committed if following => {
-            let p = GESTURE.with(|g| g.take()).unwrap_or(0.);
+            GESTURE.with(|g| g.take());
             RESTORE.with(|r| r.borrow_mut().take());
-            // 快照没了（不该发生）：这一页直接回到原位，不停在半路。
-            let motion = if shot::slide_out(p) { Motion::Back(p) } else { Motion::Still };
-            PAGE.with(|s| { let (key, epoch, _) = s.get(); s.set((key, epoch + 1, motion)); });
+            shot::slide_out(shot::release_speed().max(0.));
+            PAGE.with(|s| { let (key, epoch, _) = s.get(); s.set((key, epoch + 1, Motion::Still)); });
             cx.notify();
             return;
         }
         BackGesturePhase::Cancelled if following => {
-            let p = GESTURE.with(|g| g.take()).unwrap_or(0.);
+            GESTURE.with(|g| g.take());
             // 快照没了就没有滑回去的动画来接恢复：直接恢复。
             if !shot::page_pending() { return restore(w, window, cx); }
-            PAGE.with(|s| { let (key, epoch, _) = s.get(); s.set((key, epoch + 1, Motion::Return(p))); });
-            shot::slide_back(p, "page-restore");
+            PAGE.with(|s| { let (key, epoch, _) = s.get(); s.set((key, epoch + 1, Motion::Return)); });
+            shot::slide_back((-shot::release_speed()).max(0.), "page-restore");
             cx.notify();
             return;
         }

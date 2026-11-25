@@ -28,6 +28,8 @@
     </dict>
     <!-- 生成配音切到后台也接着做（iOS 26 起的 BGContinuedProcessingTask）：标识是这个前缀加一个每次不同的后缀。 -->
     <key>BGTaskSchedulerPermittedIdentifiers</key><array><string>com.s1dashu.quietmd.prototype.voice.*</string></array>
+    <!-- 换页这类原生动画按 120Hz 出帧（ProMotion 的机型）。 -->
+    <key>CADisableMinimumFrameDurationOnPhone</key><true/>
     <key>MinimumOSVersion</key><string>17.0</string>
     <key>UILaunchScreen</key><dict/>
     <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>

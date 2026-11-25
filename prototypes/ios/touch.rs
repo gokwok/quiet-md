@@ -731,7 +731,7 @@ impl Editor {
         let at_bottom = self.list.is_scrolled_to_end().unwrap_or_else(|| self.list.max_offset_for_scrollbar().y <= px(0.5));
         let out = dy != 0. && ((dy > 0. && at_top) || (dy < 0. && at_bottom));
                 let b = &mut self.bounce;
-        let dt = b.last.replace(now).map_or(1. / 60., |t| now.duration_since(t).as_secs_f32()).clamp(1. / 120., 1. / 30.);
+        let dt = b.last.replace(now).map_or(1. / 60., |t| now.duration_since(t).as_secs_f32()).clamp(1. / 240., 1. / 30.);
         if b.finger {
             let mut used = false;
             if b.raw != 0. && dy != 0. {

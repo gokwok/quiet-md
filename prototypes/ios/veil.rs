@@ -14,7 +14,7 @@ struct Veil { view: *mut AnyObject, glass: *mut AnyObject, frost: *mut AnyObject
 thread_local! { static VEIL: RefCell<Option<Veil>> = const { RefCell::new(None) }; }
 /// 首页左上角的空间头像（系统视图：外框、图片、上次的样子）。
 /// `blur`：同一个头像（立起来的那张图）的高斯模糊版，过渡完露面时先是它、再化成清楚的（`reveal`）。
-struct Avatar { view: *mut AnyObject, img: *mut AnyObject, key: String, blur: *mut AnyObject }
+struct Avatar { view: *mut AnyObject, img: *mut AnyObject, key: String, blur: *mut AnyObject, shown: bool }
 thread_local! { static AVATAR: RefCell<Option<Avatar>> = const { RefCell::new(None) }; }
 // 系统头像已经连着显示了几帧（藏起时归零）。
 thread_local! { static AVATAR_FRAMES: Cell<u32> = const { Cell::new(0) }; }
@@ -43,7 +43,11 @@ pub fn begin(on: bool, window: &Window) {
     } }); }
     window.on_next_frame(|_, _| {
         let (band, title, avatar) = SEEN.with(|s| s.get());
-        if !avatar { AVATAR_FRAMES.with(|f| f.set(0)); AVATAR.with(|a| if let Some(a) = a.borrow().as_ref() { unsafe { let _: () = msg_send![a.view, setHidden: true]; } }); }
+        // 换页：页面还没动时头像原样停着，一动就化开（和返回键的交接同时），别的时候立刻藏起。
+        if !avatar && !super::shot::held() { AVATAR_FRAMES.with(|f| f.set(0)); AVATAR.with(|a| if let Some(a) = a.borrow_mut().as_mut() && a.shown {
+            a.shown = false;
+            unsafe { if super::shot::sliding() { conceal(a) } else { let _: () = msg_send![a.view, setHidden: true]; } }
+        }); }
         VEIL.with(|v| if let Some(veil) = v.borrow_mut().as_mut() { unsafe {
             if !band && veil.shown { veil.shown = false; fade(veil.view, 0.); }
             if !title && !veil.text.0.is_empty() { veil.text = Default::default(); fade(veil.title, 0.); fade(veil.sub, 0.); }
@@ -73,7 +77,7 @@ pub fn title(title: SharedString, folder: Option<SharedString>, icon: Option<&'s
 /// `avatar`：左上角空间头像的位置和样子（图片，没有图片时的底色）。有带子的时候（`on`）头像一直是浮层里的一个系统视图，
 /// 滚没滚都是它，GPUI 那边不画（`hub.rs`）：带子浮起来会把 GPUI 画的糊掉，而在两者之间来回换会闪。照 Craft：滚动后头像仍留在顶栏。
 pub fn home_header(scroll: &ScrollHandle, title: SharedString, avatar: Option<(Bounds<Pixels>, Option<std::path::PathBuf>, Hsla)>) -> impl IntoElement {
-    let scroll = scroll.clone();
+    let (scroll, under) = (scroll.clone(), scroll.clone());
     canvas(move |bounds, window, _| {
         if !on() { return; }
         let offset = -scroll.offset().y;
@@ -90,13 +94,13 @@ pub fn home_header(scroll: &ScrollHandle, title: SharedString, avatar: Option<(B
             let frame = Bounds::new(point(bounds.left() + px(72.), bounds.top() + super::insets().top + px(9.)), size(bounds.size.width - px(144.), px(34.)));
             write(frame, &title, "", None, crate::theme::Theme::text(), crate::theme::Theme::text_caption(), true);
         }
-    }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
+    }, move |bounds, _, window, _| plain(bounds, under.offset().y, window)).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
 }
 
 /// 设置的子页（照 Craft，IMG_9177）：内容滚到顶栏下面时，顶栏是和首页同一种磨砂（下面的字微微透出来），
 /// 页名写在带子上；没滚时什么都不盖，页名由 GPUI 画在原处。
 pub fn page_header(scroll: &ScrollHandle, title: SharedString) -> impl IntoElement {
-    let scroll = scroll.clone();
+    let (scroll, under) = (scroll.clone(), scroll.clone());
     canvas(move |bounds, window, _| {
         if !on() { return; }
         let offset = -scroll.offset().y;
@@ -110,9 +114,17 @@ pub fn page_header(scroll: &ScrollHandle, title: SharedString) -> impl IntoEleme
         place(bounds, crate::theme::dark(), true, window);
         let frame = Bounds::new(point(bounds.left() + px(72.), bounds.top() + super::insets().top + px(9.)), size(bounds.size.width - px(144.), px(34.)));
         write(frame, &title, "", None, crate::theme::Theme::text(), crate::theme::Theme::text_caption(), true);
-    }, |_, _, _, _| {}).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
+    }, move |bounds, _, window, _| plain(bounds, under.offset().y, window)).absolute().top_0().left_0().right_0().h(px(super::chrome_top()))
 }
 
+/// 换页时这一页自己画一条平的底：带子钉在屏幕上、等动起来才化开，先由它盖住滚到顶栏下面的内容，跟着页面一起滑；滑完淡掉，换回带子。
+fn plain(bounds: Bounds<Pixels>, offset: Pixels, window: &mut Window) {
+    let k = super::shot::settling();
+    if -offset <= px(1.) || k <= 0. { return; }
+    // 和带子一样的颜色和厚薄：深色几乎全黑（`smoke`），浅色八成的白（`milk`），换回带子时看不出变色。
+    window.paint_quad(fill(bounds, if crate::theme::dark() { black().opacity(0.96 * k) } else { white().opacity(0.8 * k) }));
+    window.request_animation_frame();
+}
 
 fn place(frame: Bounds<Pixels>, dark: bool, home: bool, window: &Window) {
     let smoked = dark && home;
@@ -260,7 +272,7 @@ fn write_avatar(frame: Bounds<Pixels>, image: Option<&std::path::Path>, color: H
             let _: () = msg_send![blur, setUserInteractionEnabled: false];
             let _: () = msg_send![blur, setAlpha: 0f64];
             let _: () = msg_send![parent, addSubview: blur];
-            *slot = Some(Avatar { view, img, key: String::new(), blur });
+            *slot = Some(Avatar { view, img, key: String::new(), blur, shown: false });
         }
         let a = slot.as_mut().unwrap();
         // 带子后建时会插到最底下，头像总在它上面；这里只保证还在浮层里。
@@ -287,10 +299,9 @@ fn write_avatar(frame: Bounds<Pixels>, image: Option<&std::path::Path>, color: H
             let _: () = msg_send![a.blur, setImage: blur_image(picture)];
         }
         let _: () = msg_send![a.blur, setFrame: outer];
-        let was_hidden: bool = msg_send![a.view, isHidden];
         let _: () = msg_send![a.view, setHidden: false];
-        // 返回首页的过渡刚完（照 Craft）：文档页的返回键先很快淡掉，这里稍晚一点从一团模糊里清楚起来，不是一下出现。
-        if was_hidden && super::shot::just_slid() { reveal(a); }
+        // 返回首页（照 Craft）：页面一动，返回键先很快散掉，这里稍晚一点从一团模糊里清楚起来，不是一下出现。
+        if !std::mem::replace(&mut a.shown, true) && (super::shot::sliding() || super::shot::just_slid()) { reveal(a); }
     });
     AVATAR_FRAMES.with(|f| f.set(f.get().saturating_add(1)));
 }
@@ -326,6 +337,36 @@ unsafe fn reveal(a: &Avatar) {
         let _: () = msg_send![anim, setBeginTime: now + DELAY];
         let _: () = msg_send![anim, setFillMode: ns_string("backwards")];
         let _: () = msg_send![soft, addAnimation: anim, forKey: ns_string("reveal")];
+        let _: () = msg_send![ca, commit];
+    }
+}
+/// 反过来：化成一团模糊散掉，散完还没被叫回来才真的藏起。
+unsafe fn conceal(a: &Avatar) {
+    unsafe {
+        let array = |vs: &[f64]| -> *mut AnyObject {
+            let list: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
+            for v in vs { let n: *mut AnyObject = msg_send![AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: *v]; let _: () = msg_send![list, addObject: n]; }
+            list
+        };
+        let ca = AnyClass::get(c"CATransaction").unwrap();
+        let view = a.view as usize;
+        let done = block2::RcBlock::new(move || if AVATAR.with(|a| a.try_borrow().is_ok_and(|a| a.as_ref().is_some_and(|a| !a.shown))) {
+            let _: () = msg_send![view as *mut AnyObject, setHidden: true];
+            let layer: *mut AnyObject = msg_send![view as *mut AnyObject, layer];
+            let _: () = msg_send![layer, removeAnimationForKey: ns_string("reveal")];
+        });
+        let _: () = msg_send![ca, begin];
+        let _: () = msg_send![ca, setCompletionBlock: &*done];
+        for (view, values) in [(a.view, [1., 0., 0.]), (a.blur, [0., 0.85, 0.])] {
+            let anim: *mut AnyObject = msg_send![AnyClass::get(c"CAKeyframeAnimation").unwrap(), animationWithKeyPath: ns_string("opacity")];
+            let _: () = msg_send![anim, setValues: array(&values)];
+            let _: () = msg_send![anim, setKeyTimes: array(&[0., 0.4, 1.])];
+            let _: () = msg_send![anim, setDuration: 0.22f64];
+            let _: () = msg_send![anim, setFillMode: ns_string("forwards")];
+            let _: () = msg_send![anim, setRemovedOnCompletion: false];
+            let layer: *mut AnyObject = msg_send![view, layer];
+            let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("reveal")];
+        }
         let _: () = msg_send![ca, commit];
     }
 }

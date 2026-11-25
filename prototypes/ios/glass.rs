@@ -40,13 +40,14 @@ struct Pane { key: &'static str, view: *mut AnyObject, image: *mut AnyObject, te
 
 thread_local! { static PANES: RefCell<Vec<Pane>> = const { RefCell::new(Vec::new()) }; }
 
-/// 顶栏同一个位置上的按钮，各页共用一个原生视图：返回、「…」，和中间那颗（浏览页的「选择」、文档页的目录）。
+/// 顶栏同一个位置上的按钮，各页共用一个原生视图：返回、「…」，和中间那颗（浏览页的「选择」、文档页的目录），还有右下角的「+」。
 /// 各用各的视图时，换页结束那一下旧的淡出、新的长出来（`shot::show` 的交接），一模一样的按钮看着就是闪了一下。
 pub(super) fn slot(key: &'static str) -> &'static str {
     match key {
-        "doc-back" | "browse-back" | "batch-back" | "trash-back" => "top-back",
+        "doc-back" | "browse-back" | "batch-back" | "trash-back" | "settings-home" | "settings-back" => "top-back",
         "doc-catalogue" | "browse-select" => "top-middle",
         "doc-more" | "browse-options" | "hub-more" => "top-more",
+        "fab" | "fab-menu" | "doc-add" => "dock-plus",
         _ => key,
     }
 }
@@ -64,22 +65,56 @@ pub fn begin(allowed: bool, window: &Window) {
 
 impl Pane {
     fn set_shown(&mut self, on: bool) {
-        if self.shown == on || !super::shot::show(self.view, on) { return; }
+        use super::shot::Turn;
+        if self.shown == on { return; }
+        let turn = super::shot::turn(self.view, on);
+        if turn == Turn::Later { return; }
         self.shown = on;
         unsafe {
             let interactive = on && self.look.as_ref().is_some_and(|look| !look.actions.is_empty());
             let _: () = msg_send![self.view, setUserInteractionEnabled: interactive];
-            // 露面时淡入，和 GPUI 那边换页、收面板的过渡接上；藏起是立刻的，免得压在新盖上来的东西上
-            // （返回时离开的那一页的玻璃例外：在原处淡出，见 `shot::show`）。
+            let content: *mut AnyObject = msg_send![self.view, contentView];
+            let (view, content, key) = (self.view as usize, content as usize, self.key);
+            let glass = self.look.as_ref().filter(|l| !l.bare).map_or(std::ptr::null_mut(), |l| effect(l)) as usize;
             if on {
-                let anim: *mut AnyObject = msg_send![AnyClass::get(c"CABasicAnimation").unwrap(), animationWithKeyPath: ns_string("opacity")];
-                let from: *mut AnyObject = msg_send![AnyClass::get(c"NSNumber").unwrap(), numberWithDouble: 0f64];
-                let _: () = msg_send![anim, setFromValue: from];
-                let _: () = msg_send![anim, setDuration: 0.24f64];
-                let layer: *mut AnyObject = msg_send![self.view, layer];
-                let _: () = msg_send![layer, addAnimation: anim, forKey: ns_string("appear")];
+                // 露面时玻璃从没有长出来、里面的内容一起淡入，和换页、收面板的过渡接上。只动图层的不透明度管不住玻璃：
+                // 内容先没了，空的玻璃块还在原处（录屏 2026-11-25 07-05-17）。
+                let start = block2::RcBlock::new(move || {
+                    let _: () = msg_send![view as *mut AnyObject, setEffect: std::ptr::null_mut::<AnyObject>()];
+                    let _: () = msg_send![content as *mut AnyObject, setAlpha: 0f64];
+                    let _: () = msg_send![view as *mut AnyObject, setHidden: false];
+                });
+                let body = block2::RcBlock::new(move || {
+                    let _: () = msg_send![view as *mut AnyObject, setEffect: glass as *mut AnyObject];
+                    let _: () = msg_send![content as *mut AnyObject, setAlpha: 1f64];
+                });
+                let ui = AnyClass::get(c"UIView").unwrap();
+                let _: () = msg_send![ui, performWithoutAnimation: &*start];
+                let none: Option<&block2::Block<dyn Fn(objc2::runtime::Bool)>> = None;
+                // 交接时晚一点开始：原处那颗先走（照 Craft）。4 = BeginFromCurrentState。
+                let _: () = msg_send![ui, animateWithDuration: 0.24f64, delay: if turn == Turn::Soft { 0.06f64 } else { 0. }, options: 4usize, animations: &*body, completion: none];
+            } else if turn == Turn::Soft {
+                let body = block2::RcBlock::new(move || {
+                    let _: () = msg_send![view as *mut AnyObject, setEffect: std::ptr::null_mut::<AnyObject>()];
+                    let _: () = msg_send![content as *mut AnyObject, setAlpha: 0f64];
+                });
+                // 散完还没被叫回来才真的藏起。
+                let done = block2::RcBlock::new(move |_: objc2::runtime::Bool| PANES.with(|p| if p.try_borrow().is_ok_and(|p| p.iter().any(|p| p.key == key && !p.shown)) { let _: () = msg_send![view as *mut AnyObject, setHidden: true]; }));
+                let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.18f64, delay: 0f64, options: 4usize, animations: &*body, completion: &*done];
+            } else {
+                // 藏起是立刻的，免得压在新盖上来的东西上。
+                let _: () = msg_send![self.view, setHidden: true];
             }
         }
+    }
+}
+/// 这块玻璃的材质。
+unsafe fn effect(look: &Look) -> *mut AnyObject {
+    unsafe {
+        let effect: *mut AnyObject = msg_send![AnyClass::get(c"UIGlassEffect").unwrap(), effectWithStyle: 0isize];
+        let _: () = msg_send![effect, setInteractive: !look.actions.is_empty()];
+        if let Some(tint) = look.tint { let _: () = msg_send![effect, setTintColor: ui_color(tint)]; }
+        effect
     }
 }
 
@@ -279,13 +314,22 @@ fn place(key: &'static str, look: Look, window: &Window) {
         };
         let pane = &mut panes[ix];
         pane.seen = true;
-        pane.set_shown(ALLOWED.with(|a| a.get()));
-        if pane.look.as_ref() == Some(&look) { return; }
-        // 共用的那颗换了内容（「选择」↔ 目录）：旧页还在走时先不换，走完再换，和原来交接的时机一样。
-        if super::shot::sliding() && pane.look.as_ref().is_some_and(|o| o.icon.map(|i| i.0) != look.icon.map(|i| i.0) || o.label.as_ref().map(|l| &l.0) != look.label.as_ref().map(|l| &l.0)) { return; }
+        let allowed = ALLOWED.with(|a| a.get());
+        if pane.look.as_ref() == Some(&look) { pane.set_shown(allowed); return; }
+        // 共用的那颗换了内容（「选择」↔ 目录）：页面还没动时先不换，一动就在原处化成新的，和别的按钮一起交接。
+        let swap = pane.look.as_ref().is_some_and(|o| o.icon.map(|i| i.0) != look.icon.map(|i| i.0) || o.label.as_ref().map(|l| &l.0) != look.label.as_ref().map(|l| &l.0));
+        if swap && pane.shown && super::shot::held() { return; }
+        let swap = swap && pane.shown && super::shot::sliding();
+        if swap { cross(pane.image); cross(pane.text); }
         let old = pane.look.take();
         let (x, y, w, h) = (f64::from(look.frame.origin.x), f64::from(look.frame.origin.y), f64::from(look.frame.size.width), f64::from(look.frame.size.height));
-        let _: () = msg_send![pane.view, setFrame: CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))];
+        let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(w, h));
+        if swap {
+            let view = pane.view as usize;
+            let body = block2::RcBlock::new(move || { let _: () = msg_send![view as *mut AnyObject, setFrame: frame]; });
+            let none: Option<&block2::Block<dyn Fn(objc2::runtime::Bool)>> = None;
+            let _: () = msg_send![AnyClass::get(c"UIView").unwrap(), animateWithDuration: 0.34f64, delay: 0f64, usingSpringWithDamping: 0.86f64, initialSpringVelocity: 0f64, options: 4usize, animations: &*body, completion: none];
+        } else { let _: () = msg_send![pane.view, setFrame: frame]; }
         clip(pane.view, look.frame, look.clip);
         // 深浅色跟应用的设置，不跟系统。
         let _: () = msg_send![pane.view, setOverrideUserInterfaceStyle: if look.dark { 2isize } else { 1isize }];
@@ -304,10 +348,7 @@ fn place(key: &'static str, look: Look, window: &Window) {
                 let _: () = msg_send![layer, setCornerRadius: 16f64];
             }
         } else if old.as_ref().map(|o| (o.tint, o.actions.is_empty())) != Some((look.tint, look.actions.is_empty())) {
-            let effect: *mut AnyObject = msg_send![AnyClass::get(c"UIGlassEffect").unwrap(), effectWithStyle: 0isize];
-            let _: () = msg_send![effect, setInteractive: !look.actions.is_empty()];
-            if let Some(tint) = look.tint { let _: () = msg_send![effect, setTintColor: ui_color(tint)]; }
-            let _: () = msg_send![pane.view, setEffect: effect];
+            let _: () = msg_send![pane.view, setEffect: effect(&look)];
         }
         // 带文字时内容从左边 14pt 起排，否则图标居中。
         let mut left = 14.;
@@ -417,7 +458,18 @@ fn place(key: &'static str, look: Look, window: &Window) {
             let _: () = msg_send![content, bringSubviewToFront: *hit];
         }
         pane.look = Some(look);
+        // 样子摆好了再露面（露面的动画要知道是什么玻璃）。
+        pane.set_shown(allowed);
     });
+}
+/// 这个视图接下来的改动化过去，不是一下换掉。
+unsafe fn cross(view: *mut AnyObject) {
+    unsafe {
+        let fade: *mut AnyObject = msg_send![AnyClass::get(c"CATransition").unwrap(), animation];
+        let _: () = msg_send![fade, setDuration: 0.2f64];
+        let layer: *mut AnyObject = msg_send![view, layer];
+        let _: () = msg_send![layer, addAnimation: fade, forKey: ns_string("cross")];
+    }
 }
 
 pub(super) unsafe fn ui_color(color: Hsla) -> *mut AnyObject {
