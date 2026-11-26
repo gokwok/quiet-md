@@ -1178,6 +1178,18 @@ impl Core {
         }
     }
 
+    /// 换掉附件块背后的文件（「替换视频」），一步撤销；不是附件块什么都不做。
+    pub fn replace_file(&mut self, id: BlockId, file: FileBlock) {
+        if !matches!(self.kind_of(id), Some(BlockKind::File(_))) {
+            return;
+        }
+        self.checkpoint(EditKind::Other);
+        self.break_coalescing();
+        if let Some(b) = self.block_mut(id) {
+            b.kind = BlockKind::File(file);
+        }
+    }
+
     /// 文本视图: the block becomes a paragraph holding the attachment
     /// inline (same alignment); the caret lands after it.
     pub fn file_to_inline(&mut self, id: BlockId) {

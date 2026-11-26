@@ -163,10 +163,17 @@ pub fn begin(w: &Workspace) {
     }
     crate::themes::overlay(Some(over));
     // 纸换了颜色：这一页的深浅色跟着纸走，不跟应用。
-    let paper = style.as_ref().and_then(|s| s.paper.as_deref()).and_then(hex).map(|c| { let c = Rgba::from(c); 0.299 * c.r + 0.587 * c.g + 0.114 * c.b < 0.5 });
-    if crate::theme::set_doc_dark(paper) { crate::themes::touch(); }
+    if crate::theme::set_doc_dark(paper_dark(style.as_ref())) { crate::themes::touch(); }
     CUR.with(|c| *c.borrow_mut() = style);
 }
+
+/// 纸换了颜色时这张纸是不是深色的（没换纸是 `None`，跟应用）。
+fn paper_dark(style: Option<&DocStyle>) -> Option<bool> { style.and_then(|s| s.paper.as_deref()).and_then(hex).map(|c| { let c = Rgba::from(c); 0.299 * c.r + 0.587 * c.g + 0.114 * c.b < 0.5 }) }
+/// 画一张缩略图期间深浅色跟它的纸走（同文档页，`begin`），放掉时回到原来的：主页是浅色时，深色纸的卡片里行内代码、代码块、边线也要是深色那一套。
+/// 主题的颜色每次按 `theme::dark` 现算，不用 `themes::touch`。
+pub struct ThumbDark(Option<bool>);
+pub fn thumb_dark(style: Option<&DocStyle>) -> ThumbDark { let was = crate::theme::doc_dark(); crate::theme::set_doc_dark(paper_dark(style).or(was)); ThumbDark(was) }
+impl Drop for ThumbDark { fn drop(&mut self) { crate::theme::set_doc_dark(self.0); } }
 
 /// 文字大小的八档（`Meta::text_size` 1–8，0 和 3 都是原样）：字号和行高乘上的百分数。
 pub const SIZES: [u16; 8] = [86, 93, 100, 108, 117, 127, 138, 150];

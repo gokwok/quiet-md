@@ -268,6 +268,9 @@ pub fn open_image() -> Reply<Option<Vec<PathBuf>>> { ask(|| unsafe { present_pho
 /// 插入「视频或文件」：同样先问，「照片图库」只列视频，「文件」什么都能选、能多选。
 pub fn open_attachment() -> Reply<Option<Vec<PathBuf>>> { ask(|| unsafe { present_photos(true) }, || unsafe { present_documents("public.item", true, true) }) }
 
+/// 长按视频的「替换视频」：同样先问，两边都只列视频，只选一个。
+pub fn open_video() -> Reply<Option<Vec<PathBuf>>> { ask(|| unsafe { present_photos(true) }, || unsafe { present_documents("public.movie", false, true) }) }
+
 /// 先问从哪里选：照片图库还是文件。
 fn ask(photos: fn() -> bool, files: fn() -> bool) -> Reply<Option<Vec<PathBuf>>> {
     if busy() { return Reply::ready(None); }

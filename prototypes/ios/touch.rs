@@ -249,6 +249,12 @@ impl Editor {
             crate::ios::take_long_press();
             return true;
         }
+        // 视频块（`ios::video`）：长按出它的菜单（视图、存储到照片、替换…），不提起来。
+        if let Some(id) = hit && crate::ios::video::press(id, at) {
+            window.prevent_default();
+            crate::ios::take_long_press();
+            return true;
+        }
         // 表格格子里的块不提起来（格子有自己的选择），长按照旧选词。
         let Some(id) = hit.filter(|id| self.core.cell_of(*id).is_none()) else { return false };
         self.press_handle(id, at);

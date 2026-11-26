@@ -228,17 +228,20 @@
              Some(id) => ws.open(&id, window, cx),
              None if quick => ws.new_doc(window, cx),
              None => ws.view = View::Home,
-@@ -540,7 +566,9 @@
+@@ -540,7 +566,12 @@
              self.show_toast(label, cx); return false;
          }
          if self.entries.iter().any(|e| e.id == id && e.meta.folder.is_some()) { return self.open_folder(id, window, cx); }
++        // 手机：点一行打开文档，趁屏幕上还是这一页就拍下（同 `shot::from_card`）。等到换页那一帧再拍，深色纸的文档那一帧
++        // 要换深浅色、重排玻璃，新页比快照先上屏，整屏闪一下。
++        if !crate::ios::shot::opening() && (self.view != View::Doc || self.current.as_deref() != Some(id)) { crate::ios::shot::capture_page(); }
 +        if self.drawer { self.drawer = false; cx.notify(); }
          if self.view != View::Doc {
 +            crate::ios::entered_doc(self.view);
              self.view = View::Doc;
              cx.notify();
          }
-@@ -568,7 +596,7 @@
+@@ -568,7 +599,7 @@
          let pinned = meta.as_ref().is_some_and(|m| !m.catalogue_closed);
          let editor = cx.new(|cx| {
              let mut e = Editor::new(doc, modified, width, window, cx);
@@ -247,7 +250,7 @@
              e.markdown = meta.as_ref().is_some_and(|m| m.markdown);
              if let Some(m) = &meta {
                  e.created = m.created;
-@@ -607,12 +635,8 @@
+@@ -607,12 +638,8 @@
                  this.search_sel = this.default_search_sel(cx);
              }
              EditorEvent::OpenDoc(id) => this.open(id, window, cx),
@@ -262,7 +265,7 @@
              EditorEvent::OpenDocAt(id, ordinal) => this.open_at(id, *ordinal, window, cx),
              EditorEvent::HideRefs => this.ask_refs(false, cx),
              EditorEvent::Page => cx.notify(),
-@@ -631,9 +655,8 @@
+@@ -631,9 +658,8 @@
              }
          }));
          // Opening a document puts the caret in it, unless the user is typing a search.
@@ -274,7 +277,7 @@
          if let Some(m) = self.store.touch(id)
              && let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
                  e.meta.opened = m.opened;
-@@ -654,6 +677,22 @@
+@@ -654,6 +680,22 @@
          true
      }
  
@@ -297,7 +300,7 @@
      pub fn new_doc(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          if !self.save_before(cx, |w, window, cx| w.new_doc(window, cx)) {
              return;
-@@ -665,6 +704,7 @@
+@@ -665,6 +707,7 @@
              Ok((id, doc))
          }) {
              Ok((id, _)) => {
@@ -305,7 +308,7 @@
                  self.search_open = false;
                  self.doc_info = None;
                  self.home.sort_menu = false;
-@@ -673,7 +713,7 @@
+@@ -673,7 +716,7 @@
                  self.search.update(cx, |s, cx| s.set_text("", cx));
                  self.open(&id, window, cx);
                  if let Some(ed) = &self.editor {
@@ -314,7 +317,7 @@
                  }
              }
              Err(e) => self.status = SaveStatus::Failed(crate::localized_format!("新建失败：{}", "Could not create document: {}", crate::settings::diagnostic(&e.to_string()))),
-@@ -725,6 +765,8 @@
+@@ -725,6 +768,8 @@
                  return;
              }
          }
@@ -323,7 +326,7 @@
          let file_before = self.store.track_file_changes();
          let mut deleted = vec![];
          let mut errors = vec![];
-@@ -764,12 +806,17 @@
+@@ -764,12 +809,17 @@
          }
          self.remember_files(file_before, crate::settings::tr("删除", "Delete"));
          self.sync_sub_pages(cx);
@@ -345,7 +348,7 @@
          } else {
              let msg = errors.join("；");
              self.show_toast_kind(ToastKind::Error, &msg, cx);
-@@ -807,11 +854,16 @@
+@@ -807,11 +857,16 @@
  
      /// Switch the main pane to 主页 or 回收站 (or back to the document).
      pub fn show_view(&mut self, view: View, cx: &mut Context<Self>) {
@@ -362,7 +365,7 @@
          self.row_menu = None;
          self.trash_menu = None;
          self.theme_menu = None;
-@@ -824,7 +876,17 @@
+@@ -824,7 +879,17 @@
          self.show_toast_kind(ToastKind::Success, msg, cx);
      }
  
@@ -380,7 +383,7 @@
          self.toast = Some((kind, SharedString::from(msg.to_string()), Instant::now()));
          if let Some(ed) = &self.editor {
              ed.update(cx, |e, cx| e.clear_toast(cx));
-@@ -838,6 +900,8 @@
+@@ -838,6 +903,8 @@
  
      fn render_toast(&self, window: &mut Window) -> Option<AnyElement> {
          let (kind, msg, t0) = self.toast.as_ref()?;
@@ -389,7 +392,7 @@
          crate::ui::toast_el(*kind, msg, *t0, window)
      }
  
-@@ -851,7 +915,7 @@
+@@ -851,7 +918,7 @@
              f
          });
          let focus = field.focus_handle(cx);
@@ -398,7 +401,7 @@
          let subs = vec![
              cx.subscribe_in(&field, window, |w, _, ev: &TextFieldEvent, window, cx| match ev {
                  TextFieldEvent::Submit => w.finish_rename(true, window, cx),
-@@ -862,12 +926,60 @@
+@@ -862,12 +929,60 @@
          ];
          self.rename = Some(Rename { id: id.to_string(), field, _subs: subs });
          // From 主页 the row may be hidden: show it in the sidebar.
@@ -460,7 +463,7 @@
      fn finish_rename(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
          let Some(r) = self.rename.take() else { return };
          let refocus = r.field.read(cx).is_focused(window);
-@@ -897,7 +1009,7 @@
+@@ -897,7 +1012,7 @@
          }
          if refocus
              && let Some(ed) = &self.editor {
@@ -469,7 +472,7 @@
              }
          self.sync_sub_pages(cx);
          cx.notify();
-@@ -943,6 +1055,8 @@
+@@ -943,6 +1058,8 @@
          // caps that at SAVE_MAX_DELAY after the oldest unsaved edit.
          let left = SAVE_MAX_DELAY.saturating_sub(self.dirty_since.map_or(Duration::ZERO, |t| t.elapsed()));
          let delay = SAVE_DELAY.min(left);
@@ -478,7 +481,7 @@
          // Keep the list title live while typing; the body/snippet updates on save.
          if let (Some(id), Some(ed)) = (&self.current, &self.editor) {
              let title = ed.read(cx).root().doc.title.text.clone();
-@@ -1278,6 +1392,22 @@
+@@ -1278,6 +1395,22 @@
              crumbs.push(sep());
          }
          let record_more = self.more_btn_bounds.clone();
@@ -501,7 +504,7 @@
          div()
              .id("top-bar").relative()
              .h(px(HEADER_H))
-@@ -1288,7 +1418,12 @@
+@@ -1288,7 +1421,12 @@
              // Clear of the traffic lights, which sit over the note when the sidebar is closed.
              .pl(if self.sidebar_open { px(18.) } else { px(theme::TRAFFIC_LIGHTS_W) })
              .title_bar()
@@ -515,7 +518,7 @@
                  d.child(
                      div()
                          .id("open-sidebar")
-@@ -1338,7 +1473,7 @@
+@@ -1338,7 +1476,7 @@
                              .child(
                                  div()
                                      .min_w_0()
@@ -524,7 +527,7 @@
                                      .line_height(px(20.))
                                      .font_weight(FontWeight::SEMIBOLD)
                                      .text_color(Theme::text())
-@@ -1360,7 +1495,13 @@
+@@ -1360,7 +1498,13 @@
                      .h(px(HEADER_ACTIONS_H)).flex_none()
                      .flex()
                      .items_center()
@@ -539,7 +542,7 @@
                          d.child(
                              // No tooltip while its dropdown is open; the menu hangs
                              // from this button's right edge.
-@@ -1376,7 +1517,7 @@
+@@ -1376,7 +1520,7 @@
                                  })),
                          )
                      })
@@ -548,7 +551,7 @@
                          seg("doc-search", "search")
                              .tip_label(crate::shortcuts::keys(crate::settings::text("搜索(⌘ + J)")).into(), TipSide::Below)
                              .on_click(cx.listener(|_, _, window, cx| window.dispatch_action(Box::new(FocusSearch), cx))),
-@@ -1384,24 +1525,69 @@
+@@ -1384,24 +1528,69 @@
                      .child(
                          // Straight to a new document: no 新建 menu, as 导入 is rare.
                          seg("doc-new", "plus").tip(crate::settings::tr("新建文档", "New document"), None).on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx))),
@@ -623,7 +626,7 @@
          let row_menu = self.render_row_menu(window, cx);
          let resize = self.sidebar_open.then(|| self.render_resize_handle(window, cx));
          let resize_overlay = self.render_resize_overlay(cx);
-@@ -1412,7 +1598,7 @@
+@@ -1412,7 +1601,7 @@
          let import_menu = self.render_import_menu(cx);
          let search = self.render_search(window, cx);
          let doc_menu = self.render_doc_menu(window, cx);
@@ -632,7 +635,7 @@
          let confirm = self.render_confirm(cx);
          let trash_menu = self.render_trash_menu(cx);
          let home_menus = self.render_home_menus(cx);
-@@ -1426,7 +1612,8 @@
+@@ -1426,7 +1615,8 @@
                  .h_full()
                  .flex()
                  .flex_col()
@@ -642,7 +645,7 @@
                  .child(
                      div()
                          .flex_1()
-@@ -1438,14 +1625,50 @@
+@@ -1438,14 +1628,50 @@
                                  .flex_1()
                                  .min_w_0()
                                  .h_full()
@@ -694,7 +697,7 @@
              View::Settings => self.render_settings(cx),
          };
          let move_dlg = self.render_move_dialog(cx);
-@@ -1457,13 +1680,23 @@
+@@ -1457,13 +1683,23 @@
          // surface beside it; the change of value is the only line between
          // them (no gutter, radius, border or shadow).
          // A document sits on its theme's page colour.
@@ -721,7 +724,7 @@
          div()
              .id("workspace")
              .key_context("Workspace")
-@@ -1487,6 +1720,9 @@
+@@ -1487,6 +1723,9 @@
              // whichever window macOS considers active.
              .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
              .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
@@ -731,7 +734,7 @@
              .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
                  crate::quick_note::persist(cx);
                  if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
-@@ -1503,7 +1739,7 @@
+@@ -1503,7 +1742,7 @@
              .on_action(cx.listener(|w, _: &OpenFile, window, cx| w.open_file_dialog(window, cx)))
              .on_action(cx.listener(|w, _: &ImportFolder, window, cx| w.open_import_folder(window, cx)))
              .on_action(cx.listener(|w, _: &ToggleSidebar, _, cx| {
@@ -740,7 +743,7 @@
                  cx.notify();
              }))
              .on_action(cx.listener(|w, _: &FindInDoc, window, cx| w.find_in_doc(false, window, cx)))
-@@ -1540,7 +1776,7 @@
+@@ -1540,7 +1779,7 @@
              }))
              // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
              .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
@@ -749,7 +752,7 @@
                  if ev.keystroke.key == "escape" && w.has_home_drag() {
                      w.cancel_home_drag(cx); cx.stop_propagation(); return;
                  }
-@@ -1572,10 +1808,17 @@
+@@ -1572,10 +1811,17 @@
                  if w.search_open { w.close_search(window, cx); } else { w.open_search(window, cx); }
                  cx.stop_propagation();
              }))
@@ -768,7 +771,7 @@
              .children(row_menu)
              .children(doc_menu)
              .children(mode_menu)
-@@ -1587,6 +1830,7 @@
+@@ -1587,6 +1833,7 @@
              .children(move_dlg)
              .children(space_menu)
              .children(space_dialog)
@@ -1716,15 +1719,16 @@
  }
  
  /// Opens the file in Quick Look (scripted runs only log it).
-@@ -478,6 +483,7 @@
+@@ -478,6 +483,8 @@
                              .overflow_hidden()
                              .bg(if video { gpui::black() } else { Theme::bg_body() })
                              .child(pic)
 +                            .when(video && !self.ghost, |d| d.child(crate::ios::video::slot(p.clone(), RADIUS - 1.)))
++                            .when(video && !self.ghost, |d| d.child(crate::ios::video::context(p.clone(), id, RADIUS - 1., true)))
                              .when(video, |d| {
                                  let l = open_listener(path.clone(), cx);
                                  d.child(
-@@ -535,7 +541,8 @@
+@@ -535,7 +542,8 @@
                      .shadow(theme::shadow_button())
                      .cursor_pointer()
                      .when(menu_on, |d| d.child(ring().rounded(px(RADIUS + 2.))))
@@ -1734,7 +1738,16 @@
                      .children(recorder)
                      .on_mouse_down(MouseButton::Left, open_on_click)
                      .into_any_element()
-@@ -632,7 +639,7 @@
+@@ -599,6 +607,8 @@
+                             ),
+                     )
+                     .child(div().flex_none().pr(px(4.)).mt(px(8.)).h(px(48.)).flex().items_center().child(btn))
++                    // 卡片视图的视频长按也出它的菜单（`ios::video`）。
++                    .when_some(path.clone().filter(|p| !self.ghost && crate::ios::video::is_video(p)), |d, p| d.child(crate::ios::video::context(p, id, RADIUS, false)))
+                     .children(recorder)
+                     .on_mouse_down(MouseButton::Left, open_on_click)
+                     .into_any_element()
+@@ -632,7 +642,7 @@
  
      pub(super) fn open_file(&mut self, p: Option<&Path>, cx: &mut Context<Self>) {
          match p.filter(|p| p.is_file()) {
@@ -1743,7 +1756,7 @@
              None => self.toast(crate::settings::text("文件不存在"), cx),
          }
      }
-@@ -642,7 +649,7 @@
+@@ -642,7 +652,7 @@
          let Some(src) = local_path(f).filter(|p| p.is_file()) else { return self.toast(crate::settings::text("文件不存在"), cx) };
          let picked = crate::devtools::take_pick().and_then(|p| p.into_iter().next());
          let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_default();
@@ -1752,7 +1765,7 @@
          let bg = cx.background_executor().clone();
          cx.spawn(async move |_, _| {
              let dest = match rx {
-@@ -650,10 +657,12 @@
+@@ -650,10 +660,12 @@
                  None => picked,
              };
              let Some(dest) = dest else { return };
@@ -1765,7 +1778,7 @@
          })
          .detach();
      }
-@@ -761,6 +770,7 @@
+@@ -761,6 +773,7 @@
          let preview = preview_of(&f.name);
          let view = f.view;
          let path = local_path(f);
@@ -1773,7 +1786,7 @@
          let act = |f: fn(&mut Editor, BlockId, &mut Window, &mut Context<Editor>)| {
              cx.listener(move |e: &mut Editor, _: &MouseDownEvent, window, cx| {
                  cx.stop_propagation();
-@@ -844,7 +854,7 @@
+@@ -844,7 +857,7 @@
                  window.prevent_default();
              })
              .child(bar);
@@ -1782,7 +1795,7 @@
      }
  
      /// The hover card of an inline attachment: 下载 | 文本视图 · 卡片视图 ·
-@@ -886,7 +896,7 @@
+@@ -886,7 +899,7 @@
                      window.prevent_default();
                      if e.core.inline_to_file(p, v).is_some() {
                          e.hide_button_card(cx);
@@ -1791,7 +1804,7 @@
                          e.changed(window, cx);
                      }
                  }),
-@@ -904,7 +914,7 @@
+@@ -904,7 +917,7 @@
                  window.prevent_default();
              })
              .child(bar);
@@ -1800,7 +1813,7 @@
      }
  
      // ---- inserting
-@@ -912,7 +922,7 @@
+@@ -912,7 +925,7 @@
      /// 视频或文件: the picked files become attachments at the caret.
      pub(super) fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          let picked = crate::devtools::take_pick();
@@ -1809,7 +1822,29 @@
          cx.spawn_in(window, async move |this, cx| {
              let paths = match rx {
                  Some(rx) => rx.await.ok().and_then(Result::ok).flatten(),
-@@ -956,7 +966,7 @@
+@@ -924,6 +937,21 @@
+         .detach();
+     }
+ 
++    /// 长按视频的「替换视频」：把选中的文件拷进文档库，换掉 `id` 这一块背后的文件，视图照旧，一步撤销。
++    pub(crate) fn replace_file_from(&mut self, id: BlockId, p: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
++        let task = cx.background_executor().spawn(async move { file_block_from_path(&p) });
++        cx.spawn_in(window, async move |this, cx| {
++            let block = task.await;
++            let _ = this.update_in(cx, |e, window, cx| {
++                let (Some(BlockKind::File(mut f)), Some(BlockKind::File(old))) = (block.map(|b| b.kind), e.core.kind_of(id).cloned()) else { return e.toast(crate::settings::text("文件读取失败"), cx) };
++                f.view = old.view;
++                e.core.replace_file(id, f);
++                e.changed(window, cx);
++            });
++        })
++        .detach();
++    }
++
+     /// Copies `paths` into the library off the main thread, then inserts
+     /// them at `target` (or the caret).
+     pub(super) fn import_files(&mut self, paths: Vec<PathBuf>, target: Option<(BlockId, DropPlace)>, window: &mut Window, cx: &mut Context<Self>) {
+@@ -956,7 +984,7 @@
                          e.core.sel = Selection::caret(Pos::new(p, 0));
                      }
                  }
@@ -5343,7 +5378,7 @@
                          cx.notify();
                      }),
                  ))
-@@ -812,58 +868,90 @@
+@@ -812,58 +868,92 @@
              row = row.child(div().w(px(60.)).flex_none().flex().justify_end().pr(px(12.)).when(self.batch.is_none(), |d| d.child(self.home_more(e, format!("home-more-{}", e.id), cx))));
              rows = rows.child(row);
          }
@@ -5443,6 +5478,8 @@
          }
          let thumb = self.thumb(e);
 -        if thumb.blocks.is_empty() && e.title.trim().is_empty() {
++        // 手机：缩略图按这篇的纸定深浅色（键帽、代码这些跟文档页一样），画完放回。
++        let _dark = crate::ios::style::thumb_dark(e.meta.style.as_ref());
 +        // 手机：缩略图里的字也用文档的字体。
 +        crate::ios::style::set_thumb_font(e.meta.style.as_ref());
 +        let title = crate::ios::masonry::title_size(pad);
@@ -5450,7 +5487,7 @@
                  div()
                      .size_full()
                      .flex()
-@@ -874,33 +962,177 @@
+@@ -874,33 +964,177 @@
                      .child(div().mt(px(4.)).text_size(px(14.)).line_height(px(22.)).text_color(Theme::text_placeholder()).child(crate::settings::text("空白文档")))
              } else {
                  let mut p = div().size_full().p(px(pad)).overflow_hidden().flex().flex_col();
@@ -5636,7 +5673,7 @@
                      .child(crate::ui::continuous_surface(20., Theme::fill_hover()).size_full())
                      .into_any_element();
              }
-@@ -908,25 +1140,38 @@
+@@ -908,25 +1142,38 @@
                      .id(SharedString::from(format!("home-card-{}", e.id)))
                      .when(check.is_none(), |d| d.on_mouse_down(MouseButton::Left, cx.listener(move |w, ev: &MouseDownEvent, _, cx| w.arm_home_drag(&arm, ev.position, cx))))
                      .child(self.record_home_card(&e.id))
@@ -5680,7 +5717,7 @@
                      .when(self.batch.is_none(), |d| d.child(
                          div().absolute().top(px(8.)).right(px(8.))
                              .when(!menu_on, |d| d.opacity(0.).group_hover("home-card", |s| s.opacity(1.)))
-@@ -937,13 +1182,32 @@
+@@ -937,13 +1184,32 @@
  
      /// 显示设置 and the sort dropdown: the menu panel; the sort item is a
      /// native menu row.
@@ -5715,7 +5752,7 @@
          };
          if self.home.sort_menu
              && let Some(b) = self.home.anchor("home-sort") {
-@@ -959,7 +1223,7 @@
+@@ -959,7 +1225,7 @@
                              w.home.sort = order;
                              w.save_home();
                              w.home.sort_menu = false;
@@ -5724,7 +5761,7 @@
                              w.home.list_scroll.set_offset(point(px(0.), px(0.)));
                              cx.notify();
                          })));
-@@ -969,7 +1233,7 @@
+@@ -969,7 +1235,7 @@
                      .child(menu_label(crate::settings::tr("文件夹优先", "Folders first"), g.clone(), gpui::white()).flex_1())
                      .when(self.home.folders_first && self.home.sort != HomeSort::Manual, |d| d.child(menu_glyph("check", 14., g)))
                      .on_click(cx.listener(|w, _, _, cx| { if w.home.sort == HomeSort::Manual { return; } w.home.folders_first = !w.home.folders_first; w.save_home(); w.home.sort_menu = false; cx.notify(); })));
@@ -7103,7 +7140,7 @@
  }
  
  #[cfg(target_os = "windows")]
-@@ -39,13 +39,40 @@
+@@ -39,13 +39,41 @@
  }
  
  static DARK: AtomicBool = AtomicBool::new(false);
@@ -7142,10 +7179,11 @@
 +}
 +/// 这一帧按文档的纸定深浅色（`None` 回到应用自己的）；变了返回真。
 +pub fn set_doc_dark(v: Option<bool>) -> bool { let was = dark(); DOC_DARK.with(|d| d.set(v)); was != dark() }
++pub fn doc_dark() -> Option<bool> { DOC_DARK.with(|d| d.get()) }
  /// Switch the look; true when it changed.
  pub fn set_dark(on: bool) -> bool { DARK.swap(on, Ordering::Relaxed) != on }
  /// Run `f` with the light colours (HTML export, printing, copy as rich text).
-@@ -265,7 +292,7 @@
+@@ -265,7 +293,7 @@
  /// Shadows stay black; on the dark page they need more weight to show.
  fn shadow(a: f32, y: f32, blur: f32, spread: f32) -> BoxShadow {
      let a = if dark() { (a * 3.).min(0.6) } else { a };
@@ -7154,7 +7192,7 @@
  }
  
  /// Menus and dropdowns: macOS 26 menu panel, soft and wide.
-@@ -298,17 +325,17 @@
+@@ -298,17 +326,17 @@
      vec![shadow(0.05, 1., 1.5, 0.)]
  }
  
@@ -7176,7 +7214,7 @@
  pub const MONO_FONT: &str = "Noto Sans Mono";
  
  pub struct Theme;
-@@ -328,9 +355,9 @@
+@@ -328,9 +356,9 @@
      pub fn link() -> Hsla { mix(0x0087ff, craft::N900, 0.5) }
      /// A hovered link or document chip: a step closer to the text colour.
      pub fn link_hover() -> Hsla { mix(0x0087ff, craft::N900, 0.65) }
@@ -7189,7 +7227,7 @@
      /// The note: white page.
      pub fn bg_body() -> Hsla { c(craft::N00) }
      /// Light fills inside the note (code blocks, quiet cards).
-@@ -340,18 +367,18 @@
+@@ -340,18 +368,18 @@
      pub fn fill_hover() -> Hsla { ca(craft::N1000, 0.045) }
      pub fn fill_hover_strong() -> Hsla { ca(craft::N1000, 0.06) }
      pub fn fill_pressed() -> Hsla { ca(craft::N1000, 0.09) }
@@ -7214,7 +7252,7 @@
      /// Hairline drawn inside colour swatches (and the "none" swatch).
      pub fn swatch_border() -> Hsla { ca(craft::N1000, 0.08) }
      /// Hovered / focused to-do row.
-@@ -361,18 +388,18 @@
+@@ -361,18 +389,18 @@
      pub fn scrollbar_thumb() -> Hsla { ca(craft::N1000, 0.22) }
      pub fn shadow() -> Hsla { ca(craft::N1000, 0.08) }
      /// Ring of a code block / callout whose handle menu is open.
@@ -7237,7 +7275,7 @@
      pub fn danger_bar() -> Hsla { c(craft::R350) }
      pub fn danger_cell() -> Hsla { c(craft::R50) }
      pub fn danger() -> Hsla { c(craft::R500) }
-@@ -391,8 +418,8 @@
+@@ -391,8 +419,8 @@
      pub fn sidebar_drop() -> Hsla { ca(craft::N1000, 0.05) }
      pub fn sidebar_drop_slot() -> Hsla { ca(craft::N1000, 0.08) }
      /// Renaming in the sidebar: the field's thin edge and the soft focus glow around it.
@@ -7248,7 +7286,7 @@
      pub fn sidebar_landed() -> Hsla { ca(craft::N1000, 0.07) }
      /// Section headers on the sidebar.
      pub fn sidebar_section() -> Hsla { c(0x333739) }
-@@ -416,7 +443,7 @@
+@@ -416,7 +444,7 @@
      #[allow(dead_code)]
      pub fn caption() -> Hsla { c(0x7e8287) }
      /// The old accent menu highlight; kept as a theme token, menus now hover with `fill_hover`.

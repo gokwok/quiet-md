@@ -870,6 +870,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         _ if voice::menu_action(id, w, window, cx) => {}
         _ if assist::menu_action(id, w, window, cx) => {}
         _ if imagine::menu_action(id, w, window, cx) => {}
+        _ if video::menu_action(id, w, window, cx) => {}
         // 设置子页的选项行（`general::choice`）。
         "pref-lang-zh" | "pref-lang-en" => { let en = id == "pref-lang-en"; if crate::settings::prefs().english != en { w.set_pref(|p| p.english = en, cx); } }
         _ if assistant::menu_action(id, w, cx) => {}
