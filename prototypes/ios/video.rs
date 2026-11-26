@@ -112,6 +112,18 @@ pub fn thumb(p: &Path, dir: &Path) -> Option<PathBuf> {
     })
 }
 
+/// 主页卡片要画一个还没截过的视频（这篇从没打开过）：后台截好，回主线程再画一帧。同一个文件只截一次。
+pub fn poster_later(video: PathBuf, make: fn(&Path) -> Option<PathBuf>) {
+    static ASKED: std::sync::Mutex<Option<std::collections::HashSet<PathBuf>>> = std::sync::Mutex::new(None);
+    if !ASKED.lock().map(|mut a| a.get_or_insert_default().insert(video.clone())).unwrap_or(false) { return; }
+    std::thread::spawn(move || {
+        if make(&video).is_none() { return; }
+        unsafe extern "C" { static _dispatch_main_q: std::ffi::c_void; fn dispatch_async_f(queue: *const std::ffi::c_void, context: *mut std::ffi::c_void, work: extern "C" fn(*mut std::ffi::c_void)); }
+        extern "C" fn back(_: *mut std::ffi::c_void) { super::menu::dispatch(|_, window, _| window.refresh()); }
+        unsafe { dispatch_async_f((&raw const _dispatch_main_q).cast(), std::ptr::null_mut(), back); }
+    });
+}
+
 /// 放在预览视图的画面上：点播放时播放器就盖在这一块。
 pub fn slot(path: PathBuf, radius: f32) -> impl IntoElement {
     canvas(move |bounds, window, _| {

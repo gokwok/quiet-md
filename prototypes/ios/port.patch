@@ -1683,7 +1683,22 @@
      }
  }
  
-@@ -254,15 +254,8 @@
+@@ -251,18 +251,23 @@
+     std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "png"))
+ }
+ 
++/// 预览视图的视频截下的那一帧（和页面里同一张，`assets/thumbs/…/poster.png`）和它的宽高：主页卡片的缩略图拿它画。还没截好返回 `None`，并在后台截。
++pub(crate) fn video_poster(f: &FileBlock) -> Option<(PathBuf, f32, f32)> {
++    if f.view != FileView::Preview || preview_of(&f.name) != Some(Kind::Video) { return None; }
++    let video = local_path(f)?;
++    let Some(png) = first_png(&thumb_dir(&video)) else { crate::ios::video::poster_later(video, make_thumb); return None };
++    // PNG 头里第 16–24 字节是宽和高。
++    let mut head = [0u8; 24];
++    std::io::Read::read_exact(&mut std::fs::File::open(&png).ok()?, &mut head).ok()?;
++    let (w, h) = (u32::from_be_bytes(head[16..20].try_into().ok()?), u32::from_be_bytes(head[20..24].try_into().ok()?));
++    (w > 0 && h > 0).then_some((png, w as f32, h as f32))
++}
++
  fn make_thumb(p: &Path) -> Option<PathBuf> {
      let dir = thumb_dir(p);
      let _ = std::fs::create_dir_all(&dir);
@@ -1701,7 +1716,7 @@
  }
  
  /// Opens the file in Quick Look (scripted runs only log it).
-@@ -478,6 +471,7 @@
+@@ -478,6 +483,7 @@
                              .overflow_hidden()
                              .bg(if video { gpui::black() } else { Theme::bg_body() })
                              .child(pic)
@@ -1709,7 +1724,7 @@
                              .when(video, |d| {
                                  let l = open_listener(path.clone(), cx);
                                  d.child(
-@@ -535,7 +529,8 @@
+@@ -535,7 +541,8 @@
                      .shadow(theme::shadow_button())
                      .cursor_pointer()
                      .when(menu_on, |d| d.child(ring().rounded(px(RADIUS + 2.))))
@@ -1719,7 +1734,7 @@
                      .children(recorder)
                      .on_mouse_down(MouseButton::Left, open_on_click)
                      .into_any_element()
-@@ -632,7 +627,7 @@
+@@ -632,7 +639,7 @@
  
      pub(super) fn open_file(&mut self, p: Option<&Path>, cx: &mut Context<Self>) {
          match p.filter(|p| p.is_file()) {
@@ -1728,7 +1743,7 @@
              None => self.toast(crate::settings::text("文件不存在"), cx),
          }
      }
-@@ -642,7 +637,7 @@
+@@ -642,7 +649,7 @@
          let Some(src) = local_path(f).filter(|p| p.is_file()) else { return self.toast(crate::settings::text("文件不存在"), cx) };
          let picked = crate::devtools::take_pick().and_then(|p| p.into_iter().next());
          let dir = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_default();
@@ -1737,7 +1752,7 @@
          let bg = cx.background_executor().clone();
          cx.spawn(async move |_, _| {
              let dest = match rx {
-@@ -650,10 +645,12 @@
+@@ -650,10 +657,12 @@
                  None => picked,
              };
              let Some(dest) = dest else { return };
@@ -1750,7 +1765,7 @@
          })
          .detach();
      }
-@@ -761,6 +758,7 @@
+@@ -761,6 +770,7 @@
          let preview = preview_of(&f.name);
          let view = f.view;
          let path = local_path(f);
@@ -1758,7 +1773,7 @@
          let act = |f: fn(&mut Editor, BlockId, &mut Window, &mut Context<Editor>)| {
              cx.listener(move |e: &mut Editor, _: &MouseDownEvent, window, cx| {
                  cx.stop_propagation();
-@@ -844,7 +842,7 @@
+@@ -844,7 +854,7 @@
                  window.prevent_default();
              })
              .child(bar);
@@ -1767,7 +1782,7 @@
      }
  
      /// The hover card of an inline attachment: 下载 | 文本视图 · 卡片视图 ·
-@@ -886,7 +884,7 @@
+@@ -886,7 +896,7 @@
                      window.prevent_default();
                      if e.core.inline_to_file(p, v).is_some() {
                          e.hide_button_card(cx);
@@ -1776,7 +1791,7 @@
                          e.changed(window, cx);
                      }
                  }),
-@@ -904,7 +902,7 @@
+@@ -904,7 +914,7 @@
                  window.prevent_default();
              })
              .child(bar);
@@ -1785,7 +1800,7 @@
      }
  
      // ---- inserting
-@@ -912,7 +910,7 @@
+@@ -912,7 +922,7 @@
      /// 视频或文件: the picked files become attachments at the caret.
      pub(super) fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
          let picked = crate::devtools::take_pick();
@@ -1794,7 +1809,7 @@
          cx.spawn_in(window, async move |this, cx| {
              let paths = match rx {
                  Some(rx) => rx.await.ok().and_then(Result::ok).flatten(),
-@@ -956,7 +954,7 @@
+@@ -956,7 +966,7 @@
                          e.core.sel = Selection::caret(Pos::new(p, 0));
                      }
                  }
@@ -2454,12 +2469,13 @@
  pub use fdl_core::editor::core;
  mod drag;
  pub mod emoji;
-@@ -23,9 +23,15 @@
+@@ -23,9 +23,16 @@
  mod scrollbar;
  pub mod reminder;
  mod render;
 -pub(crate) use render::equation_numbers;
 +pub(crate) use render::{equation_numbers, PAGE_GAP, PAGE_PAD};
++pub(crate) use file::video_poster;
  mod subpages;
  pub mod table;
  pub use fdl_core::editor::table_ops;
@@ -5059,7 +5075,21 @@
              for (r, c, value) in table.cells() {
                  let (rs, cs) = (value.rowspan as usize, value.colspan as usize);
                  let header = r < table.header_rows || (table.header_col && c == 0);
-@@ -245,7 +247,7 @@
+@@ -221,6 +223,13 @@
+             }
+             return node.child(table_el).into_any_element();
+         }
++        // 预览视图的视频画截下的那一帧，中间是播放按钮，和页面里一样（截好之前仍是文件条）。
++        BlockKind::File(f) if let Some((poster, w, h)) = crate::editor::video_poster(f) => {
++            let ratio = (w / h).clamp(690. / 600., 4.);
++            let media = div().relative().flex_none().w_full().overflow_hidden().rounded(px(bs::RADIUS * s)).bg(gpui::black()).map(|mut d| { d.style().aspect_ratio = Some(ratio); d });
++            return node.child(media.child(img(poster).doc_picture().absolute().inset_0().size_full().object_fit(ObjectFit::Contain))
++                .child(div().absolute().inset_0().flex().items_center().justify_center().child(div().size(px(56. * s)).rounded_full().flex().items_center().justify_center().bg(theme::rgbaf(0, 0, 0, 0.5)).child(crate::editor_ui::icon("play-filled", 24. * s, gpui::white()))))).into_any_element();
++        }
+         BlockKind::File(f) => return node.p(px(12. * s)).rounded(px(bs::RADIUS * s)).border(px(s)).border_color(Theme::line_border()).bg(bs::code_surface()).flex_row().items_center().gap(px(12. * s))
+             .child(icon("file-text", 30. * s, Theme::icon())).child(div().flex_1().min_w_0().text_size(px(15. * s)).font_weight(FontWeight::MEDIUM).child(f.name.clone())).into_any_element(),
+         BlockKind::Countdown(c) => {
+@@ -245,7 +254,7 @@
      }
      if b.kind.has_text() {
          let runs = b.text.runs.iter().map(|r| {
@@ -5068,7 +5098,7 @@
              f.weight = if r.marks.bold { FontWeight::BOLD } else { bs::weight(&b.kind) };
              if r.marks.italic || quote { f.style = FontStyle::Italic; }
              let mut ink = if r.marks.link.is_some() { Theme::link() } else { r.marks.text_color.as_ref().and_then(|c| theme::text_color(&c.0)).map(bs::display_ink).unwrap_or(color) };
-@@ -398,9 +400,8 @@
+@@ -398,9 +407,8 @@
  
  /// A document's icon: its emoji, or the monochrome page glyph.
  fn entry_icon(e: &Entry) -> AnyElement {
@@ -5079,7 +5109,7 @@
          Some(em) => div().size(px(24.)).mr(px(12.)).flex_none().flex().items_center().justify_center().text_size(px(18.)).child(em.clone()).into_any_element(),
          None => doc_icon().mr(px(12.)).into_any_element(),
      }
-@@ -409,6 +410,10 @@
+@@ -409,6 +417,10 @@
  impl Workspace {
      /// In 批量管理 a click checks or unchecks; otherwise it opens.
      fn home_click(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -5090,7 +5120,7 @@
          if self.batch.is_none() { return self.open(id, window, cx) }
          if !self.toggle_check(id) {
              self.show_toast_kind(crate::ui::ToastKind::Error, &crate::localized_format!("一次最多选择 {} 项", "Select up to {} items at a time", crate::sidebar::BATCH_LIMIT), cx);
-@@ -417,7 +422,7 @@
+@@ -417,7 +429,7 @@
      }
  
      /// The row's / card's checkbox while 批量管理 is on.
@@ -5099,7 +5129,7 @@
          use crate::sidebar::{BATCH_LIMIT, Check, checkbox};
          let sel = self.batch.as_ref()?;
          let on = sel.contains(&e.id);
-@@ -427,6 +432,15 @@
+@@ -427,6 +439,15 @@
      pub(crate) fn home_entries(&self) -> Vec<Entry> {
          match self.home.tab {
              // 我的文档 is the library's top level.
@@ -5115,7 +5145,7 @@
              HomeTab::Recent => self.level_entries(None),
              HomeTab::Starred => self.sorted_entries(self.entries.iter().filter(|e| e.meta.folder.is_none() && e.meta.starred > 0).cloned().collect()),
          }
-@@ -484,7 +498,7 @@
+@@ -484,7 +505,7 @@
          fn subpages(blocks: &mut [crate::model::Block], entries: &[&Entry], budget: &mut usize) {
              for b in blocks {
                  if matches!(b.kind, BlockKind::SubPageList) {
@@ -5124,7 +5154,7 @@
                      *budget -= b.children.len();
                  } else {
                      subpages(&mut b.children, entries, budget);
-@@ -495,7 +509,8 @@
+@@ -495,7 +516,8 @@
          let mut budget = 64;
          let mut eqnos = HashMap::new();
          let mut cover = None;
@@ -5134,7 +5164,7 @@
              cover = doc.cover.clone();
              let numbers = crate::editor::equation_numbers(&doc);
              thumb_blocks(&doc.blocks, &mut budget, 0, &numbers, &mut eqnos)
-@@ -515,14 +530,14 @@
+@@ -515,14 +537,14 @@
      fn open_row_menu(&mut self, id: &str, key: &str, cx: &mut Context<Self>) {
          let b = self.more_bounds.borrow().get(key).copied();
          let Some(b) = b else { return };
@@ -5151,7 +5181,7 @@
          div()
              .id(SharedString::from(key.clone()))
              .relative()
-@@ -580,7 +595,7 @@
+@@ -580,7 +602,7 @@
  
      /// A newly opened folder page starts at its top.
      pub(crate) fn reset_folder_scroll(&self) {
@@ -5160,7 +5190,7 @@
          self.home.folder_list_scroll.set_offset(point(px(0.), px(0.)));
      }
  
-@@ -603,19 +618,25 @@
+@@ -603,19 +625,25 @@
          // Too narrow for the search box: a search icon beside +, in the same style.
          let search = self.header_search(window, cx);
          let narrow = search.is_none();
@@ -5190,7 +5220,7 @@
          // Tabs as segmented items: the current one on a quiet fill, no accent.
          let tab = |id: &'static str, label: &'static str, t: HomeTab| {
              let on = self.home.tab == t;
-@@ -641,8 +662,10 @@
+@@ -641,8 +669,10 @@
          };
          // 批量管理: the sidebar's 批量操作 selection, entered and shown here
          // too, with a toolbar of its own.
@@ -5202,7 +5232,7 @@
                  .text_size(px(13.)).line_height(px(20.))
                  .text_color(if enabled { Theme::text() } else { Theme::text_disabled() })
                  .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(Theme::fill_hover())))
-@@ -676,33 +699,50 @@
+@@ -676,33 +706,50 @@
                      .when(n > 0, |d| d.on_click(cx.listener(|w, _, window, cx| w.batch_move(window, cx)))))
                  .child(text_btn("home-batch-delete", "bin", crate::settings::text("删除"), n > 0).ml(px(4.))
                      .when(n > 0, |d| d.on_click(cx.listener(|w, _, _, cx| w.ask_batch_delete(cx)))))
@@ -5259,7 +5289,7 @@
          };
          div()
              .flex_1()
-@@ -710,19 +750,24 @@
+@@ -710,19 +757,24 @@
              .h_full()
              .flex()
              .flex_col()
@@ -5288,7 +5318,7 @@
          // The list: 13pt tertiary headers over a hairline; the
          // sorted column in the text colour, semibold, with its arrow.
          let mut header = div()
-@@ -769,7 +814,10 @@
+@@ -769,7 +821,10 @@
              );
          }
          header = header.child(div().w(px(60.)).flex_none());
@@ -5300,7 +5330,7 @@
          if entries.is_empty() {
              rows = rows.child(div().pt(px(72.)).child(empty_state("illus/empty-list.svg", crate::settings::text("当前列表暂无内容"))));
          }
-@@ -787,10 +835,11 @@
+@@ -787,10 +842,11 @@
                  .hover(row_hover)
                  .when(menu_on, |d| d.bg(Theme::fill_hover()).border_color(transparent_black()).rounded(px(ROW_RADIUS)))
                  .on_click(cx.listener(move |w, _, window, cx| w.home_click(&id, window, cx)))
@@ -5313,7 +5343,7 @@
                          cx.notify();
                      }),
                  ))
-@@ -812,58 +861,90 @@
+@@ -812,58 +868,90 @@
              row = row.child(div().w(px(60.)).flex_none().flex().justify_end().pr(px(12.)).when(self.batch.is_none(), |d| d.child(self.home_more(e, format!("home-more-{}", e.id), cx))));
              rows = rows.child(row);
          }
@@ -5420,7 +5450,7 @@
                  div()
                      .size_full()
                      .flex()
-@@ -874,33 +955,177 @@
+@@ -874,33 +962,177 @@
                      .child(div().mt(px(4.)).text_size(px(14.)).line_height(px(22.)).text_color(Theme::text_placeholder()).child(crate::settings::text("空白文档")))
              } else {
                  let mut p = div().size_full().p(px(pad)).overflow_hidden().flex().flex_col();
@@ -5606,7 +5636,7 @@
                      .child(crate::ui::continuous_surface(20., Theme::fill_hover()).size_full())
                      .into_any_element();
              }
-@@ -908,25 +1133,38 @@
+@@ -908,25 +1140,38 @@
                      .id(SharedString::from(format!("home-card-{}", e.id)))
                      .when(check.is_none(), |d| d.on_mouse_down(MouseButton::Left, cx.listener(move |w, ev: &MouseDownEvent, _, cx| w.arm_home_drag(&arm, ev.position, cx))))
                      .child(self.record_home_card(&e.id))
@@ -5650,7 +5680,7 @@
                      .when(self.batch.is_none(), |d| d.child(
                          div().absolute().top(px(8.)).right(px(8.))
                              .when(!menu_on, |d| d.opacity(0.).group_hover("home-card", |s| s.opacity(1.)))
-@@ -937,13 +1175,32 @@
+@@ -937,13 +1182,32 @@
  
      /// 显示设置 and the sort dropdown: the menu panel; the sort item is a
      /// native menu row.
@@ -5685,7 +5715,7 @@
          };
          if self.home.sort_menu
              && let Some(b) = self.home.anchor("home-sort") {
-@@ -959,7 +1216,7 @@
+@@ -959,7 +1223,7 @@
                              w.home.sort = order;
                              w.save_home();
                              w.home.sort_menu = false;
@@ -5694,7 +5724,7 @@
                              w.home.list_scroll.set_offset(point(px(0.), px(0.)));
                              cx.notify();
                          })));
-@@ -969,7 +1226,7 @@
+@@ -969,7 +1233,7 @@
                      .child(menu_label(crate::settings::tr("文件夹优先", "Folders first"), g.clone(), gpui::white()).flex_1())
                      .when(self.home.folders_first && self.home.sort != HomeSort::Manual, |d| d.child(menu_glyph("check", 14., g)))
                      .on_click(cx.listener(|w, _, _, cx| { if w.home.sort == HomeSort::Manual { return; } w.home.folders_first = !w.home.folders_first; w.save_home(); w.home.sort_menu = false; cx.notify(); })));
