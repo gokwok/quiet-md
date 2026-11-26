@@ -234,7 +234,7 @@ unsafe fn build(parent: *mut AnyObject) -> Option<Card> {
         let _: () = msg_send![hint, setTextColor: color(c"placeholderTextColor")];
         let _: () = msg_send![hint, setText: ns_string(tr("想让助手写什么", "What should the assistant write"))];
         let _: () = msg_send![content, addSubview: hint];
-        // 发送：朱红的实心圆，白色向上箭头；没写字时灰掉。
+        // 发送：强调色的实心圆，白色向上箭头；没写字时灰掉。
         let config: *mut AnyObject = msg_send![AnyClass::get(c"UIButtonConfiguration").unwrap(), filledButtonConfiguration];
         let _: () = msg_send![config, setCornerStyle: 4isize];
         let _: () = msg_send![config, setBaseBackgroundColor: ui_color(super::mark())];

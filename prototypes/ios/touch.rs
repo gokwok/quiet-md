@@ -470,7 +470,7 @@ impl Editor {
         let tr = crate::settings::tr;
         let glass = crate::ios::glass::supported();
         // 玻璃上图标和字是原生的（GPUI 画的会被玻璃盖住）；只有「删除」垫底色。
-        // 「助手」的 ¶ 是朱红的（应用图标的颜色），字照旧。
+        // 「助手」的 ¶、「配图」的星框是强调色，字照旧。
         let kind = one.and_then(|id| self.core.kind_of(id));
         let crop = one.filter(|&id| self.can_phone_crop(id));
         let code = one.filter(|_| matches!(kind, Some(BlockKind::Code { .. })));
@@ -1072,7 +1072,7 @@ impl Editor {
     }
 
     /// 「/」菜单这会儿的行（分类、某一类、打了字的筛选结果），和它是哪一级。照 Craft：图标都是灰的，删除是红的；
-    /// 「助手」的 ¶ 和「配图」的星框是朱红的（两样 AI 的一家）。
+    /// 「助手」的 ¶ 和「配图」的星框是强调色（两样 AI 的一家）。
     fn slash_look(&self) -> crate::ios::cmdmenu::Look {
         use super::menus::SLASH_ITEMS;
         use crate::ios::cmdmenu::Kind;
@@ -1253,7 +1253,7 @@ pub(super) fn command_row(kind: crate::ios::cmdmenu::Kind, glyph: &'static str, 
 // ---- 助手的预览
 
 impl super::render::R<'_> {
-    /// 助手写出来的、还没插入的字，排在锚点下面：和正文同一套排版（静态的一份，不进文档），左边一道朱红的细线；
+    /// 助手写出来的、还没插入的字，排在锚点下面：和正文同一套排版（静态的一份，不进文档），左边一道强调色的细线；
     /// 新出现的块淡入。锚点不在了就排在最后一块下面。
     pub(super) fn assist_preview(&self, b: &fdl_core::model::Block, env: super::render::Env, cx: &mut Context<Editor>) -> Option<AnyElement> {
         use std::{cell::RefCell, collections::{HashMap, HashSet}, rc::Rc};

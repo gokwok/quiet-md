@@ -594,8 +594,8 @@ fn paint(shape: super::glass::Shape) -> impl IntoElement {
 /// 底部那块玻璃从胶囊长成整条要这么久（`menu_action` 防误点）。
 const MORPH: Duration = Duration::from_millis(420);
 
-/// 助手的颜色：应用图标的朱红（`icons/margin.svg` 的底色 #D9472B）。
-pub fn mark() -> Hsla { crate::theme::c(0xd9472b) }
+/// 助手（和配图）的颜色：设置 › 外观 › 界面强调色。
+pub fn mark() -> Hsla { Theme::primary() }
 
 /// 预览里的块淡入、写完时整体落定用的曲线。
 pub fn ease_out_quint() -> impl Fn(f32) -> f32 { |t| 1. - (1. - t).powi(5) }
