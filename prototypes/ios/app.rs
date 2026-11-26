@@ -19,6 +19,7 @@ pub mod editor_surface;
 pub mod files;
 pub mod pick;
 pub mod press;
+pub mod video;
 pub mod general;
 pub mod lock;
 pub mod folder_icons;
@@ -232,7 +233,7 @@ pub fn page(main: AnyElement, view: View, folder: Option<(&str, usize)>, sub_dep
         // 旧页滑走的这段时间里一直出帧：只属于这一页的玻璃要等它走完才露面。
         .child(canvas(
             |_, window, _| { shot::below_drawn(); let parked = shot::parked_tick(); if parked || shot::sliding() { window.request_animation_frame() } },
-            |_, _, window, _| { menu::finish_frame(window); press::finish_frame(); },
+            |_, _, window, _| { menu::finish_frame(window); press::finish_frame(); video::finish_frame(); },
         ).absolute().size_0());
     if !is_compact() || epoch == 0 { return page.into_any_element(); }
     match motion {
@@ -1291,6 +1292,8 @@ fn restore(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) 
 pub fn prompt_for_paths(_: &mut App, options: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open(options) }
 /// 选一张图片（插入图片、上传封面）：照片图库或文件。
 pub fn prompt_for_images(_: &mut App, _: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open_image() }
+/// 「视频或文件」：先问从哪里选（照片图库里的视频，或文件）。
+pub fn prompt_for_attachments(_: &mut App, _: PathPromptOptions) -> files::Reply<Option<Vec<std::path::PathBuf>>> { files::open_attachment() }
 /// 给出的是沙盒里的临时路径：调用方写完后要调 `exported`，系统的面板才把它存到使用者选的地方。
 pub fn prompt_for_new_path(_: &mut App, _: &std::path::Path, name: Option<&str>) -> files::Reply<Option<std::path::PathBuf>> { files::new_path(name) }
 /// `prompt_for_new_path` 给的路径写好了。

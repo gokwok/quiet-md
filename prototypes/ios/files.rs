@@ -84,6 +84,7 @@ define_class!(
                 let result: *mut AnyObject = msg_send![results, objectAtIndex: 0usize];
                 let provider: *mut AnyObject = msg_send![result, itemProvider];
                 if provider.is_null() { return deliver(None); }
+                let movie: bool = msg_send![provider, hasItemConformingToTypeIdentifier: ns_string("public.movie")];
                 let _ = std::fs::remove_dir_all(photo_root());
                 let dir = photo_root().join(uuid::Uuid::new_v4().to_string());
                 // 代理一直留着（见 `present`），后台线程上拿它的地址回主线程。
@@ -93,7 +94,7 @@ define_class!(
                     let copied = (!url.is_null()).then(|| url_path(url)).flatten().and_then(|from| {
                         std::fs::create_dir_all(&dir).ok()?;
                         let ext = from.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
-                        if matches!(ext.as_str(), "jpeg" | "jpg" | "png" | "gif" | "webp" | "bmp") {
+                        if movie || matches!(ext.as_str(), "jpeg" | "jpg" | "png" | "gif" | "webp" | "bmp") {
                             let to = dir.join(from.file_name()?);
                             return std::fs::copy(&from, &to).ok().map(|_| to);
                         }
@@ -109,7 +110,7 @@ define_class!(
                     let arg = ns_string(&copied.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
                     let _: () = msg_send![delegate as *mut AnyObject, performSelectorOnMainThread: objc2::sel!(photoLoaded:), withObject: arg, waitUntilDone: false];
                 });
-                let _: *mut AnyObject = msg_send![provider, loadFileRepresentationForTypeIdentifier: ns_string("public.image"), completionHandler: &*loaded];
+                let _: *mut AnyObject = msg_send![provider, loadFileRepresentationForTypeIdentifier: ns_string(if movie { "public.movie" } else { "public.image" }), completionHandler: &*loaded];
             }
         }
 
@@ -234,16 +235,17 @@ unsafe fn present_documents(kind: &str, multiple: bool, copy: bool) -> bool {
     }
 }
 
-/// 把照片选择器弹出来：只列图片，选一张。`compatible`：系统能转的先转成通用的格式；仍是 HEIC 的在拿到后再转（见 `photos_picked`）。
-unsafe fn present_photos() -> bool {
+/// 把照片选择器弹出来：只列图片（或只列视频），选一张。图片要兼容的格式：系统能转的先转；仍是 HEIC 的在拿到后再转（见 `photos_picked`）。
+/// 视频照原样拿（HEVC 也能放），不等系统转码。
+unsafe fn present_photos(videos: bool) -> bool {
     unsafe {
         let (Some(config), Some(picker), Some(filter)) = (AnyClass::get(c"PHPickerConfiguration"), AnyClass::get(c"PHPickerViewController"), AnyClass::get(c"PHPickerFilter")) else { return false; };
         let config: *mut AnyObject = msg_send![config, alloc];
         let config: *mut AnyObject = msg_send![config, init];
         if config.is_null() { return false; }
-        let images: *mut AnyObject = msg_send![filter, imagesFilter];
-        let _: () = msg_send![config, setFilter: images];
-        let _: () = msg_send![config, setPreferredAssetRepresentationMode: 1isize];
+        let only: *mut AnyObject = if videos { msg_send![filter, videosFilter] } else { msg_send![filter, imagesFilter] };
+        let _: () = msg_send![config, setFilter: only];
+        let _: () = msg_send![config, setPreferredAssetRepresentationMode: if videos { 2isize } else { 1isize }];
         let picker: *mut AnyObject = msg_send![picker, alloc];
         let picker: *mut AnyObject = msg_send![picker, initWithConfiguration: config];
         let _: () = msg_send![config, release];
@@ -262,7 +264,12 @@ pub fn open(options: PathPromptOptions) -> Reply<Option<Vec<PathBuf>>> {
 }
 
 /// 选一张图片（插入图片、上传封面）：先问从哪里选，「照片图库」是系统的照片选择器，「文件」是只列图片的文件选择器。
-pub fn open_image() -> Reply<Option<Vec<PathBuf>>> {
+pub fn open_image() -> Reply<Option<Vec<PathBuf>>> { ask(|| unsafe { present_photos(false) }, || unsafe { present_documents("public.image", false, true) }) }
+/// 插入「视频或文件」：同样先问，「照片图库」只列视频，「文件」什么都能选、能多选。
+pub fn open_attachment() -> Reply<Option<Vec<PathBuf>>> { ask(|| unsafe { present_photos(true) }, || unsafe { present_documents("public.item", true, true) }) }
+
+/// 先问从哪里选：照片图库还是文件。
+fn ask(photos: fn() -> bool, files: fn() -> bool) -> Reply<Option<Vec<PathBuf>>> {
     if busy() { return Reply::ready(None); }
     let tr = crate::settings::tr;
     let shown = unsafe {
@@ -277,8 +284,8 @@ pub fn open_image() -> Reply<Option<Vec<PathBuf>>> {
             let item: *mut AnyObject = msg_send![action, actionWithTitle: ns_string(title), style: style, handler: &*handler];
             let _: () = msg_send![alert, addAction: item];
         };
-        add(tr("照片图库", "Photo Library"), 0, || present_photos());
-        add(tr("文件", "Files"), 0, || present_documents("public.image", false, true));
+        add(tr("照片图库", "Photo Library"), 0, photos);
+        add(tr("文件", "Files"), 0, files);
         add(tr("取消", "Cancel"), 1, || false);
         let _: () = msg_send![alert, setOverrideUserInterfaceStyle: if crate::theme::dark() { 2isize } else { 1isize }];
         // 宽屏上动作面板是气泡，要有个出处：窗口正中。
@@ -301,7 +308,7 @@ pub fn open_image() -> Reply<Option<Vec<PathBuf>>> {
 }
 
 /// 直接从照片图库选一张（封面的「相册」），不先问从哪里选。
-pub fn open_photos() -> Reply<Option<Vec<PathBuf>>> { open_with(|| unsafe { present_photos() }) }
+pub fn open_photos() -> Reply<Option<Vec<PathBuf>>> { open_with(|| unsafe { present_photos(false) }) }
 /// 直接从「文件」里选一张图片（封面菜单的「浏览文件」）。
 pub fn open_image_file() -> Reply<Option<Vec<PathBuf>>> { open_with(|| unsafe { present_documents("public.image", false, true) }) }
 fn open_with(show: impl FnOnce() -> bool) -> Reply<Option<Vec<PathBuf>>> {

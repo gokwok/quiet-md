@@ -286,7 +286,7 @@ impl Editor {
     pub(in crate::editor) fn phone_file_bar(&self, id: BlockId, rect: Bounds<Pixels>, preview: Option<bool>, view: FileView, path: Option<PathBuf>, window: &Window, cx: &Context<Self>) -> AnyElement {
         let mut p = Surface::at(id, 0);
         let mut items = vec![];
-        if preview == Some(true) { items.push(p.button(text("全屏"), "arrow.up.left.and.arrow.down.right", move |e, _, cx| e.open_file(path.as_deref(), cx))); }
+        if preview == Some(true) { items.push(p.button(text("全屏"), "arrow.up.left.and.arrow.down.right", move |e, _, cx| if !path.as_deref().is_some_and(crate::ios::video::full) { e.open_file(path.as_deref(), cx) })); }
         items.push(p.button(text("下载"), "square.and.arrow.down", move |e, _, cx| if let Some(crate::model::BlockKind::File(f)) = e.core.kind_of(id).cloned() { e.download_file(&f, cx); }));
         items.push(p.button(text("文本视图"), "text.alignleft", move |e, w, cx| { e.core.file_to_inline(id); e.changed(w, cx); }));
         for (title, symbol, v) in [(text("卡片视图"), "rectangle", FileView::Card), (text("预览视图"), "doc.richtext", FileView::Preview)] {

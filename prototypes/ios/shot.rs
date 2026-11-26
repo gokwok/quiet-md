@@ -1202,3 +1202,17 @@ unsafe fn transaction(done: &RcBlock<dyn Fn()>, body: impl FnOnce()) {
         let _: () = msg_send![ca, commit];
     }
 }
+/// 那一层放回 Metal 视图上面：系统播放器从页面里那块进全屏、再关上时，系统把 Metal 视图（根控制器的视图）
+/// 重新加回窗口最前，这一层被压在了它底下，玻璃就看不见了。
+pub fn reseat_overlay() {
+    let (view, Some(metal)) = (OVERLAY.with(|o| o.get()), metal()) else { return };
+    if view.is_null() { return; }
+    unsafe {
+        let sup: *mut AnyObject = msg_send![metal, superview];
+        if sup.is_null() { return; }
+        let at: *mut AnyObject = msg_send![view, superview];
+        let subs: *mut AnyObject = msg_send![sup, subviews];
+        let (a, b): (usize, usize) = (msg_send![subs, indexOfObject: view], msg_send![subs, indexOfObject: metal]);
+        if at != sup || a < b { let _: () = msg_send![sup, insertSubview: view, aboveSubview: metal]; }
+    }
+}

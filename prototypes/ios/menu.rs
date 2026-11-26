@@ -54,6 +54,7 @@ pub fn begin(allowed: bool, window: &Window, cx: &mut Context<Workspace>) {
     ALLOWED.with(|a| a.set(allowed));
     REGIONS.with(|r| r.borrow_mut().clear());
     super::press::begin();
+    super::video::begin();
     super::files::attach(window);
     follow_appearance(window);
     follow_accent(window);
