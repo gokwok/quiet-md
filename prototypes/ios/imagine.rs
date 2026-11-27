@@ -334,7 +334,7 @@ fn plan(input: String, passage: Option<Passage>, ratio: &'static str, cx: &mut C
         while let Some(e) = events.next().await {
             match e {
                 assistant::llm::Event::Text(t) => reply.push_str(&t),
-                assistant::llm::Event::Thinking => {}
+                assistant::llm::Event::Thinking | assistant::llm::Event::Calls(_) => {}
                 assistant::llm::Event::Done => break,
                 assistant::llm::Event::Failed(e) => { error = Some(e); break }
             }

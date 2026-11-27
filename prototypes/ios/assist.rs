@@ -157,7 +157,8 @@ fn start(ed: &mut Editor, input: String, cx: &mut Context<Editor>) {
     let preset_name = if s.preset.is_empty() { String::new() } else { library::display_name(&preset, &s.preset) };
     let (char, persona) = (s.char().clone(), s.persona().clone());
     let turns = history::turns(&ed.core.doc, anchor, &record::dir());
-    let now = fdl_core::time::civil((fdl_core::time::now() as i64 + fdl_core::time::local_offset()).max(0) as u64);
+    // `civil` 自己按本地时区换算。
+    let now = fdl_core::time::civil(fdl_core::time::now());
     let seed = fdl_core::time::now_ms();
     let a = assemble(&Request {
         preset: &preset, char: Identity { name: char.name.clone(), description: char.description.clone() },
@@ -215,6 +216,7 @@ async fn pump(mut stream: mpsc::UnboundedReceiver<Event>, shaper: Shaper, mut ma
     while let Some(e) = stream.next().await {
         let ok = match e {
             Event::Thinking => tx.unbounded_send(Update::Thinking).is_ok(),
+            Event::Calls(_) => true,
             Event::Text(t) => {
                 raw.push_str(&t);
                 let cut = shaper.settled(&raw);

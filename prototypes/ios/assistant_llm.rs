@@ -37,8 +37,8 @@ impl Model {
     pub fn label(&self) -> &str { self.name.as_deref().unwrap_or(&self.id) }
 }
 
-/// 流式对话里陆续收到的东西。
-pub enum Event { Thinking, Text(String), Done, Failed(String) }
+/// 流式对话里陆续收到的东西。`Calls` 是模型这一轮要调的工具（参数收齐了才给），在 `Done` 前面。
+pub enum Event { Thinking, Text(String), Calls(Vec<fdl_ai::run::Call>), Done, Failed(String) }
 
 pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -100,11 +100,21 @@ pub fn complete(base: String, key: String, mut body: Value) -> mpsc::UnboundedRe
         let send = |e: Event| tx.unbounded_send(e).is_ok();
         let client = match client(&base, &key) { Ok(c) => c, Err(e) => { send(Event::Failed(e)); return; } };
         let mut stream = match client.chat().create_stream_byot::<Value, Value>(body).await { Ok(s) => s, Err(e) => { send(Event::Failed(describe(e))); return; } };
+        // 工具调用是分段来的：按 `index` 拼，`arguments` 一段段接上。
+        let mut calls: Vec<fdl_ai::run::Call> = vec![];
         while let Some(chunk) = stream.next().await {
             let chunk = match chunk { Ok(c) => c, Err(e) => { send(Event::Failed(describe(e))); return; } };
             // 有的服务把错误放在流里。
             if let Some(message) = chunk.pointer("/error/message").and_then(Value::as_str) { send(Event::Failed(message.into())); return; }
             let Some(delta) = chunk.pointer("/choices/0/delta") else { continue };
+            for c in delta.get("tool_calls").and_then(Value::as_array).into_iter().flatten() {
+                let i = c.get("index").and_then(Value::as_u64).map_or(calls.len().saturating_sub(1), |i| i as usize);
+                while calls.len() <= i { calls.push(fdl_ai::run::Call { id: String::new(), name: String::new(), args: String::new() }); }
+                let call = &mut calls[i];
+                if let Some(id) = c.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) { call.id = id.into(); }
+                if let Some(name) = c.pointer("/function/name").and_then(Value::as_str) { call.name.push_str(name); }
+                if let Some(args) = c.pointer("/function/arguments").and_then(Value::as_str) { call.args.push_str(args); }
+            }
             let thinking = ["reasoning_content", "reasoning"].iter().any(|k| delta.get(*k).and_then(Value::as_str).is_some_and(|s| !s.is_empty()));
             let ok = match delta.get("content").and_then(Value::as_str) {
                 Some(text) if !text.is_empty() => send(Event::Text(text.into())),
@@ -113,6 +123,9 @@ pub fn complete(base: String, key: String, mut body: Value) -> mpsc::UnboundedRe
             };
             if !ok { return; }
         }
+        calls.retain(|c| !c.name.is_empty());
+        for (i, c) in calls.iter_mut().enumerate() { if c.id.is_empty() { c.id = format!("call_{i}"); } }
+        if !calls.is_empty() && !send(Event::Calls(calls)) { return; }
         send(Event::Done);
     });
     rx

@@ -559,7 +559,7 @@ async fn ask((base, key, model, effort): (String, String, String, Option<String>
     while let Some(e) = events.next().await {
         match e {
             assistant::llm::Event::Text(t) => out.push_str(&t),
-            assistant::llm::Event::Thinking => {}
+            assistant::llm::Event::Thinking | assistant::llm::Event::Calls(_) => {}
             assistant::llm::Event::Done => break,
             assistant::llm::Event::Failed(e) => return Err(e),
         }

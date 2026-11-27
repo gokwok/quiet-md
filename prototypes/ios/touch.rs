@@ -539,11 +539,12 @@ impl Editor {
                 if roles.is_empty() { voice.on_click(cx.listener(|ed: &mut Editor, _, w, cx| crate::ios::voice::start_blocks(ed, crate::ios::voice::bar_pick(), w, cx))) }
                 else { voice.child(crate::ios::menu::button("bb-voice-menu", roles)) }
             })
-            // 「助手」：接着选中的最后一块往下写。
+            // 「助手」：打开助手页（`ios::margin`），看的是这篇加选中的块。
             .child(item("bb-assist", "assistant", tr("助手", "Assistant"), Theme::text()).on_click(cx.listener(|ed: &mut Editor, _, w, cx| {
                 let picked = ed.core.block_sel_ids();
-                let anchor = ed.core.block_order(false).into_iter().rfind(|id| picked.contains(id));
-                crate::ios::assist::open(ed, anchor, w, cx);
+                let ids: Vec<String> = ed.core.block_order(false).into_iter().filter(|id| picked.contains(id)).map(|id| id.0.to_string()).collect();
+                ed.finish_block_selection(w, cx);
+                crate::ios::menu::dispatch(move |ws, window, cx| crate::ios::margin::open_blocks(ws, ids, window, cx));
             })))
             // 「配图」：照选中的块（带上前后文）配一张，插在它们下面。
             .child(item("bb-imagine", "imagine", tr("配图", "Illustrate"), Theme::text()).on_click(cx.listener(|ed: &mut Editor, _, w, cx| crate::ios::imagine::open_passage(ed, w, cx))))

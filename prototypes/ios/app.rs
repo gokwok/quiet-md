@@ -10,6 +10,7 @@ pub mod alert;
 pub mod appicon;
 pub mod assistant;
 pub mod assist;
+pub mod margin;
 pub mod imagine;
 pub mod info;
 pub mod card;
@@ -453,6 +454,9 @@ pub fn dock() -> impl IntoElement {
     row
         .child(div().id("doc-tools").absolute().left(px(20.)).top_0().w(px(160.)).h_full().rounded_full().occlude()
             .child(glass::tab_pane("doc-tools", vec![("sf:arrow.uturn.backward.circle", 24., ink), ("sf:paintbrush", 23., ink), ("sf:pencil", 24., ink)], None, vec!["doc-history", "doc-style", "doc-append"])))
+        // 助手（MarginAI）：看的是这篇文档。
+        .child(div().id("doc-margin").absolute().right(px(76.)).top_0().size(px(48.)).rounded_full().occlude()
+            .child(menu::glass_tap("doc-margin", "sparkle", Theme::text(), margin::OPEN_DOC, crate::settings::text("助手"))))
         .child(div().id("doc-add").absolute().right(px(20.)).top_0().size(px(48.)).rounded_full().occlude()
             .child(menu::glass_button("doc-add", "plus", Theme::text(), vec![
                 Item::new("doc-add-more", crate::settings::tr("更多", "More"), "ellipsis", 0),
@@ -868,6 +872,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         _ if search::set_mode(id) => { cx.notify(); }
         _ if keybar::menu_action(id, w, window, cx) => {}
         _ if voice::menu_action(id, w, window, cx) => {}
+        _ if margin::menu_action(id, w, window, cx) => {}
         _ if assist::menu_action(id, w, window, cx) => {}
         _ if imagine::menu_action(id, w, window, cx) => {}
         _ if video::menu_action(id, w, window, cx) => {}
@@ -1098,6 +1103,12 @@ pub fn new_button(view: View, cx: &mut Context<Workspace>) -> impl IntoElement {
             else if floating() { d.bottom(dock_inset()).size(px(48.)).child(menu::glass_tap("fab", "plus", Theme::text(), "new-doc", crate::settings::text("新建文档"))) }
             else { d.bottom(px(16.)).size(px(56.)).bg(Theme::primary()).shadow(crate::theme::shadow_dialog()).active(|s| s.bg(crate::theme::c(crate::theme::craft::B700))).child(crate::ui::icon("plus", 26., gpui::white())) })
         .occlude().on_click(cx.listener(|w, _, window, cx| w.new_doc(window, cx)))
+}
+
+/// 左下角的助手钮（MarginAI，看整个空间），和右下角的新建钮对称。只在有 Liquid Glass 时放。
+pub fn margin_button() -> impl IntoElement {
+    div().id("home-margin").absolute().left(px(20.)).bottom(dock_inset()).size(px(48.)).rounded_full().occlude()
+        .when(floating(), |d| d.child(menu::glass_tap("home-margin", "sparkle", Theme::text(), margin::OPEN_HOME, crate::settings::text("助手"))))
 }
 
 thread_local! { static OVERLAY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }

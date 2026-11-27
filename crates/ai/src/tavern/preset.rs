@@ -12,8 +12,8 @@ pub const GLOBAL_ORDER: u64 = 100001;
 const DEFAULT_DEPTH: usize = 4;
 const DEFAULT_ORDER: i64 = 100;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Role { System, User, Assistant }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Role { System, #[default] User, Assistant }
 
 impl Role {
     pub fn read(s: &str) -> Option<Role> {

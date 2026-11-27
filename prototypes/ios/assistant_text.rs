@@ -328,7 +328,7 @@ fn run_tests(cx: &mut Context<Workspace>) {
             // 收到第一个字就停（`events` 丢掉，请求跟着断开）；推理模型先想一会儿，接着等。
             let result = loop {
                 match events.next().await {
-                    Some(Event::Thinking) => continue,
+                    Some(Event::Thinking | Event::Calls(_)) => continue,
                     Some(Event::Text(_)) => break Test::Done(started.elapsed().as_secs_f32()),
                     Some(Event::Failed(e)) => break Test::Failed(e),
                     Some(Event::Done) => break Test::Failed(tr("模型没有返回内容", "The model returned no text").into()),

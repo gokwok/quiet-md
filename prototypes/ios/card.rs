@@ -39,6 +39,7 @@ pub fn prefill(draft: Option<Draft>) { PREFILL.with(|p| *p.borrow_mut() = draft)
 pub fn begin(window: &Window) {
     // 助手的卡片同一个规矩。
     super::assist::card::begin(window);
+    super::margin::card::begin(window);
     super::imagine::card::begin(window);
     SEEN.with(|s| s.set(false));
     // 收起时 `endEditing` 让键盘落下，系统当场发「键盘将收起」；那时正在这一帧的回调里，GPUI 记下了键盘高度变 0，
