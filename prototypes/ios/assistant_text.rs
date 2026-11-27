@@ -1,4 +1,4 @@
-//! 设置 › 助手设置 › 文本：OpenAI 兼容的文本模型。
+//! 设置 › MarginAI › 模型（原来叫「文本」）：OpenAI 兼容的文本模型。
 //! 「服务商」可以有好几个，各有接口地址，API Key 按服务商分开存在钥匙串里；「主模型」（能力优先）和「快速模型」（速度优先）
 //! 各指向某个服务商的某个模型，两个可以来自不同的服务商。模型列表向各家服务要（`assistant_llm.rs`）。
 //! 版式照语音页：上面两张并排的模型卡片，下面是服务商列表（每家一颗柔光球）和推理强度，最后可以给两个模型各发一句 ping 看通不通。
@@ -78,6 +78,24 @@ thread_local! {
 
 fn secret(id: &str) -> Secret<'_> { Secret { service: SERVICE, account: id } }
 
+/// 选好一个模型怎么办（别处借选择模型页时）。
+pub(super) type SetModel = std::rc::Rc<dyn Fn(&mut Workspace, Slot, &mut Context<Workspace>)>;
+thread_local! {
+    /// 选择模型页不是给主模型、快速模型选时（MarginAI 的某个助手）：现在选的、选好了怎么办、选完回到哪一页。
+    static CHOOSING: RefCell<Option<(Slot, SetModel, Page)>> = const { RefCell::new(None) };
+}
+
+/// 别处借选择模型页：`back` 是选完回到的那页。
+pub(super) fn choose_model(current: Slot, back: Page, set: SetModel, w: &mut Workspace, cx: &mut Context<Workspace>) {
+    if prefs().text_providers.is_empty() { return w.show_toast_kind(ui::ToastKind::Error, tr("请先添加服务商", "Add a provider first"), cx); }
+    CHOOSING.with(|c| *c.borrow_mut() = Some((current, set, back)));
+    w.open_settings(Page::AssistantModels, cx);
+}
+/// 选择模型页的上一页。
+pub(super) fn models_parent() -> Page { CHOOSING.with(|c| c.borrow().as_ref().map_or(Page::AssistantText, |c| c.2)) }
+/// 选择模型页上现在选的：借用时是借的那个，否则是正在选的位置。
+fn picking(p: &Preferences) -> Slot { CHOOSING.with(|c| c.borrow().as_ref().map(|c| c.0.clone())).unwrap_or_else(|| slot(p, PICKING.with(Cell::get)).clone()) }
+
 fn key_status(id: &str) -> Option<bool> {
     KEYS.with(|k| *k.borrow_mut().entry(id.to_owned()).or_insert_with(|| super::key_saved(secret(id))))
 }
@@ -149,7 +167,7 @@ fn model_of(s: &Slot) -> Option<Model> {
 }
 
 /// 位置上的模型叫什么：列表里的显示名，其次选的时候记下的，最后是 id（去掉「厂商/」前缀）。
-fn slot_name(s: &Slot) -> String {
+pub(super) fn slot_name(s: &Slot) -> String {
     model_of(s).map(|m| m.label().to_owned()).or_else(|| Some(s.name.clone()).filter(|n| !n.is_empty())).unwrap_or_else(|| s.model.rsplit('/').next().unwrap_or(&s.model).to_owned())
 }
 
@@ -197,6 +215,7 @@ fn slot_card(i: usize, p: &Preferences, cx: &mut Context<Workspace>) -> AnyEleme
             super::super::glass::haptic();
             if prefs().text_providers.is_empty() { return w.show_toast_kind(ui::ToastKind::Error, tr("请先添加服务商", "Add a provider first"), cx); }
             PICKING.with(|p| p.set(i));
+            CHOOSING.with(|c| *c.borrow_mut() = None);
             w.open_settings(Page::AssistantModels, cx);
         }))
         .into_any_element()
@@ -486,7 +505,7 @@ fn context(n: u64) -> String {
 /// 哪家没连上，就在那一组里写原因，可以重新连接；每组最后都能手动填模型 ID。点一个就选它并回到文本页。
 pub fn models(cx: &mut Context<Workspace>) -> AnyElement {
     let p = prefs();
-    let current = slot(&p, PICKING.with(Cell::get)).clone();
+    let current = picking(&p);
     let search = SEARCH.with(|s| s.borrow().clone());
     let query = search.as_ref().map_or_else(String::new, |f| f.read(cx).text.trim().to_lowercase());
     let message = |text: SharedString| div().px(px(18.)).py(px(16.)).text_center().text_size(px(15.)).line_height(px(21.)).text_color(Theme::text_caption()).child(text).into_any_element();
@@ -551,6 +570,12 @@ fn model_row(m: &Model, provider: &str, on: bool, cx: &mut Context<Workspace>) -
 /// 选定：换了模型就清掉这个位置的测试结果；新模型也支持原来的推理强度才留着。
 fn choose(w: &mut Workspace, provider: String, model: String, cx: &mut Context<Workspace>) {
     super::super::glass::haptic();
+    if let Some(set) = CHOOSING.with(|c| c.borrow().as_ref().map(|c| c.1.clone())) {
+        let mut next = Slot { provider, model, ..Slot::default() };
+        next.name = model_of(&next).and_then(|m| m.name).unwrap_or_default();
+        set(w, next, cx);
+        return super::super::settings_back(w, cx);
+    }
     let i = PICKING.with(Cell::get);
     let s = slot(&prefs(), i).clone();
     if s.provider != provider || s.model != model {
@@ -567,7 +592,7 @@ fn choose(w: &mut Workspace, provider: String, model: String, cx: &mut Context<W
 /// 服务不列模型、或者列表里没有想用的：手动填 id。
 fn enter_model(w: &mut Workspace, provider: String, cx: &mut Context<Workspace>) {
     super::super::glass::haptic();
-    let s = slot(&prefs(), PICKING.with(Cell::get)).clone();
+    let s = picking(&prefs());
     let value = if s.provider == provider { s.model } else { String::new() };
     if !super::prompt(tr("模型 ID", "Model ID"), None, "gpt-5", &value, Field::Url, None, move |value| {
         let Some(id) = value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty()) else { return };

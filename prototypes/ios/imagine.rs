@@ -155,7 +155,7 @@ fn begin(ed: &mut Editor, anchor: Option<BlockId>, passage: Option<Passage>, win
 /// 发出一定先让快速模型整理（带上前后文，人物在写到的里面挑），确认了才生成。
 pub fn open_passage(ed: &mut Editor, window: &mut Window, cx: &mut Context<Editor>) {
     if image::key().is_none() { return toast(tr("请先在设置里添加 NovelAI Key", "Add a NovelAI key in Settings first")); }
-    if assistant::text::quick().is_none() { return toast(tr("先在 设置 › 文本 里选择模型", "Choose a model in Settings › Text first")); }
+    if assistant::text::quick().is_none() { return toast(tr("先在 设置 › MarginAI › 模型 里选择模型", "Choose a model in Settings › MarginAI › Models first")); }
     if super::assist::active() { return; }
     let Some((passage, anchor)) = gather(ed) else { return toast(tr("选中的块里没有可配图的文字", "There is no text to illustrate in the selection")) };
     begin(ed, Some(anchor), Some(passage), window, cx);
@@ -272,7 +272,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
         OPTIMIZE => {
             let on = !assistant::prompts::lib().optimize;
             if on && assistant::text::quick().is_none() {
-                w.show_toast_kind(ui::ToastKind::Error, tr("先在 设置 › 文本 里选择模型", "Choose a model in Settings › Text first"), cx);
+                w.show_toast_kind(ui::ToastKind::Error, tr("先在 设置 › MarginAI › 模型 里选择模型", "Choose a model in Settings › MarginAI › Models first"), cx);
             } else { assistant::prompts::set_optimize(on); }
             card::set_optimize(assistant::prompts::lib().optimize);
         }
@@ -308,7 +308,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
 /// 给选中的块配图时（`passage`）带上前后文，候选人物里只留模型挑进画面的，图插在选中的最后一块下面。
 fn plan(input: String, passage: Option<Passage>, ratio: &'static str, cx: &mut Context<Workspace>) {
     let Some(quick) = assistant::text::quick() else {
-        return toast(tr("先在 设置 › 文本 里选择模型", "Choose a model in Settings › Text first"));
+        return toast(tr("先在 设置 › MarginAI › 模型 里选择模型", "Choose a model in Settings › MarginAI › Models first"));
     };
     let size = image::size(ratio);
     let lib = assistant::prompts::lib();

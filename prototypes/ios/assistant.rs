@@ -1,4 +1,4 @@
-//! 设置 › 助手设置 › 语音。模型是应用偏好，API Key 只在设备钥匙串里保存。
+//! 设置 › MarginAI：几页的入口和共用的东西；本文件是语音页。模型是应用偏好，API Key 只在设备钥匙串里保存。
 use std::{cell::Cell, ffi::{CStr, CString}, ptr::null_mut};
 
 use gpui::{prelude::FluentBuilder, *};
@@ -23,6 +23,8 @@ pub mod sheet;
 pub mod image;
 #[path = "assistant_image_prompts.rs"]
 pub mod prompts;
+#[path = "assistant_list.rs"]
+pub mod list;
 
 pub const DEFAULT_MODEL: &str = "eleven_v4";
 const MODEL_ACTION: &str = "speech-model-";
@@ -46,13 +48,16 @@ thread_local! { static KEY_SAVED: Cell<Option<bool>> = const { Cell::new(None) }
 /// 第二级页面回到哪一页：语音的音色列表、角色设置回语音，选头像回角色设置；模型列表、服务商回文本；画风、人物回图像；写作的几页见 `writing::parent`。
 pub fn parent(page: Page) -> Option<Page> {
     if let Some(p) = writing::parent(page) { return Some(p); }
-    match page { Page::AssistantVoices | Page::AssistantRole => Some(Page::AssistantSpeech), Page::AssistantAvatar => Some(roles::avatars_parent()), Page::AssistantModels | Page::AssistantProvider => Some(Page::AssistantText), Page::AssistantStyle | Page::AssistantPerson => Some(Page::AssistantImage), _ => None }
+    match page { Page::AssistantVoices | Page::AssistantRole => Some(Page::AssistantSpeech), Page::AssistantAvatar => Some(roles::avatars_parent()), Page::AssistantModels => Some(text::models_parent()), Page::AssistantProvider => Some(Page::AssistantText), Page::AssistantDetail => Some(Page::AssistantList), Page::AssistantStyle | Page::AssistantPerson => Some(Page::AssistantImage), _ => None }
 }
 
-/// 打开助手设置的某一页时：重新看一眼钥匙串，文本页顺便取模型列表。
+/// 打开 MarginAI 设置的某一页时：重新看一眼钥匙串，文本页顺便取模型列表。
 pub fn opened(page: Page, cx: &mut Context<Workspace>) {
     match page {
         Page::AssistantSpeech => { refresh_key_status(); roles::reload(); }
+        Page::AssistantList | Page::AssistantDetail => { list::opened(); prompts::opened(); roles::reload(); }
+        // 空间设置的「默认助手」菜单列的也是这些助手。
+        Page::Library => list::opened(),
         Page::AssistantImage | Page::AssistantStyle | Page::AssistantPerson => { image::opened(); prompts::opened(); }
         Page::AssistantText | Page::AssistantModels | Page::AssistantProvider => text::opened(page, cx),
         Page::AssistantWriting | Page::AssistantPreset | Page::AssistantEntries | Page::AssistantEntry | Page::AssistantRegexes | Page::AssistantRegex | Page::AssistantCard => writing::opened(page, cx),
@@ -119,6 +124,7 @@ pub(super) fn model_cards(id: &'static str, title: &'static str, cards: &'static
 
 pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
     if action.starts_with("text-") { return text::menu_action(action, w, cx); }
+    if action.starts_with("marginai-") { return list::menu_action(action, w, cx); }
     if action.starts_with("tavern-") { return writing::menu_action(action, w, cx); }
     if action.starts_with("image-") { return image::menu_action(action, w, cx) || prompts::menu_action(action, w, cx); }
     if action.starts_with("speech-role-lang-") { return roles::menu_action(action, w, cx); }

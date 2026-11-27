@@ -28,6 +28,8 @@ pub struct Space {
     pub available: bool,
     /// Where the folder is kept: on this device, or in iCloud.
     pub location: Location,
+    /// The assistant this space uses by default (an id from MarginAI's global library); `None` is the built-in one.
+    pub assistant: Option<String>,
 }
 
 /// Where a space's folder lives. Spaces made by the app live inside the
@@ -65,6 +67,9 @@ struct SpaceFile {
     icon: Option<String>,
     #[serde(default)]
     created: u64,
+    /// The space's default assistant (`Space::assistant`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    assistant: Option<String>,
 }
 
 /// `spaces.json` in the home: this device's list.
@@ -175,6 +180,7 @@ fn space(home: &Path, e: &Entry, primary: bool) -> Space {
         name: f.name.filter(|n| !n.trim().is_empty()),
         available: is_library(&root),
         location: location_of(&root, icloud_root().as_deref()),
+        assistant: f.assistant.filter(|a| !a.is_empty()),
         primary,
         root,
     }
@@ -285,6 +291,16 @@ pub fn rename_in(home: &Path, id: &str, name: &str) -> Result<()> {
     let mut f = load_file(&s.root);
     let name = name.trim();
     f.name = (!name.is_empty()).then(|| name.to_string());
+    save_file(&s.root, &f)
+}
+
+/// Set the space's default assistant; `None` goes back to the built-in one.
+pub fn set_assistant(id: &str, assistant: Option<&str>) -> Result<()> { set_assistant_in(&home(), id, assistant) }
+
+pub fn set_assistant_in(home: &Path, id: &str, assistant: Option<&str>) -> Result<()> {
+    let s = find(home, id)?;
+    let mut f = load_file(&s.root);
+    f.assistant = assistant.filter(|a| !a.is_empty()).map(str::to_owned);
     save_file(&s.root, &f)
 }
 
@@ -489,5 +505,12 @@ mod tests {
         assert!(icon.extension().unwrap() == "png" && icon.starts_with(&s.root));
         set_icon_in(&home, &s.id, None).unwrap();
         assert!(list_in(&home)[0].icon.is_none() && !icon.exists());
+        // The default assistant travels in `space.json` with the name.
+        assert!(list_in(&home)[0].assistant.is_none());
+        set_assistant_in(&home, &s.id, Some("muse")).unwrap();
+        assert_eq!(list_in(&home)[0].assistant.as_deref(), Some("muse"));
+        assert_eq!(list_in(&home)[0].name.as_deref(), Some("新名字"));
+        set_assistant_in(&home, &s.id, None).unwrap();
+        assert!(list_in(&home)[0].assistant.is_none());
     }
 }

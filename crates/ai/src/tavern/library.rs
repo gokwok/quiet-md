@@ -37,6 +37,8 @@ pub struct Settings {
     pub last: String,
     /// 见过的预设名字（标识 → 名字）：另一台设备上还没下载的预设，列表里也有名字可显示。
     pub names: BTreeMap<String, String>,
+    /// 「/」续写卡片选的助手（`assistants` 里的标识）；空的、或者不在了，是内置的 MarginAI。
+    pub assistant: String,
 }
 
 impl Default for Settings {
@@ -45,7 +47,7 @@ impl Default for Settings {
             preset: String::new(), char: "assistant".into(), persona: "me".into(),
             chars: vec![Card { id: "assistant".into(), name: "写作助手".into(), description: String::new() }],
             personas: vec![Card { id: "me".into(), name: "我".into(), description: String::new() }],
-            last: String::new(), names: BTreeMap::new(),
+            last: String::new(), names: BTreeMap::new(), assistant: String::new(),
         }
     }
 }
@@ -72,14 +74,15 @@ impl Settings {
         let (chars, personas) = (cards("chars", &d.chars), cards("personas", &d.personas));
         let pick = |k: &str, list: &[Card]| text(&v, k).filter(|id| list.iter().any(|c| c.id == *id)).unwrap_or_else(|| list[0].id.clone());
         Settings { preset: text(&v, "preset").unwrap_or_default(), char: pick("char", &chars), persona: pick("persona", &personas), chars, personas, last: text(&v, "last").unwrap_or_default(),
-            names: v.get("names").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect()).unwrap_or_default() }
+            names: v.get("names").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned()))).collect()).unwrap_or_default(),
+            assistant: text(&v, "assistant").unwrap_or_default() }
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         let v = json!({
             "preset": self.preset, "char": self.char, "persona": self.persona,
             "chars": self.chars.iter().map(Card::to_json).collect::<Vec<_>>(), "personas": self.personas.iter().map(Card::to_json).collect::<Vec<_>>(),
-            "last": self.last, "names": self.names,
+            "last": self.last, "names": self.names, "assistant": self.assistant,
         });
         write(&dir.join("settings.json"), &serde_json::to_vec_pretty(&v).map_err(std::io::Error::other)?)
     }

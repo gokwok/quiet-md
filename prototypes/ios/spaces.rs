@@ -1,6 +1,6 @@
 //! 手机上的空间（照 Craft）：首页左上角的空间头像点了去设置；设置第一级顶上是大头像和「空间名 ⌄」，
 //! 点名字从底部浮起一张卡片（「打开空间…」搜索 + 每个空间一行，当前的打勾）；「空间设置」这一页是
-//! 图标（带相机钮）、名称、危险区里的删除。没有空间时整页是「创建你的第一个空间」。逻辑都在 `crate::space`。
+//! 图标（带相机钮）、名称、存放位置、默认助手，一张 `SPACE.md` 卡片，危险区里的删除。没有空间时整页是「创建你的第一个空间」。逻辑都在 `crate::space`。
 use crate::app::{Confirm, View, Workspace};
 use crate::settings::tr;
 use crate::space::{self, name, space_icon};
@@ -335,7 +335,7 @@ fn move_space(w: &mut Workspace, id: String, to: Location, cx: &mut Context<Work
     }).detach();
 }
 
-/// 设置 › 空间设置（照 Craft）：图标带相机钮，名称，危险区里的删除（第一个空间没有）。
+/// 设置 › 空间设置（照 Craft）：图标带相机钮，名称、存放位置、默认助手，`SPACE.md`，危险区里的删除（第一个空间没有）。
 pub fn space_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
     let Some(s) = space::current(w).cloned() else { return div().into_any_element() };
     let (pick, del, label) = (s.id.clone(), s.id.clone(), name(&s));
@@ -346,6 +346,7 @@ pub fn space_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
             .child(div().h(px(26.)).flex().items_center().text_size(px(17.)).child(w.space_name.clone())).into_any_element(),
     ];
     rows.extend(storage(&s));
+    rows.push(default_assistant(&s));
     if s.icon.is_some() {
         let id = s.id.clone();
         rows.push(div().id("space-icon-reset").w_full().h(px(52.)).px(px(18.)).flex().items_center().text_size(px(17.)).text_color(Theme::primary())
@@ -358,12 +359,53 @@ pub fn space_page(w: &Workspace, cx: &mut Context<Workspace>) -> AnyElement {
                 .bg(theme::raised(Theme::bg_body())).border_1().border_color(Theme::button_border()).shadow(theme::shadow_button()).child(crate::ui::icon("pen-line", 16., Theme::icon())))
             .on_click(cx.listener(move |w, _, window, cx| w.pick_space_icon(pick.clone(), window, cx)))))
         .child(super::general::card(rows))
+        .child(space_md(&s, cx))
         .when(!s.primary, |d| d.child(super::general::titled(Some(tr("危险区", "Danger zone")), vec![
             div().id("space-delete").w_full().px(px(18.)).py(px(12.)).flex().flex_col().gap(px(2.)).active(|s| s.bg(Theme::fill_pressed()))
                 .child(div().text_size(px(17.)).line_height(px(22.)).text_color(Theme::danger()).child(tr("删除空间", "Delete space")))
                 .child(div().text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(tr("删除后，这个空间和里面的所有文档都无法恢复。", "Deleting the space removes it and every document in it for good.")))
                 .on_click(cx.listener(move |w, _, _, cx| { super::glass::haptic(); w.confirm = Some(Confirm::RemoveSpace { id: del.clone(), name: label.clone() }); cx.notify(); }))
                 .into_any_element()])))
+        .into_any_element()
+}
+
+/// 「默认助手」：这个空间里不另选时用哪个助手（记在 `space.json`）；没选过或选的不在了是内置的 MarginAI。
+fn default_assistant(s: &fdl_core::spaces::Space) -> AnyElement {
+    let all = super::assistant::list::all();
+    let now = all.resolve(&[s.assistant.as_deref()]);
+    let items = all.list.iter().map(|a| super::assistant::list::space_item(a, a.id == now.id)).collect();
+    super::general::choice("space-assistant", tr("默认助手", "Default Assistant"), now.name.clone(), items)
+}
+
+/// 「默认助手」菜单里选了一个（空的是内置的）。
+pub fn pick_assistant(w: &mut Workspace, id: &str, cx: &mut Context<Workspace>) {
+    let Some(s) = space::current(w).cloned() else { return };
+    super::glass::haptic();
+    match fdl_core::spaces::set_assistant(&s.id, Some(id).filter(|i| !i.is_empty())) {
+        Ok(()) => w.reload_spaces(cx),
+        Err(e) => w.show_toast_kind(crate::ui::ToastKind::Error, &crate::settings::diagnostic(&e.to_string()), cx),
+    }
+}
+
+/// `SPACE.md`：一张淡淡染色的圆角卡片，标题和一行灰字；点开整页改这个文件（没有就先用模板建一份）。
+fn space_md(s: &fdl_core::spaces::Space, cx: &mut Context<Workspace>) -> AnyElement {
+    let root = s.root.clone();
+    div().px(px(10.)).child(div().id("space-md").w_full().px(px(18.)).py(px(14.)).rounded(px(20.)).bg(Theme::block_hover()).flex().flex_col().gap(px(2.))
+        .active(|d| d.bg(Theme::block_selected()))
+        .child(div().text_size(px(17.)).line_height(px(22.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(fdl_ai::space_md::FILE))
+        .child(div().text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(tr("写给助手看的空间说明", "Notes about this space for the assistant")))
+        .on_click(cx.listener(move |w, _, window, cx| {
+            window.blur(cx);
+            super::glass::haptic();
+            let text = match fdl_ai::space_md::open(&root) { Ok(t) => t, Err(e) => return w.show_toast_kind(crate::ui::ToastKind::Error, &crate::settings::diagnostic(&e.to_string()), cx) };
+            let root = root.clone();
+            if !super::assistant::sheet::edit(fdl_ai::space_md::FILE, &text, false, move |text| {
+                if let Err(e) = fdl_ai::space_md::write(&root, &text) {
+                    let e = e.to_string();
+                    super::menu::dispatch(move |w, _, cx| w.show_toast_kind(crate::ui::ToastKind::Error, &crate::settings::diagnostic(&e), cx));
+                }
+            }) { w.show_toast_kind(crate::ui::ToastKind::Error, tr("无法打开编辑", "Could not open the editor"), cx); }
+        })))
         .into_any_element()
 }
 

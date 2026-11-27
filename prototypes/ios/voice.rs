@@ -223,7 +223,7 @@ fn generate(clip: String, mut info: Clip, doc: &Document, cx: &mut Context<Edito
         let result = async {
             if !live() { return Ok(()) }
             if let Some((quick, (system, user, segs))) = request {
-                let quick = quick.ok_or_else(|| tr("先在 设置 › 文本 里选择模型", "Choose a model in Settings › Text first").to_owned())?;
+                let quick = quick.ok_or_else(|| tr("先在 设置 › MarginAI › 模型 里选择模型", "Choose a model in Settings › MarginAI › Models first").to_owned())?;
                 let reply = ask(quick, system, user).await?;
                 if !live() { return Ok(()) }
                 (info.script, info.direction) = lines(&reply, &info, &segs)?;

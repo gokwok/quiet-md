@@ -1,6 +1,6 @@
-//! 设置 › 助手设置 › 写作：预设、助手和人设。
+//! 设置 › MarginAI › 写作：预设和人设（助手在 MarginAI › 助手，`assistant_list.rs`）。
 //! 预设在全局库里（`fdl_ai::global`，各空间共用，`fdl_ai::tavern::library`）；每改一处就整份写回去。内置的「默认」只能看，可以复制一份再改。
-//! 第二级：预设（名称、条目、正则、文件）→ 条目列表（搜索、开关、长按拖动排序）→ 一条条目；正则列表 → 一条正则；助手或人设。
+//! 第二级：预设（名称、条目、正则、文件）→ 条目列表（搜索、开关、长按拖动排序）→ 一条条目；正则列表 → 一条正则；人设。
 //! 长的字（提示词、正则、描述）在系统的文字页里改（`sheet.rs`），引号和破折号原样留着。
 use std::{cell::{Cell, RefCell}, collections::HashSet, path::PathBuf, time::{Duration, Instant}};
 
@@ -230,7 +230,7 @@ pub(super) fn in_use() -> AnyElement {
 fn header(title: &'static str) -> Div { super::roles::header(title) }
 
 /// 一段长字的预览：点开在文字页里改。空的写灰色的「空」。`error` 时描一圈红色。
-fn text_block(id: &'static str, text: &str, mono: bool, error: bool, tappable: bool) -> Stateful<Div> {
+pub(super) fn text_block(id: &'static str, text: &str, mono: bool, error: bool, tappable: bool) -> Stateful<Div> {
     let empty = text.trim().is_empty();
     // 预览只取前面一截：整段提示词可能有几千字。
     let shown: String = text.chars().take(1200).collect();
@@ -246,7 +246,7 @@ fn text_block(id: &'static str, text: &str, mono: bool, error: bool, tappable: b
 
 // ---- 写作（第一级）
 
-/// 写作：预设（内置的「默认」在最前，导入的按名字排；没下载好的写着状态）、助手、人设。选中的打勾，点开看详情。
+/// 写作：预设（内置的「默认」在最前，导入的按名字排；没下载好的写着状态）、人设。选中的打勾，点开看详情。
 fn writing(cx: &mut Context<Workspace>) -> AnyElement {
     let s = settings();
     let listed = LISTED.with(|l| l.borrow().clone());
@@ -268,22 +268,16 @@ fn writing(cx: &mut Context<Workspace>) -> AnyElement {
             let _ = this.update(cx, |w, cx| if w.settings_page == Page::AssistantWriting { refresh_list(); cx.notify(); });
         }).detach();
     }
-    let cards = |persona: bool, cx: &mut Context<Workspace>| {
-        let (list, current) = if persona { (&s.personas, &s.persona) } else { (&s.chars, &s.char) };
-        let mut rows: Vec<AnyElement> = list.iter().map(|c| {
-            let id = c.id.clone();
-            let sub = c.description.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_owned);
-            pick_row(SharedString::from(format!("tavern-card-{persona}-{}", c.id)), c.name.clone(), sub, *current == c.id, None)
-                .on_click(cx.listener(move |w, _, _, cx| { haptic(); open_card(w, persona, id.clone(), cx) })).into_any_element()
-        }).collect();
-        rows.push(if persona { add_row("tavern-add-persona", tr("添加人设", "Add Persona"), |w, cx| add_card(w, true, cx), cx) }
-            else { add_row("tavern-add-char", tr("添加助手", "Add Assistant"), |w, cx| add_card(w, false, cx), cx) });
-        rows
-    };
-    let (chars, personas) = (cards(false, cx), cards(true, cx));
+    // 助手不在这里了（MarginAI › 助手）；写作设置里的助手卡片只为旧数据留着。
+    let mut personas: Vec<AnyElement> = s.personas.iter().map(|c| {
+        let id = c.id.clone();
+        let sub = c.description.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_owned);
+        pick_row(SharedString::from(format!("tavern-card-true-{}", c.id)), c.name.clone(), sub, s.persona == c.id, None)
+            .on_click(cx.listener(move |w, _, _, cx| { haptic(); open_card(w, true, id.clone(), cx) })).into_any_element()
+    }).collect();
+    personas.push(add_row("tavern-add-persona", tr("添加人设", "Add Persona"), |w, cx| add_card(w, true, cx), cx));
     div().w_full().pt(px(18.)).pb(px(24.)).flex().flex_col().gap(px(32.))
         .child(general::titled(Some(tr("预设", "Presets")), presets))
-        .child(general::titled(Some(tr("助手", "Assistants")), chars))
         .child(general::titled(Some(tr("人设", "Personas")), personas))
         .into_any_element()
 }

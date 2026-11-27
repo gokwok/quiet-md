@@ -308,7 +308,10 @@ unsafe fn refresh(card: &Card) {
         let mut presets = vec![(String::new(), default.to_owned())];
         presets.extend(library::presets(&dir, &s.names).into_iter().map(|l| (l.id, l.name)));
         let preset_name = presets.iter().find(|(id, _)| *id == s.preset).map_or(default.to_owned(), |(_, n)| n.clone());
-        let chars: Vec<(String, String)> = s.chars.iter().map(|c| (c.id.clone(), c.name.clone())).collect();
+        // 助手：MarginAI › 助手 里的（只用名字和设定）；选的记在写作设置里，和空间的默认助手无关。
+        let all = super::super::assistant::list::all();
+        let char = all.resolve(&[Some(&s.assistant)]).clone();
+        let chars: Vec<(String, String)> = all.list.iter().map(|a| (a.id.clone(), a.name.clone())).collect();
         let personas: Vec<(String, String)> = s.personas.iter().map(|c| (c.id.clone(), c.name.clone())).collect();
         let face = |b: *mut AnyObject, title: &str, glyph: &str| {
             let config: *mut AnyObject = msg_send![b, configuration];
@@ -322,7 +325,7 @@ unsafe fn refresh(card: &Card) {
             let _: () = msg_send![b, setConfiguration: config];
         };
         face(card.chips[0], &preset_name, "slider.horizontal.3");
-        face(card.chips[1], &s.char().name, "sparkle");
+        face(card.chips[1], &char.name, "sparkle");
         face(card.chips[2], &s.persona().name, "person");
         let menu = |title: &str, items: &[(String, String)], current: &str, pick: fn(&mut library::Settings, String)| -> *mut AnyObject {
             let list: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
@@ -342,7 +345,7 @@ unsafe fn refresh(card: &Card) {
             msg_send![AnyClass::get(c"UIMenu").unwrap(), menuWithTitle: ns_string(title), image: std::ptr::null_mut::<AnyObject>(), identifier: std::ptr::null_mut::<AnyObject>(), options: 0usize, children: list]
         };
         let _: () = msg_send![card.chips[0], setMenu: menu(tr("预设", "Preset"), &presets, &s.preset, |s, id| s.preset = id)];
-        let _: () = msg_send![card.chips[1], setMenu: menu(tr("助手", "Assistant"), &chars, &s.char, |s, id| s.char = id)];
+        let _: () = msg_send![card.chips[1], setMenu: menu(tr("助手", "Assistant"), &chars, &char.id, |s, id| s.assistant = id)];
         let _: () = msg_send![card.chips[2], setMenu: menu(tr("人设", "Persona"), &personas, &s.persona, |s, id| s.persona = id)];
     }
 }

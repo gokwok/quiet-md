@@ -75,13 +75,17 @@ thread_local! {
     static SHOWING: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// 助手的素材（预设、助手和人设、上一次的要求、图像库）：全局库（`fdl_ai::global`），所有空间共用。
-/// 这次启动第一次用时，把各空间 `tavern/` 里还没并过的并进来（还在从 iCloud 下载的下次再并）。
+/// 助手的素材（助手、预设和人设、上一次的要求、图像库）：全局库（`fdl_ai::global`），所有空间共用。
+/// 这次启动第一次用时，把各空间 `tavern/` 里还没并过的并进来（还在从 iCloud 下载的下次再并），再把写作设置里的助手卡片变成助手。
 pub fn dir() -> PathBuf {
     static MIGRATE: std::sync::Once = std::sync::Once::new();
-    MIGRATE.call_once(|| match fdl_ai::global::migrate() {
-        Ok(out) => for (id, r) in out { match r { Ok(m) => log::info!("MarginAI: merged space {id}: {m:?}"), Err(e) => log::info!("MarginAI: space {id} skipped this time: {e}") } },
-        Err(e) => log::warn!("MarginAI: could not record migrated spaces: {e}"),
+    MIGRATE.call_once(|| {
+        match fdl_ai::global::migrate() {
+            Ok(out) => for (id, r) in out { match r { Ok(m) => log::info!("MarginAI: merged space {id}: {m:?}"), Err(e) => log::info!("MarginAI: space {id} skipped this time: {e}") } },
+            Err(e) => log::warn!("MarginAI: could not record migrated spaces: {e}"),
+        }
+        // 写作设置里的助手卡片变成 MarginAI 的助手。
+        match fdl_ai::assistants::migrate(&fdl_ai::global::dir()) { Ok(0) => {} Ok(n) => log::info!("MarginAI: {n} writing cards became assistants"), Err(e) => log::warn!("MarginAI: could not migrate writing cards: {e}") }
     });
     fdl_ai::global::dir()
 }
@@ -156,14 +160,17 @@ fn model() -> Option<(String, String, String, Option<String>)> { assistant::text
 
 /// 拼好请求、发出去。
 fn start(ed: &mut Editor, input: String, cx: &mut Context<Editor>) {
-    let Some((base, key, model, effort)) = model() else { return toast(tr("先在 设置 › 文本 里选择模型", "Choose a model in Settings › Text first").into()) };
+    let Some((base, key, model, effort)) = model() else { return toast(tr("先在 设置 › MarginAI › 模型 里选择模型", "Choose a model in Settings › MarginAI › Models first").into()) };
     let anchor = JOB.with(|j| j.borrow().as_ref().and_then(|j| j.anchor)).filter(|a| ed.core.path(*a).is_some());
     let dir = dir();
     let s = Settings::load(&dir);
     // 选中的预设还没从 iCloud 下载好、或者不见了：说出来，不拿「默认」顶上。
     let preset = match library::load(&dir, &s.preset) { Ok(p) => p, Err(e) => return toast(e) };
     let preset_name = if s.preset.is_empty() { String::new() } else { library::display_name(&preset, &s.preset) };
-    let (char, persona) = (s.char().clone(), s.persona().clone());
+    // 助手：「/」卡片自己选的那个（MarginAI › 助手），只用名字和设定。
+    let char = super::assistant::list::all().resolve(&[Some(&s.assistant)]).clone();
+    let char = library::Card { id: char.id, name: char.name, description: char.description };
+    let persona = s.persona().clone();
     let turns = history::turns(&ed.core.doc, anchor, &record::dir());
     // `civil` 自己按本地时区换算。
     let now = fdl_core::time::civil(fdl_core::time::now());
