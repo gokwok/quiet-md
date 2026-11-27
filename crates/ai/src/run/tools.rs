@@ -76,8 +76,8 @@ pub fn run(shelf: &Shelf, call: &Call) -> String {
         "read_document" => {
             let id = arg_str(&a, "id");
             let Some(d) = shelf.find(&id) else { return format!("错误：没有标识为 {id} 的文档。先用 list_documents 或 search_documents 找到标识。") };
-            // 进来的那篇用完整的 Markdown（标题、列表这些都在），别的用纯文字。
-            let text: String = match shelf.focus.as_ref().filter(|f| f.id == id) { Some(f) => f.markdown.clone(), None => d.text.to_string() };
+            // 附带的那篇用完整的 Markdown（标题、列表这些都在），别的用纯文字。
+            let text: String = match shelf.focus(&id) { Some(f) => f.markdown.clone(), None => d.text.to_string() };
             let total = text.chars().count();
             let from = arg_num(&a, "offset").unwrap_or(0).min(total);
             let part: String = text.chars().skip(from).take(PAGE).collect();

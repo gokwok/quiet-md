@@ -25,7 +25,7 @@ pub enum Kind { Tavern, Agent }
 
 impl Kind {
     pub fn id(self) -> &'static str { match self { Kind::Tavern => "tavern", Kind::Agent => "agent" } }
-    fn parse(s: &str) -> Option<Kind> { match s { "tavern" => Some(Kind::Tavern), "agent" => Some(Kind::Agent), _ => None } }
+    pub fn parse(s: &str) -> Option<Kind> { match s { "tavern" => Some(Kind::Tavern), "agent" => Some(Kind::Agent), _ => None } }
 }
 
 /// 驱动助手的核心：种类和它的配置（酒馆是 `preset`，Agent 是 `rounds`）。两种的配置放在同一个对象里，换种类时另一种的留着；
@@ -52,6 +52,8 @@ pub enum Permission { #[default] Read, Write }
 
 impl Permission {
     pub fn id(self) -> &'static str { match self { Permission::Read => "read", Permission::Write => "write" } }
+    /// 不认识的按只读。
+    pub fn parse(s: &str) -> Permission { if s == "write" { Permission::Write } else { Permission::Read } }
 }
 
 /// 指定的模型：哪个服务商（这台设备的偏好里的标识）的哪个模型，选的时候的显示名。
@@ -101,7 +103,7 @@ impl Assistant {
         });
         Some(Assistant {
             name: text(v, "name").unwrap_or_default(), avatar: opt("avatar"), description: text(v, "description").unwrap_or_default(), greeting: text(v, "greeting").unwrap_or_default(),
-            core, permission: if text(v, "permission").as_deref() == Some("write") { Permission::Write } else { Permission::Read },
+            core, permission: Permission::parse(&text(v, "permission").unwrap_or_default()),
             model, character: opt("character"), voice: opt("voice"), id,
         })
     }

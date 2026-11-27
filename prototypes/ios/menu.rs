@@ -175,7 +175,7 @@ pub(super) fn native(title: &str, items: &[Item]) -> *mut AnyObject { unsafe { m
 
 /// 拼成系统的菜单。同一组的项收进一个「就地展开」的子菜单，系统在组和组之间画分隔线。
 /// `wait`：长按出的上下文菜单，点了的项等菜单收起的动画做完再执行（`ContextDelegate`）。
-unsafe fn menu(title: &str, image: *mut AnyObject, items: &[Item], wait: bool) -> *mut AnyObject {
+pub(crate) unsafe fn menu(title: &str, image: *mut AnyObject, items: &[Item], wait: bool) -> *mut AnyObject {
     unsafe {
         let groups: *mut AnyObject = msg_send![AnyClass::get(c"NSMutableArray").unwrap(), array];
         for group in items.chunk_by(|a, b| a.group == b.group) {
@@ -211,30 +211,31 @@ unsafe fn element(item: &Item, wait: bool) -> *mut AnyObject {
 }
 
 /// 菜单里的头像：解开图片，裁成圆、按屏幕倍数画成 26pt（菜单不会替我们缩放、裁圆），原色不着色。按名字缓存。
-pub(crate) unsafe fn picture(key: &SharedString, bytes: &[u8]) -> *mut AnyObject {
-    thread_local! { static PICTURES: RefCell<Vec<(SharedString, *mut AnyObject)>> = const { RefCell::new(Vec::new()) }; }
-    if let Some(image) = PICTURES.with(|p| p.borrow().iter().find(|(k, _)| k == key).map(|(_, i)| *i)) { return image; }
-    const SIDE: f64 = 26.;
+pub(crate) unsafe fn picture(key: &SharedString, bytes: &[u8]) -> *mut AnyObject { unsafe { picture_sized(key, bytes, 26.) } }
+/// 同上，画成 `side` 大（助手页胶囊上的头像小一些）。
+pub(crate) unsafe fn picture_sized(key: &SharedString, bytes: &[u8], side: f64) -> *mut AnyObject {
+    thread_local! { static PICTURES: RefCell<Vec<(SharedString, u64, *mut AnyObject)>> = const { RefCell::new(Vec::new()) }; }
+    if let Some(image) = PICTURES.with(|p| p.borrow().iter().find(|(k, s, _)| k == key && *s == side.to_bits()).map(|(_, _, i)| *i)) { return image; }
     unsafe {
         let data: *mut AnyObject = msg_send![AnyClass::get(c"NSData").unwrap(), dataWithBytes: bytes.as_ptr().cast::<std::ffi::c_void>(), length: bytes.len()];
         let source: *mut AnyObject = msg_send![AnyClass::get(c"UIImage").unwrap(), imageWithData: data];
         if source.is_null() { return std::ptr::null_mut(); }
         let size: CGSize = msg_send![source, size];
-        let scale = SIDE / size.width.min(size.height).max(1.);
+        let scale = side / size.width.min(size.height).max(1.);
         let (w, h) = (size.width * scale, size.height * scale);
         let draw = block2::RcBlock::new(move |_context: *mut AnyObject| {
-            let oval: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPathWithOvalInRect: CGRect::new(CGPoint::new(0., 0.), CGSize::new(SIDE, SIDE))];
+            let oval: *mut AnyObject = msg_send![AnyClass::get(c"UIBezierPath").unwrap(), bezierPathWithOvalInRect: CGRect::new(CGPoint::new(0., 0.), CGSize::new(side, side))];
             let _: () = msg_send![oval, addClip];
-            let _: () = msg_send![source, drawInRect: CGRect::new(CGPoint::new((SIDE - w) / 2., (SIDE - h) / 2.), CGSize::new(w, h))];
+            let _: () = msg_send![source, drawInRect: CGRect::new(CGPoint::new((side - w) / 2., (side - h) / 2.), CGSize::new(w, h))];
         });
         let renderer: *mut AnyObject = msg_send![AnyClass::get(c"UIGraphicsImageRenderer").unwrap(), alloc];
-        let renderer: *mut AnyObject = msg_send![renderer, initWithSize: CGSize::new(SIDE, SIDE)];
+        let renderer: *mut AnyObject = msg_send![renderer, initWithSize: CGSize::new(side, side)];
         let image: *mut AnyObject = msg_send![renderer, imageWithActions: &*draw];
         let _: () = msg_send![renderer, release];
         // 1 = UIImageRenderingModeAlwaysOriginal
         let image: *mut AnyObject = msg_send![image, imageWithRenderingMode: 1isize];
         let _: *mut AnyObject = msg_send![image, retain];
-        PICTURES.with(|p| p.borrow_mut().push((key.clone(), image)));
+        PICTURES.with(|p| p.borrow_mut().push((key.clone(), side.to_bits(), image)));
         image
     }
 }

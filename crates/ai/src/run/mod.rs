@@ -8,7 +8,8 @@
 //! - 酒馆（`tavern`）：照酒馆预设拼一次请求，模型说完就完，不调工具；
 //! - Agent（`agent`）：ReAct 式循环，带只读的文档工具（列出、搜索、读取），自己决定读什么、读几轮。
 //!
-//! 素材怎么填由核心自己定：同一个范围（`Scope`），酒馆把能塞的一次塞进去，Agent 只给个开头、要更多自己去读。
+//! 每次都带上：空间的 `SPACE.md`、用的那个助手（名字和设定）、这句话附带的资源（`Resource`：文件夹、文档、文档里的几块）。
+//! 素材怎么填由核心自己定：酒馆把能塞的一次塞进去，Agent 只给个开头、要更多自己去读。
 //! 对话记录（`chat`）和核心无关，两个核心共用。
 pub mod agent;
 pub mod chat;
@@ -20,27 +21,48 @@ use std::sync::Arc;
 use fdl_core::model::Block;
 use serde_json::Value;
 
+pub use crate::assistants::{Kind, Permission};
+pub use crate::tavern::assemble::Identity;
 pub use crate::tavern::preset::Role;
 
-/// 助手看的范围，由从哪儿进来决定：主页是整个空间，文档页是这篇文档，文档里选了块是这篇加选中的块。
+/// 一句话附带的资源：一个文件夹、一篇文档、一篇文档里的几块。默认的照从哪儿进来（文档页是这篇，选中块是这几块，
+/// 文件夹页是这个文件夹，主页什么都不带：整个空间本来就是范围），也可以 @ 进来、删掉。
+/// 块的标识不跨启动，选中的内容（Markdown）记在资源里。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Scope { Space, Doc { id: String }, Blocks { id: String, blocks: Vec<String> } }
+pub enum Resource { Folder { id: String }, Document { id: String }, Blocks { doc: String, blocks: Vec<String>, text: String } }
 
-impl Scope {
-    pub fn doc(&self) -> Option<&str> { match self { Scope::Space => None, Scope::Doc { id } | Scope::Blocks { id, .. } => Some(id) } }
+impl Resource {
+    /// 是哪篇文档里的（文件夹不是）。
+    pub fn doc(&self) -> Option<&str> { match self { Resource::Folder { .. } => None, Resource::Document { id } | Resource::Blocks { doc: id, .. } => Some(id) } }
 }
 
 /// 文档库里的一篇（快照）。正文是纯文字，搜索和读取用。
 #[derive(Clone, Debug)]
 pub struct Doc { pub id: String, pub title: String, pub folder: Option<String>, pub modified: u64, pub text: Arc<str> }
 
-/// 进来的那篇：完整的 Markdown，选中的块（Markdown）。
+/// 附带的一篇（或里面的几块）：完整的 Markdown，选中的块（Markdown）。
 #[derive(Clone, Debug, Default)]
 pub struct Focus { pub id: String, pub title: String, pub markdown: String, pub picked: Option<String> }
 
+/// 宿主照 `Resource` 备好的一样：文件夹是名字和里面的文档（标识），文档和块是 `Focus`。
+#[derive(Clone, Debug)]
+pub enum Attached { Folder { name: String, docs: Vec<String> }, Doc(Focus) }
+
 /// 宿主在 run 开始时备好的素材。
 #[derive(Clone, Debug, Default)]
-pub struct Shelf { pub space: String, pub docs: Vec<Doc>, pub focus: Option<Focus>, pub now: Option<(i64, u32, u32, u32, u32)> }
+pub struct Shelf {
+    pub space: String,
+    /// 空间的 `SPACE.md`（用户写给助手看的空间说明），没有是空的。
+    pub guide: String,
+    /// 用的那个助手：名字和设定。
+    pub assistant: Identity,
+    pub docs: Vec<Doc>,
+    /// 这句话附带的资源（照 `Resource` 的顺序；找不到的不在）。
+    pub attached: Vec<Attached>,
+    /// 助手能不能改文档。这一版只记着传下来，写的工具以后接。
+    pub permission: Permission,
+    pub now: Option<(i64, u32, u32, u32, u32)>,
+}
 
 impl Shelf {
     pub fn find(&self, id: &str) -> Option<&Doc> { self.docs.iter().find(|d| d.id == id) }
@@ -51,6 +73,10 @@ impl Shelf {
         v.truncate(n);
         v
     }
+    /// 附带的这篇（完整的 Markdown）。
+    pub fn focus(&self, id: &str) -> Option<&Focus> { self.attached.iter().find_map(|a| match a { Attached::Doc(f) if f.id == id => Some(f), _ => None }) }
+    /// 助手的名字，没起名是「MarginAI」。
+    pub fn name(&self) -> &str { if self.assistant.name.trim().is_empty() { "MarginAI" } else { self.assistant.name.trim() } }
 }
 
 /// 之前的对话（按顺序，不含这次的话）。
@@ -92,16 +118,6 @@ pub trait Core: Send {
     fn settled(&self, raw: &str) -> usize;
     /// 原文变成存下来的样子和显示的块。`id` 给块编号用。
     fn shape(&mut self, raw: &str, id: &str, preview: bool) -> Shaped;
-}
-
-/// 核心有哪几种。`id` 存在对话记录里。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Kind { #[default] Tavern, Agent }
-
-impl Kind {
-    pub const ALL: [Kind; 2] = [Kind::Tavern, Kind::Agent];
-    pub fn id(self) -> &'static str { match self { Kind::Tavern => "tavern", Kind::Agent => "agent" } }
-    pub fn read(s: &str) -> Kind { if s == "agent" { Kind::Agent } else { Kind::Tavern } }
 }
 
 /// 截到 `n` 个字，截了在末尾加「…」。

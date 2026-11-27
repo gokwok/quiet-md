@@ -729,6 +729,17 @@ pub(crate) fn picture(role: &Role) -> Option<(SharedString, std::sync::Arc<[u8]>
     Some(found)
 }
 
+/// 头像标识（自带的或照片）的图片文件，给原生按钮用；照片不在这台设备上是 `None`。按头像缓存。
+pub(crate) fn avatar_picture(id: Option<&str>) -> Option<(SharedString, std::sync::Arc<[u8]>)> {
+    thread_local! { static PICTURES: RefCell<Vec<(SharedString, std::sync::Arc<[u8]>)>> = const { RefCell::new(Vec::new()) }; }
+    let id = id?;
+    if let Some(found) = PICTURES.with(|p| p.borrow().iter().find(|(k, _)| k == id).cloned()) { return Some(found); }
+    let bytes: Vec<u8> = match builtin(id) { Some(n) => BUILTIN[n - 1].to_vec(), None => std::fs::read(avatar_path(id)?).ok()? };
+    let found = (SharedString::from(id.to_owned()), std::sync::Arc::<[u8]>::from(bytes));
+    PICTURES.with(|p| p.borrow_mut().push(found.clone()));
+    Some(found)
+}
+
 /// 换上一个头像（`None` 是恢复默认）。
 pub(super) type SetAvatar = Rc<dyn Fn(&mut Workspace, Option<String>, &mut Context<Workspace>)>;
 thread_local! {

@@ -122,6 +122,14 @@ pub(crate) fn main() -> Option<(String, String, String, Option<String>)> {
     })
 }
 
+/// 助手指定的模型（服务商还在、选了模型）；没指定或服务商没了用 `main`。
+pub(crate) fn for_model(m: Option<&fdl_ai::assistants::Model>) -> Option<(String, String, String, Option<String>)> {
+    m.and_then(|m| {
+        let provider = prefs().text_providers.into_iter().find(|p| p.id == m.provider)?;
+        Some((provider.base_url.clone(), super::read_secret(secret(&provider.id)).unwrap_or_default(), m.model.clone(), None))
+    }).or_else(main)
+}
+
 fn find(id: &str) -> Option<Provider> { prefs().text_providers.into_iter().find(|p| p.id == id) }
 
 /// 进文本的几页：重新看一眼钥匙串；哪家的模型列表还没有、地址变了或上次失败了，就去取。

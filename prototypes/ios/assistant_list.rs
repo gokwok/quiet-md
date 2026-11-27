@@ -65,7 +65,7 @@ pub fn opened() { ALL.with(|a| *a.borrow_mut() = Some(Assistants::load(&dir())))
 pub fn title() -> &'static str { open_one().map_or("", |a| intern(&a.name)) }
 
 /// 菜单项的标识要 `&'static str`：按前缀和标识记一份，不重复分配。
-fn key(prefix: &str, id: &str) -> &'static str {
+pub(crate) fn key(prefix: &str, id: &str) -> &'static str {
     thread_local! { static KEYS: RefCell<HashMap<String, &'static str>> = RefCell::new(HashMap::new()); }
     let k = format!("{prefix}{id}");
     KEYS.with(|keys| *keys.borrow_mut().entry(k.clone()).or_insert_with(|| Box::leak(k.into_boxed_str())))

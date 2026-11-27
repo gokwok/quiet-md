@@ -1,23 +1,30 @@
 //! 助手（MarginAI）的专属页：照 Craft、Notion 的 AI 页，一整页对话，从下面升上来，盖住当前页。
 //!
-//! 从哪儿进来决定助手看的范围（`fdl_ai::run::Scope`）：主页、文件夹页是整个空间，文档页底部的玻璃钮是这篇文档，
-//! 文档里选中块后底部工具条的「助手」是这篇加选中的块。范围写在输入卡片左下的胶囊上，可以改成整个空间。
-//! 换范围（从别处进来）就开一段新对话；同一个范围接着上次那段。
+//! 每句话附带资源（`fdl_ai::run::Resource`：文件夹、文档、文档里的几块），写在输入卡片最上面一排，可以删、可以 @ 搜着加。
+//! 默认带什么看从哪儿进来：文档页底部的玻璃钮带这篇文档，文档里选中块后底部工具条的「助手」带这几块，
+//! 文件夹页左下角的 ✦ 带这个文件夹，主页的 ✦ 什么都不带（整个空间本来就是范围）。从别处进来开一段新对话；从同一处进来接着上次那段。
 //!
-//! 一次 run 由选定的核心驱动（`fdl_ai::run`）：酒馆一次请求，Agent 带只读文档工具循环。宿主在这里：素材快照（`Shelf`）
-//! 在主线程上备好，整个 run 在 `assistant::llm` 的运行时上跑（网络、执行工具、成形），每一步经 channel 交回主线程给界面。
-//! 一次只有一个 run；关掉页面、切到后台照样跑完（`background`）。对话记录存在空间的 `assistant/chats/`（`run::chat`）。
+//! 用哪个助手：这段对话自己选的 > 空间的默认助手 > 内置的 MarginAI（`fdl_ai::assistants::Assistants::resolve`）。
+//! 卡片左下的胶囊是助手（头像和名字），菜单里换助手、临时换核心（酒馆 / Agent）；旁边是权限（只读 / 可编辑，默认照助手的；
+//! 这一版只记着传给 run，写的工具以后接）。用户说了第一句以后助手和核心就定了（换的话开新对话），权限随时能改。
+//! 新对话先显示助手的开场白（有的话），说第一句时它才记进对话。
+//!
+//! 一次 run 由选定的核心驱动（`fdl_ai::run`）：酒馆一次请求，Agent 带只读文档工具循环。宿主在这里：素材快照（`Shelf`：
+//! 空间的 `SPACE.md`、助手的名字和设定、附带的资源）在主线程上备好，整个 run 在 `assistant::llm` 的运行时上跑（网络、执行工具、成形），
+//! 每一步经 channel 交回主线程给界面。一次只有一个 run；关掉页面、切到后台照样跑完（`background`）。
+//! 对话记录存在空间的 `assistant/chats/`（`run::chat`）。
 //!
 //! 第一版不往文档里插：回复可以拷贝。
 use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
 
-use fdl_ai::run::{self, Act, Call, Core, Kind, Reply, Role, Scope, Shelf, chat::{self, Chat, Item}, tools};
-use fdl_ai::tavern::{assemble::Identity, library::{self, Settings}};
+use fdl_ai::assistants::Assistant;
+use fdl_ai::run::{self, Act, Attached, Call, Core, Identity, Kind, Permission, Reply, Resource, Role, Shelf, chat::{self, Chat, Item}, tools};
+use fdl_ai::tavern::library::{self, Settings};
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::FluentBuilder, *};
 
 use crate::{app::{View, Workspace}, model::{Block, BlockKind}, settings::tr, store::Store, theme::Theme, ui};
-use super::{assistant::{self, llm::Event}, menu};
+use super::{assistant::{self, list, llm::Event, roles}, menu};
 
 #[path = "margin_card.rs"]
 pub mod card;
@@ -30,6 +37,14 @@ pub const OPEN_HOME: &str = "margin-open-home";
 pub const OPEN_DOC: &str = "margin-open-doc";
 /// 历史菜单里一段对话一项：标识按位置编号（菜单项的标识是静态的）。
 const CHATS: [&str; 12] = ["margin-chat-0", "margin-chat-1", "margin-chat-2", "margin-chat-3", "margin-chat-4", "margin-chat-5", "margin-chat-6", "margin-chat-7", "margin-chat-8", "margin-chat-9", "margin-chat-10", "margin-chat-11"];
+/// 资源胶囊的「移除」：按位置编号。最多带这么多样。
+const REMOVE: [&str; 8] = ["margin-res-0", "margin-res-1", "margin-res-2", "margin-res-3", "margin-res-4", "margin-res-5", "margin-res-6", "margin-res-7"];
+/// 助手菜单里的一项：`<前缀><标识>`。
+const WHO: &str = "margin-who:";
+const CORE_TAVERN: &str = "margin-core-tavern";
+const CORE_AGENT: &str = "margin-core-agent";
+const PERM_READ: &str = "margin-perm-read";
+const PERM_WRITE: &str = "margin-perm-write";
 const SLIDE: Duration = Duration::from_millis(320);
 
 /// 正在跑的 run。
@@ -46,12 +61,12 @@ struct Live {
 
 struct Page {
     chat: Chat,
-    /// 范围的说法：（胶囊上的字，SF Symbol）。
-    label: (String, &'static str),
-    /// 进来时的范围（胶囊菜单里可以从「整个空间」切回来）。
-    entry: Scope,
-    /// 进来时选中的块的 Markdown（范围是选中的块时；新开的对话记下它）。
-    picked: String,
+    /// 卡片上现在带着的资源：下一句话附带这些（发完还留着，接着问同一样东西）。
+    resources: Vec<Resource>,
+    /// 进来时默认带的（新对话用它；从同一处进来接着上次那段）。
+    entry: Vec<Resource>,
+    /// 空间的默认助手（进来时读一次）。
+    space: Option<String>,
     live: Option<Live>,
     /// 显示用的块，按条目位置记（读出来的对话按 Markdown 成形一次）。
     shaped: HashMap<usize, Vec<Block>>,
@@ -69,8 +84,6 @@ thread_local! {
     static TURN: Cell<u64> = const { Cell::new(0) };
     static SCROLL: ScrollHandle = ScrollHandle::new();
     static FOLLOW: Cell<bool> = const { Cell::new(true) };
-    /// 选的核心（新对话用这个）。
-    static CORE: Cell<Kind> = const { Cell::new(Kind::Agent) };
 }
 
 fn dir() -> PathBuf { chat::dir(&Store::root_dir()) }
@@ -89,46 +102,53 @@ pub fn busy() -> bool { PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live
 
 fn title_of(t: &str) -> String { if t.trim().is_empty() { tr("无标题", "Untitled").into() } else { t.trim().to_owned() } }
 
-/// 范围的说法。
-fn label(w: &Workspace, scope: &Scope) -> (String, &'static str) {
-    let title = |id: &str| w.entries.iter().find(|e| e.id == id).map(|e| title_of(&e.title)).unwrap_or_else(|| tr("这篇文档", "This document").into());
-    match scope {
-        Scope::Space => (tr("整个空间", "Whole space").into(), "square.stack"),
-        Scope::Doc { id } => (title(id), "doc.text"),
-        Scope::Blocks { blocks, .. } => (crate::localized_format!("选中的 {} 块", "{} selected blocks", blocks.len()), "text.quote"),
+/// 这段对话用的助手：自己选的 > 空间的默认助手（`space`）> 内置的。
+fn who(c: &Chat, space: Option<&str>) -> Assistant { list::all().resolve(&[c.assistant.as_deref(), space]).clone() }
+/// 用哪个核心：这段临时换的，不然是助手自己的。
+fn core_of(c: &Chat, a: &Assistant) -> Kind { c.core.unwrap_or(a.core.kind()) }
+
+/// 资源胶囊上的字和 SF Symbol。
+fn label(w: &Workspace, r: &Resource) -> (String, &'static str) {
+    let title = |id: &str| w.entries.iter().find(|e| e.id == id).map(|e| title_of(&e.title));
+    match r {
+        Resource::Folder { id } => (title(id).unwrap_or_else(|| tr("文件夹", "Folder").into()), "folder"),
+        Resource::Document { id } => (title(id).unwrap_or_else(|| tr("这篇文档", "This document").into()), "doc.text"),
+        Resource::Blocks { blocks, .. } => (crate::localized_format!("选中的 {} 块", "{} selected blocks", blocks.len().max(1)), "text.quote"),
     }
 }
 
-/// 从主页、文件夹页进来：整个空间。
-pub fn open_space(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) { show(w, Scope::Space, String::new(), window, cx); }
+/// 从主页进来什么都不带，从文件夹页进来带这个文件夹。
+pub fn open_space(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
+    let entry = match (w.view, w.folder_current.clone()) { (View::Folder, Some(id)) => vec![Resource::Folder { id }], _ => vec![] };
+    show(w, entry, window, cx);
+}
 
-/// 从文档页进来：这篇文档。
+/// 从文档页进来：带这篇文档。
 pub fn open_doc(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(id) = w.current.clone().filter(|_| w.view == View::Doc) else { return open_space(w, window, cx) };
-    show(w, Scope::Doc { id }, String::new(), window, cx);
+    show(w, vec![Resource::Document { id }], window, cx);
 }
 
-/// 文档里选中了块（编辑器那边取好块的标识和 Markdown）。
+/// 文档里选中了块（编辑器那边取好块的标识和 Markdown）：带这几块。
 pub fn open_blocks(w: &mut Workspace, blocks: Vec<String>, window: &mut Window, cx: &mut Context<Workspace>) {
-    let Some(id) = w.current.clone() else { return };
-    let picked = w.editor.as_ref().map(|e| picked(&e.read(cx).core.doc, &blocks)).unwrap_or_default();
-    show(w, Scope::Blocks { id, blocks }, picked, window, cx);
+    let Some(doc) = w.current.clone() else { return };
+    let text = w.editor.as_ref().map(|e| picked(&e.read(cx).core.doc, &blocks)).unwrap_or_default();
+    show(w, vec![Resource::Blocks { doc, blocks, text }], window, cx);
 }
 
-fn show(w: &mut Workspace, scope: Scope, picked: String, _: &mut Window, cx: &mut Context<Workspace>) {
+fn show(_: &mut Workspace, entry: Vec<Resource>, _: &mut Window, cx: &mut Context<Workspace>) {
     super::glass::haptic();
-    let label = label(w, &scope);
+    let space = fdl_core::spaces::current().and_then(|s| s.assistant);
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        // 同一个范围（选中的块也一样）：接着上次那段；不然开一段新的（正在跑的那段先留着跑完）。
-        let same = p.as_ref().is_some_and(|p| p.entry == scope);
-        if !same || p.is_none() {
-            let busy = p.as_ref().is_some_and(|p| p.live.is_some());
-            if busy { save_live(p.as_mut().unwrap()); }
-            *p = Some(Page { chat: fresh(&scope, &picked), label, entry: scope, picked, live: None, shaped: HashMap::new(), expanded: HashSet::new(), recent: vec![] });
-        } else if let Some(p) = p.as_mut() { p.label = label; }
+        // 从同一处进来（选中的块也一样）：接着上次那段；不然开一段新的（正在跑的那段先停下存好）。
+        let same = p.as_ref().is_some_and(|p| p.entry == entry);
+        if same { if let Some(p) = p.as_mut() { p.space = space; } } else {
+            if let Some(p) = p.as_mut() { save_live(p); }
+            *p = Some(Page { chat: fresh(space.as_deref()), resources: entry.clone(), entry, space, live: None, shaped: HashMap::new(), expanded: HashSet::new(), recent: vec![] });
+        }
     });
-    let fresh = PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.chat.items.is_empty()));
+    let fresh = PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| !p.chat.started()));
     if fresh { card::focus(); }
     refresh_recent();
     OPEN.with(|o| o.set(true));
@@ -161,55 +181,66 @@ fn refresh_recent() {
 
 /// 系统菜单、玻璃钮点了。
 pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> bool {
+    let with = |f: &mut dyn FnMut(&mut Page)| PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() { f(p); });
     match id {
         OPEN_HOME => open_space(w, window, cx),
         OPEN_DOC => open_doc(w, window, cx),
         CLOSE => close(cx),
         SEND => if busy() { stop(); cx.notify(); } else { send(w, card::take(), cx) },
+        card::MENTION => card::insert_at(),
         NEW => {
             super::glass::haptic();
-            PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() {
+            with(&mut |p| {
                 save_live(p);
-                p.chat = fresh(&p.entry, &p.picked);
+                p.chat = fresh(p.space.as_deref());
+                p.resources = p.entry.clone();
                 (p.shaped, p.expanded) = (HashMap::new(), HashSet::new());
             });
-            let entry = PAGE.with(|p| p.borrow().as_ref().map(|p| p.entry.clone()));
-            if let Some(e) = entry { let l = label(w, &e); PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() { p.label = l; }); }
             card::focus();
             cx.notify();
         }
         DELETE => {
-            PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() {
+            with(&mut |p| {
                 save_live(p);
                 let _ = chat::delete(&dir(), &p.chat.id);
-                p.chat = fresh(&p.entry, &p.picked);
+                p.chat = fresh(p.space.as_deref());
+                p.resources = p.entry.clone();
                 (p.shaped, p.expanded) = (HashMap::new(), HashSet::new());
             });
             refresh_recent();
             cx.notify();
         }
-        "margin-scope-space" | "margin-scope-entry" => {
-            let to_space = id == "margin-scope-space";
-            PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() { p.chat.scope = if to_space { Scope::Space } else { p.entry.clone() }; });
-            let scope = PAGE.with(|p| p.borrow().as_ref().map(|p| p.chat.scope.clone()));
-            if let Some(s) = scope { let l = label(w, &s); PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() { p.label = l; }); }
+        _ if let Some(i) = REMOVE.iter().position(|r| *r == id) => {
+            super::glass::haptic();
+            with(&mut |p| if i < p.resources.len() { p.resources.remove(i); });
             cx.notify();
         }
-        "margin-core-tavern" | "margin-core-agent" => {
-            let k = if id == "margin-core-agent" { Kind::Agent } else { Kind::Tavern };
-            CORE.with(|c| c.set(k));
-            PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() { p.chat.core = k; });
+        _ if let Some(a) = id.strip_prefix(WHO) => {
+            with(&mut |p| if !p.chat.started() {
+                p.chat.assistant = Some(a.to_owned());
+                // 换了助手：核心回到它自己的，权限照它的默认。
+                p.chat.core = None;
+                p.chat.permission = who(&p.chat, p.space.as_deref()).permission;
+            });
+            cx.notify();
+        }
+        CORE_TAVERN | CORE_AGENT => {
+            let k = if id == CORE_AGENT { Kind::Agent } else { Kind::Tavern };
+            with(&mut |p| if !p.chat.started() { let own = who(&p.chat, p.space.as_deref()).core.kind(); p.chat.core = (k != own).then_some(k); });
+            cx.notify();
+        }
+        PERM_READ | PERM_WRITE => {
+            let to = if id == PERM_WRITE { Permission::Write } else { Permission::Read };
+            with(&mut |p| { p.chat.permission = to; if p.chat.started() { let _ = chat::save(&dir(), &p.chat); } });
             cx.notify();
         }
         _ if let Some(i) = CHATS.iter().position(|c| *c == id) => {
             let target = PAGE.with(|p| p.borrow().as_ref().and_then(|p| p.recent.get(i).map(|(id, _)| id.clone())));
             if let Some(c) = target.and_then(|id| chat::load(&dir(), &id)) {
-                let l = label(w, &c.scope);
-                PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() {
+                with(&mut |p| {
                     save_live(p);
-                    CORE.with(|k| k.set(c.core));
-                    p.chat = c;
-                    p.label = l;
+                    p.resources = c.last_resources().unwrap_or_default().iter().take(REMOVE.len()).cloned().collect();
+                    p.chat = c.clone();
                     (p.shaped, p.expanded) = (HashMap::new(), HashSet::new());
                 });
                 FOLLOW.with(|f| f.set(true));
@@ -221,27 +252,52 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
     true
 }
 
-/// 素材快照：文档库里每篇的标题和正文（纯文字），进来的那篇的 Markdown。
-fn shelf(w: &Workspace, scope: &Scope, picked: &str, cx: &App) -> Shelf {
+/// @ 搜索里挑了一样：带上它，拿掉输入框里的 `@…`。
+fn attach(r: Resource, cx: &mut Context<Workspace>) {
+    super::glass::haptic();
+    PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() && !p.resources.contains(&r) && p.resources.len() < REMOVE.len() { p.resources.push(r); });
+    card::clear_mention();
+    cx.notify();
+}
+
+/// 素材快照：文档库里每篇的标题和正文（纯文字），空间的 `SPACE.md`，助手，附带的资源（文档是 Markdown）。
+fn shelf(w: &Workspace, resources: &[Resource], a: &Assistant, permission: Permission, cx: &App) -> Shelf {
     let folders: HashMap<&str, &str> = w.entries.iter().filter(|e| e.meta.folder.is_some()).map(|e| (e.id.as_str(), e.title.as_str())).collect();
     let docs = w.entries.iter().filter(|e| e.meta.folder.is_none()).map(|e| run::Doc {
         id: e.id.clone(), title: e.title.clone(), folder: e.meta.parent.as_deref().and_then(|p| folders.get(p)).map(|s| s.to_string()),
         modified: e.meta.modified, text: Arc::from(&*e.body),
     }).collect();
-    // 进来的那篇：编辑器里开着就用编辑器里的（可能还没存）；已经删了就没有。
-    let focus = scope.doc().and_then(|id| {
+    // 文档：编辑器里开着就用编辑器里的（可能还没存）；已经删了就没有。
+    let focus = |id: &str, picked: Option<String>| {
         let doc = w.editor.as_ref().map(|e| e.read(cx)).filter(|_| w.current.as_deref() == Some(id)).map(|e| e.core.doc.clone()).or_else(|| w.store.load(id).ok())?;
-        Some(run::Focus { id: id.to_owned(), title: doc.title.text.clone(), markdown: fdl_core::markdown::export(&doc, &Default::default()).text,
-            picked: matches!(scope, Scope::Blocks { .. }).then(|| picked.to_owned()) })
-    });
+        Some(Attached::Doc(run::Focus { id: id.to_owned(), title: doc.title.text.clone(), markdown: fdl_core::markdown::export(&doc, &Default::default()).text, picked }))
+    };
+    let attached = resources.iter().filter_map(|r| match r {
+        Resource::Folder { id } => {
+            let f = w.entries.iter().find(|e| e.id == *id && e.meta.folder.is_some())?;
+            Some(Attached::Folder { name: f.title.clone(), docs: inside(w, id) })
+        }
+        Resource::Document { id } => focus(id, None),
+        Resource::Blocks { doc, text, .. } => focus(doc, Some(text.clone())),
+    }).collect();
     let space = fdl_core::spaces::current().and_then(|s| s.name.clone()).unwrap_or_default();
-    Shelf { space, docs, focus, now: Some(fdl_core::time::civil(fdl_core::time::now())) }
+    let guide = fdl_ai::space_md::read(&Store::root_dir()).unwrap_or_default();
+    Shelf { space, guide, assistant: Identity { name: a.name.clone(), description: a.description.clone() }, docs, attached, permission, now: Some(fdl_core::time::civil(fdl_core::time::now())) }
 }
 
-/// 照进来时的范围新开一段对话。
-fn fresh(entry: &Scope, picked: &str) -> Chat {
-    let mut c = Chat::new(new_id(), entry.clone(), CORE.with(|c| c.get()), now());
-    if matches!(entry, Scope::Blocks { .. }) { c.picked = picked.to_owned(); }
+/// 文件夹里（含子文件夹、子文档）的文档，最近改过的在前。
+fn inside(w: &Workspace, folder: &str) -> Vec<String> {
+    let parent: HashMap<&str, &str> = w.entries.iter().filter_map(|e| Some((e.id.as_str(), e.meta.parent.as_deref()?))).collect();
+    let under = |id: &str| { let mut at = parent.get(id).copied(); for _ in 0..64 { match at { Some(p) if p == folder => return true, Some(p) => at = parent.get(p).copied(), None => return false } } false };
+    let mut docs: Vec<_> = w.entries.iter().filter(|e| e.meta.folder.is_none() && under(&e.id)).collect();
+    docs.sort_by_key(|e| std::cmp::Reverse(e.meta.modified));
+    docs.into_iter().map(|e| e.id.clone()).collect()
+}
+
+/// 新开一段对话：助手跟着空间的默认，权限照它的默认。
+fn fresh(space: Option<&str>) -> Chat {
+    let mut c = Chat::new(new_id(), now());
+    c.permission = who(&c, space).permission;
     c
 }
 
@@ -262,18 +318,21 @@ enum Up { Thinking, Step(String), Preview { stored: String, blocks: Vec<Block> }
 fn send(w: &mut Workspace, input: String, cx: &mut Context<Workspace>) {
     let input = input.trim().to_owned();
     if input.is_empty() { return; }
-    let Some((base, key, model, effort)) = assistant::text::main() else { return toast(tr("先在 设置 › 文本 里选择模型", "Choose a model in Settings › Text first").into()) };
-    let Some((scope, kind, picked, history)) = PAGE.with(|p| p.borrow().as_ref().map(|p| (p.chat.scope.clone(), p.chat.core, p.chat.picked.clone(), p.chat.history()))) else { return };
-    let shelf = shelf(w, &scope, &picked, cx);
+    let Some((c, resources, space)) = PAGE.with(|p| p.borrow().as_ref().map(|p| (p.chat.clone(), p.resources.clone(), p.space.clone()))) else { return };
+    let a = who(&c, space.as_deref());
+    let Some((base, key, model, effort)) = assistant::text::for_model(a.model.as_ref()) else { return toast(tr("先在 设置 › 模型 里选择模型", "Choose a model in Settings › Models first").into()) };
+    let shelf = shelf(w, &resources, &a, c.permission, cx);
+    let mut history = c.history();
+    // 开场白这次才记进对话：第一次请求里也要有它。
+    if c.items.is_empty() && !a.greeting.trim().is_empty() { history.insert(0, run::Turn { role: Role::Assistant, text: a.greeting.trim().to_owned() }); }
     let seed = fdl_core::time::now_ms();
-    let core: Box<dyn Core> = match kind {
-        Kind::Agent => Box::new(run::agent::Agent::new(scope.clone())),
+    let core: Box<dyn Core> = match core_of(&c, &a) {
+        Kind::Agent => Box::new(run::agent::Agent::new(a.core.rounds())),
         Kind::Tavern => {
             let d = super::assist::dir();
-            let s = Settings::load(&d);
-            let preset = match library::load(&d, &s.preset) { Ok(p) => p, Err(e) => return toast(e) };
-            let (c, pe) = (s.char().clone(), s.persona().clone());
-            Box::new(run::tavern::Tavern::new(preset, Identity { name: c.name, description: c.description }, Identity { name: pe.name, description: pe.description }, model.clone(), seed, scope.clone()))
+            let preset = match library::load(&d, a.core.preset()) { Ok(p) => p, Err(e) => return toast(e) };
+            let pe = Settings::load(&d).persona().clone();
+            Box::new(run::tavern::Tavern::new(preset, shelf.assistant.clone(), Identity { name: pe.name, description: pe.description }, model.clone(), seed))
         }
     };
     let turn = TURN.with(|t| { t.set(t.get() + 1); t.get() });
@@ -282,7 +341,12 @@ fn send(w: &mut Workspace, input: String, cx: &mut Context<Workspace>) {
     let call = assistant::llm::runtime().spawn(drive(core, shelf, input.clone(), history, (base, key, model.clone(), effort), gen_id, tx));
     let ticket = super::background::begin(super::background::Kind::Assistant, "MarginAI".into(), tr("助手正在想", "Assistant thinking"), 2, move || halted(turn));
     PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() {
-        p.chat.items.push(Item { role: Role::User, text: input, at: now(), ..Default::default() });
+        // 说第一句时开场白才记进对话（之前只是显示）；助手也定下来。
+        if !p.chat.started() {
+            p.chat.assistant = Some(a.id.clone());
+            if p.chat.items.is_empty() && !a.greeting.trim().is_empty() { p.chat.items.push(Item { role: Role::Assistant, text: a.greeting.trim().to_owned(), at: p.chat.created, ..Default::default() }); }
+        }
+        p.chat.items.push(Item { role: Role::User, text: input, resources, at: now(), ..Default::default() });
         p.live = Some(Live { turn, call: call.abort_handle(), _ticket: ticket, steps: vec![], blocks: vec![], stored: String::new(), model });
         let _ = chat::save(&dir(), &p.chat);
     });
@@ -387,6 +451,7 @@ fn retry(w: &mut Workspace, cx: &mut Context<Workspace>) {
         if p.live.is_some() { return None; }
         let at = p.chat.items.iter().rposition(|i| i.role == Role::User)?;
         let input = p.chat.items[at].text.clone();
+        p.resources = p.chat.items[at].resources.clone();
         p.chat.items.truncate(at);
         p.shaped.retain(|k, _| *k < at);
         Some(input)
@@ -415,9 +480,9 @@ pub fn page(w: &Workspace, window: &mut Window, cx: &mut Context<Workspace>) -> 
         .child(body)).with_priority(4).into_any_element())
 }
 
-fn content(p: &Page, _: &Workspace, settled: bool, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+fn content(p: &Page, w: &Workspace, settled: bool, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
     let ink = super::glass::ink();
-    let top = super::insets().top;
+    let top_inset = super::insets().top;
     let keyboard = (window.viewport_size().height - super::visible_height(window)).max(px(0.));
     let bottom = keyboard.max(super::insets().bottom) + px(8.);
     // 顶栏：左边历史，中间标题，右边新对话和关闭。玻璃钮在滑到位后才放（`app.rs` 那时才放行玻璃）。
@@ -425,9 +490,10 @@ fn content(p: &Page, _: &Workspace, settled: bool, window: &mut Window, cx: &mut
         p.recent.iter().enumerate().map(|(i, (id, name))| menu::Item::new(CHATS[i], if name.is_empty() { tr("新对话", "New chat").to_owned() } else { name.clone() }, "", 0).checked(*id == p.chat.id)).collect()
     };
     let history = if p.chat.items.is_empty() { history } else { let mut h = history; h.push(menu::Item::new(DELETE, tr("删除这段对话", "Delete this chat"), "trash", 1).danger()); h };
+    let a = who(&p.chat, p.space.as_deref());
     let name = p.chat.name();
     let title = div().flex_1().min_w_0().px(px(8.)).flex().justify_center().child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis()
-        .text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(if name.is_empty() { "MarginAI".to_owned() } else { name }));
+        .text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(Theme::text()).child(if name.is_empty() { a.name.clone() } else { name }));
     let glass_spot = |id: &'static str| div().id(id).relative().flex_none().size(px(44.)).rounded_full();
     let bar = div().flex_none().h(px(56.)).px(px(16.)).flex().items_center().gap(px(8.))
         .child(glass_spot("margin-history").when(settled, |d| d.child(menu::glass_button("margin-history", "clock", ink, history))))
@@ -442,38 +508,87 @@ fn content(p: &Page, _: &Workspace, settled: bool, window: &mut Window, cx: &mut
     if p.live.is_some() && !at_bottom && !FOLLOW.with(|f| f.get()) {} else if p.live.is_some() || FOLLOW.with(|f| f.get()) { scroll.set_offset(point(px(0.), -max)); }
     if p.live.is_none() { FOLLOW.with(|f| f.set(false)); } else { FOLLOW.with(|f| f.set(at_bottom || FOLLOW.with(|f| f.get()))); }
     let mut list = div().id("margin-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).px(px(20.)).pt(px(8.)).pb(px(card::HEIGHT + 24.)).flex().flex_col().gap(px(20.));
+    // 还没开口：先显示助手的开场白（说第一句时才记进对话）。
+    if p.chat.items.is_empty() && !a.greeting.trim().is_empty() {
+        list = list.child(render_blocks(&fdl_core::markdown::parse_file(a.greeting.trim(), "", None).blocks));
+    }
     for (i, item) in p.chat.items.iter().enumerate() {
         list = list.child(match item.role {
-            Role::User => user(&item.text),
+            Role::User => user(w, item),
             _ => assistant_item(p, i, item, cx),
         });
     }
     if let Some(live) = &p.live { list = list.child(live_item(live)); }
     if p.live.is_some() { window.request_animation_frame(); }
 
-    let chips = [
-        card::Chip { title: p.label.0.clone(), glyph: p.label.1, menu: if p.entry == Scope::Space { vec![] } else {
-            let entry = label_entry(p);
-            vec![("margin-scope-entry", entry, p.chat.scope == p.entry), ("margin-scope-space", tr("整个空间", "Whole space").into(), p.chat.scope == Scope::Space)]
-        } },
-        card::Chip { title: core_name(p.chat.core).into(), glyph: match p.chat.core { Kind::Tavern => "text.bubble", Kind::Agent => "point.3.connected.trianglepath.dotted" },
-            menu: vec![("margin-core-tavern", core_name(Kind::Tavern).into(), p.chat.core == Kind::Tavern), ("margin-core-agent", core_name(Kind::Agent).into(), p.chat.core == Kind::Agent)] },
-    ];
-    // 对话开始以后核心就定了（换核心开新对话），胶囊上没有菜单。
-    let chips = if p.chat.items.is_empty() { chips } else { let [a, mut b] = chips; b.menu.clear(); [a, b] };
-    div().size_full().flex().flex_col().pt(top).pb(keyboard)
+    let top: Vec<card::Chip> = p.resources.iter().take(REMOVE.len()).enumerate().map(|(i, r)| {
+        let (title, glyph) = label(w, r);
+        card::Chip { title, glyph, picture: None, menu: vec![menu::Item::new(REMOVE[i], tr("移除", "Remove"), "minus.circle", 0)] }
+    }).collect();
+    let chips = [who_chip(&p.chat, &a), perm_chip(p.chat.permission)];
+    let mention = card::mention().map(|q| mention_list(w, p, &q, bottom + px(card::HEIGHT + 8.), cx));
+    div().size_full().flex().flex_col().pt(top_inset).pb(keyboard)
         .child(bar)
         .child(list)
-        .child(div().absolute().left(px(12.)).bottom(bottom).when(settled, |d| d.child(card::slot(chips, p.live.is_some()))))
+        .children(mention.filter(|_| settled))
+        .child(div().absolute().left(px(12.)).bottom(bottom).when(settled, |d| d.child(card::slot(top, chips, p.live.is_some()))))
         .into_any_element()
 }
 
-fn label_entry(p: &Page) -> String { match &p.entry { Scope::Blocks { blocks, .. } => crate::localized_format!("选中的 {} 块", "{} selected blocks", blocks.len()), _ => tr("这篇文档", "This document").into() } }
+/// 助手那颗：头像和名字；菜单里是所有助手和「核心」（酒馆 / Agent）。用户说过话以后都定了（灰着）。
+fn who_chip(c: &Chat, a: &Assistant) -> card::Chip {
+    let locked = c.started();
+    let all = list::all();
+    let mut items: Vec<menu::Item> = all.list.iter().map(|x| {
+        let it = menu::Item::new(list::key(WHO, &x.id), x.name.clone(), "person.crop.circle", 0).checked(x.id == a.id).picture(roles::avatar_picture(x.avatar.as_deref()));
+        if locked && x.id != a.id { it.disabled() } else { it }
+    }).collect();
+    let k = core_of(c, a);
+    let kinds = [Kind::Tavern, Kind::Agent].map(|x| { let it = menu::Item::new(if x == Kind::Agent { CORE_AGENT } else { CORE_TAVERN }, core_name(x), "", 0).checked(x == k); if locked && x != k { it.disabled() } else { it } });
+    items.push(menu::Item::new("margin-core", tr("核心", "Core"), "cpu", 1).sub(core_name(k)).kids(kinds.to_vec()));
+    card::Chip { title: a.name.clone(), glyph: "person.crop.circle", picture: roles::avatar_picture(a.avatar.as_deref()), menu: items }
+}
+
+/// 权限那颗：只读 / 可编辑。
+fn perm_chip(p: Permission) -> card::Chip {
+    let (title, glyph) = match p { Permission::Read => (tr("只读", "Read only"), "eye"), Permission::Write => (tr("可编辑", "Can edit"), "pencil") };
+    card::Chip { title: title.into(), glyph, picture: None, menu: vec![
+        menu::Item::new(PERM_READ, tr("只读", "Read only"), "eye", 0).checked(p == Permission::Read),
+        menu::Item::new(PERM_WRITE, tr("可编辑", "Can edit"), "pencil", 0).checked(p == Permission::Write),
+    ] }
+}
+
+/// @ 搜索：标题里有这些字的文件夹和文档（空着是最近改过的），点一个带上。浮在卡片上面。
+fn mention_list(w: &Workspace, p: &Page, q: &str, bottom: Pixels, cx: &mut Context<Workspace>) -> AnyElement {
+    let q = q.to_lowercase();
+    let res = |e: &crate::store::Entry| if e.meta.folder.is_some() { Resource::Folder { id: e.id.clone() } } else { Resource::Document { id: e.id.clone() } };
+    let mut hits: Vec<_> = w.entries.iter().filter(|e| (q.is_empty() || e.title.to_lowercase().contains(&q)) && !p.resources.contains(&res(e))).collect();
+    hits.sort_by_key(|e| std::cmp::Reverse(e.meta.modified));
+    hits.truncate(5);
+    let mut col = ui::popover().id("margin-mention").occlude().absolute().left(px(12.)).right(px(12.)).bottom(bottom).py(px(6.)).flex().flex_col()
+        .on_mouse_down(MouseButton::Left, |_, window, cx| { cx.stop_propagation(); window.prevent_default(); });
+    if hits.is_empty() {
+        col = col.child(div().px(px(16.)).py(px(10.)).text_size(px(15.)).text_color(Theme::text_caption()).child(tr("没有找到", "No matches")));
+    }
+    for (i, e) in hits.into_iter().enumerate() {
+        let (r, folder) = (res(e), e.meta.folder.is_some());
+        col = col.child(div().id(("margin-mention-row", i)).h(px(44.)).px(px(16.)).flex().items_center().gap(px(10.)).active(|d| d.bg(Theme::fill_pressed()))
+            .child(ui::icon(if folder { "folder" } else { "doc" }, 16., Theme::text_caption()))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(16.)).text_color(Theme::text()).child(title_of(&e.title)))
+            .on_click(cx.listener(move |_, _, _, cx| attach(r.clone(), cx))));
+    }
+    col.into_any_element()
+}
+
 fn core_name(k: Kind) -> &'static str { match k { Kind::Tavern => tr("酒馆", "Tavern"), Kind::Agent => "Agent" } }
 
-fn user(text: &str) -> AnyElement {
-    div().w_full().flex().justify_end().child(div().max_w(relative(0.82)).px(px(14.)).py(px(9.)).rounded(px(20.)).bg(super::search_fill())
-        .text_size(px(16.)).line_height(px(23.)).text_color(Theme::text()).child(text.to_owned())).into_any_element()
+/// 用户的一句话：右边的气泡；附带了资源的话，气泡上面一行灰字写着带了什么。
+fn user(w: &Workspace, item: &Item) -> AnyElement {
+    let with = (!item.resources.is_empty()).then(|| item.resources.iter().map(|r| label(w, r).0).collect::<Vec<_>>().join(" · "));
+    div().w_full().flex().flex_col().items_end().gap(px(4.))
+        .children(with.map(|t| div().max_w(relative(0.82)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(px(13.)).text_color(Theme::text_caption()).child(format!("@ {t}"))))
+        .child(div().max_w(relative(0.82)).px(px(14.)).py(px(9.)).rounded(px(20.)).bg(super::search_fill())
+            .text_size(px(16.)).line_height(px(23.)).text_color(Theme::text()).child(item.text.clone())).into_any_element()
 }
 
 /// 步骤那一行：「› 3 步」，点开逐条列出。
