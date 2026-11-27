@@ -42,7 +42,7 @@ pub fn to_markdown(doc: &Document) -> String {
 }
 
 pub fn export(doc: &Document, opts: &Options) -> Export {
-    let mut w = Writer { opts, files: vec![], missing: 0 };
+    let mut w = Writer { opts, files: vec![], missing: 0, d: None };
     let mut out = String::new();
     let title = doc.title.text.trim();
     if !title.is_empty() && !opts.in_place {
@@ -61,15 +61,22 @@ struct Piece {
     text: String,
 }
 
-struct Writer<'a> {
+pub(crate) struct Writer<'a> {
     missing: usize,
     opts: &'a Options<'a>,
     files: Vec<(PathBuf, String)>,
+    /// 写成助手的方言（`crate::dialect`）：块前标短号，视频、文件、提醒写成标签，表达不了的块是 `<keep/>`。
+    d: Option<crate::dialect::Pass<'a>>,
+}
+
+/// 方言的写出：`opts` 要是 `in_place`（图片照原样写来源）。
+pub(crate) fn dialect_writer<'a>(opts: &'a Options<'a>, d: crate::dialect::Pass<'a>) -> Writer<'a> {
+    Writer { opts, files: vec![], missing: 0, d: Some(d) }
 }
 
 impl Writer<'_> {
     /// Blocks separated by blank lines; consecutive list items stay tight.
-    fn blocks(&mut self, bs: &[Block]) -> String {
+    pub(crate) fn blocks(&mut self, bs: &[Block]) -> String {
         self.pieces(bs).into_iter().flat_map(|p| [p.sep.to_string(), p.text]).collect()
     }
 
@@ -90,10 +97,13 @@ impl Writer<'_> {
                 BlockKind::Ordered { seq: None } => seq = if prev_list && seq > 0 { seq + 1 } else { 1 },
                 _ => seq = 0,
             }
+            if let Some(d) = &mut self.d { d.reserve(b.id); }
             let s = self.block(b, seq);
-            if s.is_empty() && !list {
+            // 方言里空段落也要有（带着短号），不然写回来就没了。
+            if s.is_empty() && !list && self.d.is_none() {
                 continue;
             }
+            let s = match &mut self.d { Some(d) => d.mark(b, seq, s), None => s };
             let sep = if out.is_empty() { "" } else if list && prev_list && same { "\n" } else { "\n\n" };
             out.push(Piece { sep, text: s });
             prev_list = list;
@@ -101,8 +111,19 @@ impl Writer<'_> {
         out
     }
 
-    fn block(&mut self, b: &Block, seq: u32) -> String {
-        let text = inline(&b.text, &mut |f| self.file_link(f));
+    pub(crate) fn block(&mut self, b: &Block, seq: u32) -> String {
+        let dialect = self.d.is_some();
+        if let Some(d) = self.d.as_mut().filter(|_| crate::dialect::is_keep(b)) { return d.keep(b.id); }
+        if dialect {
+            match &b.kind {
+                BlockKind::File(f) => return crate::dialect::file_tag(f),
+                // 头一行是它的 emoji，读回来是引用，写回时认出原来的高亮块。
+                BlockKind::Callout { emoji, .. } if !emoji.trim().is_empty() => return indent(&format!("{emoji}\n{}", self.blocks(&b.children)), "> "),
+                BlockKind::Callout { .. } => return indent(&self.blocks(&b.children), "> "),
+                _ => {}
+            }
+        }
+        let text = inline(&b.text, &mut |f| self.file_link(f), dialect);
         let nested = |w: &mut Self, head: String| -> String {
             if b.children.is_empty() {
                 return head;
@@ -136,7 +157,7 @@ impl Writer<'_> {
                 }
                 None => String::new(),
             },
-            BlockKind::Table(t) => table(t, &mut |f| self.file_link(f)),
+            BlockKind::Table(t) => table(t, &mut |f| self.file_link(f), dialect),
             BlockKind::Grid | BlockKind::Column { .. } => self.blocks(&b.children),
             // An add-on block: Markdown has nothing for it.
             BlockKind::Countdown(_) => String::new(),
@@ -328,7 +349,7 @@ pub fn write_file(doc: &Document, front: &str, base: Option<&Path>) -> String {
 /// relative to the file's folder).
 pub fn write_file_with(doc: &Document, front: &str, opts: &Options) -> Export {
     let opts = Options { in_place: true, library_root: opts.library_root, base: opts.base, name: opts.name, copied: opts.copied, original: opts.original, ..Default::default() };
-    let mut w = Writer { opts: &opts, files: vec![], missing: 0 };
+    let mut w = Writer { opts: &opts, files: vec![], missing: 0, d: None };
     let pieces = w.pieces(&doc.blocks);
     let canonical = joined(&pieces);
     // Kept lines must still read back as the document; if a kept spacing
@@ -360,7 +381,7 @@ fn preserve(original: &str, pieces: &[Piece], opts: &Options, strict: bool) -> S
     // The file's blocks as written now, each with the lines it came from.
     let mut old: Vec<(String, (usize, usize))> = vec![];
     {
-        let mut w = Writer { opts, files: vec![], missing: 0 };
+        let mut w = Writer { opts, files: vec![], missing: 0, d: None };
         let mut prev_list = false;
         let mut seq = 0u32;
         // `pieces` drops empty blocks; walk the same way to keep each span.
@@ -445,7 +466,7 @@ fn joined(pieces: &[Piece]) -> String {
 fn reads_as(body: &str, canonical: &str, opts: &Options) -> bool {
     let mut blocks = crate::paste::markdown_to_blocks(body, crate::paste::Off { file: true, alt: true, ..Default::default() });
     if let Some(dir) = opts.base { resolve_images(&mut blocks, dir); }
-    let mut w = Writer { opts, files: vec![], missing: 0 };
+    let mut w = Writer { opts, files: vec![], missing: 0, d: None };
     joined(&w.pieces(&blocks)) == canonical
 }
 
@@ -477,10 +498,10 @@ fn match_pieces(old: &[&str], new: &[&str]) -> Vec<Option<usize>> {
     out
 }
 
-fn table(t: &Table, files: &mut impl FnMut(&FileBlock) -> Option<String>) -> String {
+fn table(t: &Table, files: &mut impl FnMut(&FileBlock) -> Option<String>, dialect: bool) -> String {
     let cols = t.rows.iter().map(|r| r.len()).max().unwrap_or(0).max(1);
     let mut cell = |c: &TableCell| {
-        let parts: Vec<String> = c.blocks.iter().map(|b| inline(&b.text, files)).filter(|s| !s.is_empty()).collect();
+        let parts: Vec<String> = c.blocks.iter().map(|b| inline(&b.text, files, dialect)).filter(|s| !s.is_empty()).collect();
         parts.join("<br>").replace('|', "\\|")
     };
     let mut row = |r: &Vec<TableCell>| {
@@ -527,11 +548,16 @@ struct Md {
     link: Option<String>,
 }
 
-fn inline(t: &RichText, files: &mut impl FnMut(&FileBlock) -> Option<String>) -> String {
+fn inline(t: &RichText, files: &mut impl FnMut(&FileBlock) -> Option<String>, dialect: bool) -> String {
     // Merge runs that only differ in marks Markdown can't express (colors).
     let mut runs: Vec<(Md, String)> = vec![];
+    // 方言的标签不转义：先放一个私用区字符占位，最后换回来。
+    let mut tags: Vec<String> = vec![];
     for (r, m) in t.spans() {
-        let s = match m.inline.as_ref().and_then(Inline::equation) {
+        let tag = m.inline.as_ref().filter(|_| dialect).and_then(crate::dialect::inline_text);
+        let s = if let Some(tag) = &tag {
+            t.text[r.clone()].chars().map(|_| { tags.push(tag.clone()); char::from_u32(0xF0000 + tags.len() as u32 - 1).unwrap_or('\u{fffd}') }).collect()
+        } else { match m.inline.as_ref().and_then(Inline::equation) {
             Some(src) => t.text[r].chars().map(|_| format!("${src}$")).collect(),
             None => match &m.inline {
                 Some(Inline { kind: InlineKind::File(f), .. }) => t.text[r].chars().map(|_| f.name.clone()).collect(),
@@ -546,8 +572,8 @@ fn inline(t: &RichText, files: &mut impl FnMut(&FileBlock) -> Option<String>) ->
                 }
                 None => t.text[r].to_string(),
             },
-        };
-        let file_link = m.inline.as_ref().and_then(|obj| match &obj.kind { InlineKind::File(f) => files(f), _ => None });
+        } };
+        let file_link = m.inline.as_ref().filter(|_| tag.is_none()).and_then(|obj| match &obj.kind { InlineKind::File(f) => files(f), _ => None });
         let md = Md {
             bold: m.bold,
             italic: m.italic,
@@ -577,6 +603,8 @@ fn inline(t: &RichText, files: &mut impl FnMut(&FileBlock) -> Option<String>) ->
         let mut x = if m.code {
             let tick = if body.contains('`') { "``" } else { "`" };
             format!("{tick}{body}{tick}")
+        } else if dialect {
+            crate::dialect::escape(&escape(body))
         } else {
             escape(body)
         };
@@ -599,7 +627,9 @@ fn inline(t: &RichText, files: &mut impl FnMut(&FileBlock) -> Option<String>) ->
         out.push_str(&x);
         out.push_str(trail);
     }
-    out.replace('\n', "<br>")
+    let out = out.replace('\n', "<br>");
+    if tags.is_empty() { return out; }
+    out.chars().map(|c| match (c as u32).checked_sub(0xF0000).and_then(|k| tags.get(k as usize)) { Some(t) => t.clone(), None => c.to_string() }).collect()
 }
 
 #[cfg(test)]
@@ -762,6 +792,6 @@ mod tests {
     fn exports_tables() {
         let cell = |s: &str| TableCell { blocks: vec![Block::text(s)], ..TableCell::empty() };
         let t = Table { col_widths: vec![], header_rows: 1, header_col: false, rows: vec![vec![cell("a"), cell("b|c")], vec![cell("1")]] };
-        assert_eq!(table(&t, &mut |_| None), "| a | b\\|c |\n| --- | --- |\n| 1 |  |");
+        assert_eq!(table(&t, &mut |_| None, false), "| a | b\\|c |\n| --- | --- |\n| 1 |  |");
     }
 }

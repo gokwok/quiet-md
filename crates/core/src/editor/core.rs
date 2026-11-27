@@ -3564,6 +3564,7 @@ impl Core {
             code_divider: self.parent_kind_is(id, |k| matches!(k, BlockKind::Callout { .. })),
             file: false,
             alt: false,
+            dialect: false,
         };
         let blocks = crate::paste::markdown_to_blocks(&s, off);
         if blocks.is_empty() {

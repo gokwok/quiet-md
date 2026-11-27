@@ -796,6 +796,9 @@ pub struct Off {
     pub file: bool,
     /// A Markdown file edited as itself: an image keeps its alt text (as its caption).
     pub alt: bool,
+    /// 助手读写正文的方言（`crate::dialect`）：行首的 `[b12]` 短号、`<video>` `<reminder/>` 这类标签、
+    /// `#标签`，段落和标题下缩进四格的行是它的子块。
+    pub dialect: bool,
 }
 
 fn indent_of(line: &str) -> usize {
@@ -881,14 +884,40 @@ fn todo_prefix(s: &str) -> Option<(bool, &str)> {
 fn md_blocks(lines: &[&str], off: Off, mut spans: Option<&mut Vec<(usize, usize)>>) -> Vec<Block> {
     let mut out: Vec<Block> = vec![];
     let mut i = 0;
+    // 方言：一趟开头那行的 `[b12]` 摘下来（缩进留着），记给这一趟读出的块；别的行原样交给子块去摘。
+    let alt: Vec<Option<(u32, String, &str)>> = if off.dialect {
+        lines.iter().map(|l| crate::dialect::ref_prefix(l).map(|(n, rest)| (n, format!("{}{rest}", &l[..l.len() - l.trim_start_matches(' ').len()]), rest))).collect()
+    } else { vec![] };
+    // 这一趟那行短号后面的字：段落的开头空格是它自己的，短号前的缩进不是。
+    let mut own: Option<&str>;
+    let mut lines = lines.to_vec();
+    let mut pending: Option<u32> = None;
+    let md_inline = |s: &str| inline_md(s, off.dialect);
     // Ordered items continue the previous item's numbering.
     let mut last_list = false;
     // Each pass adds at most one block: (blocks, line) when the pass began.
     let mut mark = (0, 0);
     loop {
         if let Some(s) = spans.as_deref_mut() && out.len() > mark.0 { s.push((mark.1, i)); }
+        if let Some(n) = pending.take() && out.len() > mark.0 { out[mark.0].id = crate::dialect::tagged(n); }
         mark = (out.len(), i);
         if i >= lines.len() { break; }
+        own = None;
+        if let Some((n, rest, after)) = alt.get(i).and_then(Option::as_ref) {
+            let n = *n;
+            // 只有短号：一个空段落。
+            if rest.trim().is_empty() {
+                let mut b = Block::text("");
+                b.id = crate::dialect::tagged(n);
+                out.push(b);
+                last_list = false;
+                i += 1;
+                continue;
+            }
+            lines[i] = rest;
+            own = Some(after);
+            pending = Some(n);
+        }
         let line = lines[i];
         // Blank lines are empty paragraphs (none before the first block).
         if line.trim().is_empty() {
@@ -969,8 +998,9 @@ fn md_blocks(lines: &[&str], off: Off, mut spans: Option<&mut Vec<(usize, usize)
         let hashes = body.bytes().take_while(|&b| b == b'#').count();
         if (1..=9).contains(&hashes) && body[hashes..].starts_with([' ', '\t']) {
             let t = body[hashes..].trim().trim_end_matches('#').trim_end();
-            out.push(Block::new(BlockKind::Heading { level: hashes as u8, seq_auto: false }, md_inline(t)));
-            i += 1;
+            let (kids, used) = nested(&lines[i + 1..], off);
+            out.push(Block::new(BlockKind::Heading { level: hashes as u8, seq_auto: false }, md_inline(t)).with_children(kids));
+            i += 1 + used;
             continue;
         }
         if divider(body) && !off.code_divider {
@@ -991,7 +1021,7 @@ fn md_blocks(lines: &[&str], off: Off, mut spans: Option<&mut Vec<(usize, usize)
             }
             continue;
         }
-        if let Some((t, n)) = pipe_table(&lines[i..]) {
+        if let Some((t, n)) = pipe_table(&lines[i..], off.dialect) {
             out.push(t);
             i += n;
             continue;
@@ -1008,10 +1038,28 @@ fn md_blocks(lines: &[&str], off: Off, mut spans: Option<&mut Vec<(usize, usize)
             continue;
         }
         // Leading spaces stay literal.
-        out.push(Block::new(BlockKind::Text, md_inline(&tabs(line.trim_end()))));
-        i += 1;
+        let (kids, used) = nested(&lines[i + 1..], off);
+        out.push(Block::new(BlockKind::Text, md_inline(&tabs(own.unwrap_or(line).trim_end()))).with_children(kids));
+        i += 1 + used;
     }
     out
+}
+
+/// 方言里段落和标题的子块：紧跟着、缩进至少四格的行（中间可以隔空行）。不是方言时没有。
+fn nested(lines: &[&str], off: Off) -> (Vec<Block>, usize) {
+    if !off.dialect { return (vec![], 0); }
+    let mut n = 0;
+    while n < lines.len() {
+        let l = lines[n];
+        if l.trim().is_empty() {
+            if lines[n + 1..].iter().find(|l| !l.trim().is_empty()).is_some_and(|l| indent_of(l) >= 4) { n += 1; continue; }
+            break;
+        }
+        if indent_of(l) < 4 { break; }
+        n += 1;
+    }
+    let sub: Vec<&str> = lines[..n].iter().map(|l| dedent(l, 4)).collect();
+    (md_blocks(&sub, off, None), n)
 }
 
 /// `![alt](src "title")` filling the whole line: its alt and src.
@@ -1056,7 +1104,7 @@ fn table_cells(line: &str) -> Vec<String> {
 }
 
 /// GFM pipe table at the start of `lines`: (table, lines used).
-fn pipe_table(lines: &[&str]) -> Option<(Block, usize)> {
+fn pipe_table(lines: &[&str], dialect: bool) -> Option<(Block, usize)> {
     let head = lines.first()?;
     let sep = lines.get(1)?;
     if !head.contains('|') {
@@ -1097,7 +1145,7 @@ fn pipe_table(lines: &[&str]) -> Option<(Block, usize)> {
         .map(|r| {
             (0..ncols)
                 .map(|c| {
-                    let mut b = Block::new(BlockKind::Text, md_inline(r.get(c).map_or("", String::as_str)));
+                    let mut b = Block::new(BlockKind::Text, inline_md(r.get(c).map_or("", String::as_str), dialect));
                     b.align = aligns[c];
                     TableCell { blocks: vec![b], ..TableCell::empty() }
                 })
@@ -1117,6 +1165,12 @@ fn is_boundary(c: Option<char>) -> bool {
 /// rules of the live shortcuts (`~x~` is underline). Paste turns escapes,
 /// images and `<…>` autolinks off.
 pub fn md_inline(s: &str) -> RichText {
+    inline_md(s, false)
+}
+
+/// `md_inline`; `dialect` also reads the dialect's tags (`crate::dialect`), `#标签`, `<u>` and `<br>`,
+/// and takes `$x$` without the spaces around it.
+pub fn inline_md(s: &str, dialect: bool) -> RichText {
     let mut out = RichText::default();
     let mut plain = String::new();
     let flush = |plain: &mut String, out: &mut RichText| {
@@ -1155,8 +1209,32 @@ pub fn md_inline(s: &str) -> RichText {
             i += n;
             continue;
         }
+        if dialect && c == '<' && let Some((tag, used)) = crate::dialect::tag_at(rest) {
+            flush(&mut plain, &mut out);
+            match tag {
+                crate::dialect::Tag::Obj(obj) => out.push(crate::editor::core::EQUATION, Marks { inline: Some(obj), ..Marks::default() }),
+                crate::dialect::Tag::Under(inner) => {
+                    let mut t = inline_md(inner, dialect);
+                    let len = t.len();
+                    t.update_marks(0..len, |m| m.underline = true);
+                    out.append(&t);
+                }
+                crate::dialect::Tag::Break => plain.push('\n'),
+            }
+            i += used;
+            continue;
+        }
+        if dialect && c == '#' && !prev.is_some_and(char::is_alphanumeric) {
+            let name: String = rest[1..].chars().take_while(|&c| crate::model::tag_char(c)).collect();
+            if !name.is_empty() {
+                flush(&mut plain, &mut out);
+                i += 1 + name.len();
+                out.push(crate::editor::core::EQUATION, Marks { inline: Some(crate::docxml::to_inline(InlineKind::Tag(name))), ..Marks::default() });
+                continue;
+            }
+        }
         // Equations: `$$x$$` and `$x$` with whitespace/line boundaries.
-        if c == '$' && is_boundary(prev) {
+        if c == '$' && (dialect || is_boundary(prev)) {
             let mut done = false;
             for delim in ["$$", "$"] {
                 if !rest.starts_with(delim) || rest[delim.len()..].starts_with('$') {
@@ -1168,7 +1246,7 @@ pub fn md_inline(s: &str) -> RichText {
                 let after = body[end + delim.len()..].chars().next();
                 // `$` before a digit is money, not math.
                 let digit = delim == "$" && inner.starts_with(|c: char| c.is_ascii_digit());
-                if digit || inner.trim().is_empty() || inner.starts_with(' ') || !is_boundary(after) || after == Some('$') {
+                if digit || inner.trim().is_empty() || inner.starts_with(' ') || !(dialect || is_boundary(after)) || after == Some('$') {
                     continue;
                 }
                 flush(&mut plain, &mut out);
@@ -1186,7 +1264,7 @@ pub fn md_inline(s: &str) -> RichText {
             let open = 0;
             if let Some((label, url, used)) = link_at(&rest[open..]) {
                 flush(&mut plain, &mut out);
-                let mut t = md_inline(label);
+                let mut t = inline_md(label, dialect);
                 if t.is_empty() {
                     t = RichText::plain(url);
                 }
@@ -1237,7 +1315,7 @@ pub fn md_inline(s: &str) -> RichText {
                 let after = rest[n + end + n..].chars().next();
                 if !inner.starts_with(char::is_whitespace) && !inner.ends_with(char::is_whitespace) && (!bounded || is_boundary(after)) {
                     flush(&mut plain, &mut out);
-                    let mut t = md_inline(inner);
+                    let mut t = inline_md(inner, dialect);
                     let len = t.len();
                     t.update_marks(0..len, set);
                     out.append(&t);

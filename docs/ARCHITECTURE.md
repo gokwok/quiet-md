@@ -106,6 +106,7 @@ Core 的不变量由 `crates/core/src/editor/fuzz_tests.rs` 在每一步随机�
 | `spaces.rs` | 空间：`space.json`（持久 UUID、名字、图标）在空间文件夹里，`spaces.json`（这台设备知道哪些空间、打开的是哪个）在 `home_dir`；第一个空间就是 `home_dir` 本身，之后新建的放在 `home_dir/spaces/<名字>/`，也可以是选的文件夹 |
 | `paste.rs` | HTML / Markdown → block（粘贴和导入共用） |
 | `markdown.rs` | 导出 Markdown |
+| `dialect.rs` | 助手读写正文的 Markdown 方言：`read` 把块读成带 `[b12]` 短号的 Markdown（视频、文件、提醒、@文档写成标签，表达不了的块是 `<keep ref/>`），`write` 写回成块，没改的块原样、改过的留原标识和看不见的属性；`Refs` 是一次 run 里短号到（文档，块标识）的映射。读写都走 `markdown` 的写出和 `paste` 的读入（方言开关） |
 | `lang.rs` | 代码语言表 |
 | `palette.rs` | 文字色、背景色、高亮块色板（RGBA，不依赖 GPUI；`theme.rs` 转成 GPUI 颜色） |
 | `time.rs` | 日期换算、本地时区、当前时间 |
