@@ -260,29 +260,43 @@ fn attach(r: Resource, cx: &mut Context<Workspace>) {
     cx.notify();
 }
 
-/// 素材快照：文档库里每篇的标题和正文（纯文字），空间的 `SPACE.md`，助手，附带的资源（文档是 Markdown）。
+/// 素材快照：文档库里每篇的标题、所在、标签、链接和正文（纯文字），文件夹，最近删除，读正文的办法（后台线程上只读地读文件，
+/// 编辑器里开着的那篇用编辑器里的），空间的 `SPACE.md`，助手，附带的资源（文档是 Markdown）。
 fn shelf(w: &Workspace, resources: &[Resource], a: &Assistant, permission: Permission, cx: &App) -> Shelf {
     let folders: HashMap<&str, &str> = w.entries.iter().filter(|e| e.meta.folder.is_some()).map(|e| (e.id.as_str(), e.title.as_str())).collect();
     let docs = w.entries.iter().filter(|e| e.meta.folder.is_none()).map(|e| run::Doc {
         id: e.id.clone(), title: e.title.clone(), folder: e.meta.parent.as_deref().and_then(|p| folders.get(p)).map(|s| s.to_string()),
-        modified: e.meta.modified, text: Arc::from(&*e.body),
+        parent: e.meta.parent.clone(), created: e.meta.created, modified: e.meta.modified,
+        tags: e.tags.iter().map(|(t, _)| t.clone()).collect(),
+        links: e.links.iter().map(|l| (l.target.clone(), l.line.iter().map(|(t, _)| t.as_str()).collect())).collect(),
+        text: Arc::from(&*e.body),
     }).collect();
+    let dirs = w.entries.iter().filter(|e| e.meta.folder.is_some()).map(|e| run::Folder { id: e.id.clone(), name: e.title.clone(), parent: e.meta.parent.clone() }).collect();
+    let mut trash: Vec<run::Trashed> = w.trash.iter().map(|t| run::Trashed { id: t.id.clone(), title: t.title.clone(), deleted: t.deleted, folder: t.folder }).collect();
+    trash.sort_by_key(|t| std::cmp::Reverse(t.deleted));
+    let reader = w.store.reader();
+    let library = run::Library::new(move |id| reader.load(id).ok());
     // 文档：编辑器里开着就用编辑器里的（可能还没存）；已经删了就没有。
+    let open = w.editor.as_ref().map(|e| e.read(cx)).and_then(|e| Some((w.current.clone()?, e.core.doc.clone())));
+    if let Some((id, doc)) = &open { library.put(id, doc.clone()); }
     let focus = |id: &str, picked: Option<String>| {
-        let doc = w.editor.as_ref().map(|e| e.read(cx)).filter(|_| w.current.as_deref() == Some(id)).map(|e| e.core.doc.clone()).or_else(|| w.store.load(id).ok())?;
+        let doc = open.as_ref().filter(|(o, _)| o == id).map(|(_, d)| d.clone()).or_else(|| w.store.load(id).ok())?;
         Some(Attached::Doc(run::Focus { id: id.to_owned(), title: doc.title.text.clone(), markdown: fdl_core::markdown::export(&doc, &Default::default()).text, picked }))
     };
     let attached = resources.iter().filter_map(|r| match r {
         Resource::Folder { id } => {
             let f = w.entries.iter().find(|e| e.id == *id && e.meta.folder.is_some())?;
-            Some(Attached::Folder { name: f.title.clone(), docs: inside(w, id) })
+            Some(Attached::Folder { id: id.clone(), name: f.title.clone(), docs: inside(w, id) })
         }
         Resource::Document { id } => focus(id, None),
         Resource::Blocks { doc, text, .. } => focus(doc, Some(text.clone())),
     }).collect();
     let space = fdl_core::spaces::current().and_then(|s| s.name.clone()).unwrap_or_default();
     let guide = fdl_ai::space_md::read(&Store::root_dir()).unwrap_or_default();
-    Shelf { space, guide, assistant: Identity { name: a.name.clone(), description: a.description.clone() }, docs, attached, permission, now: Some(fdl_core::time::civil(fdl_core::time::now())) }
+    Shelf {
+        space, guide, assistant: Identity { name: a.name.clone(), description: a.description.clone() }, docs, folders: dirs, trash, library,
+        attached, permission, now: Some(fdl_core::time::civil(fdl_core::time::now())), ..Default::default()
+    }
 }
 
 /// 文件夹里（含子文件夹、子文档）的文档，最近改过的在前。

@@ -1,7 +1,7 @@
 //! Agent 核心：ReAct 式循环。每一轮把对话、工具调用和结果整段发给模型，模型要调工具就调，不调了它说的就是回答。
-//! 工具是只读的文档工具（`tools`）。最多 `rounds` 轮（助手的核心配置，默认 `ROUNDS`），到了就不再给工具，让它照已经读到的回答。
+//! 工具是只读的文档工具（`tools`），一轮可以调好几个。最多 `rounds` 轮（助手的核心配置，默认 `ROUNDS`），到了就不再给工具，让它照已经读到的回答。
 //!
-//! 系统提示词：助手的名字和设定、规矩、空间的 `SPACE.md`、空间概况（篇数和最近改过的几篇，带标识），
+//! 系统提示词：助手的名字和设定、规矩、空间的 `SPACE.md`（太长只放开头，全文用 `read_document("SPACE.md")`）、空间概况（篇数和最近改过的几篇，带标识），
 //! 再是这句话附带的资源，只给个开头、要更多自己去读：
 //! - 文件夹：名字和里面的文档（带标识）；
 //! - 一篇文档：标题、标识和开头一段；
@@ -15,6 +15,8 @@ use super::{Act, Attached, Call, Core, Reply, Role, Shaped, Shelf, Turn, clip, t
 
 /// 默认最多几轮工具调用。
 pub const ROUNDS: usize = 8;
+/// 系统提示词里的 `SPACE.md` 最多放几个字。
+pub const GUIDE: usize = 2000;
 
 pub struct Agent { limit: usize, messages: Vec<Value>, rounds: usize }
 
@@ -38,11 +40,17 @@ pub fn system(shelf: &Shelf) -> String {
     let mut s = format!("你叫{}，是 Quiet.md（一个写作和笔记应用）里的助手。用户的文档在一个「空间」里。\n", shelf.name());
     let desc = shelf.assistant.description.trim();
     if !desc.is_empty() { s += &format!("\n你的设定：\n{desc}\n\n"); }
-    s += "你可以用工具列出、搜索和读取空间里的文档；需要文档里的内容时先去读，不要凭空编造文档里没有的东西。只读不写：你改不了文档。\n\
+    s += "你能用工具查看这个空间：list_folder（文件夹和空间总览）、search（找文档，或在一篇里找）、read_document（读一篇，或 SPACE.md）、\
+        list_tasks（待办和提醒）、backlinks（谁链接了这篇）、list_trash（最近删除）。需要文档里的内容就先去查、去读，不要凭空编造文档里没有的东西；\
+        互不依赖的几样可以在一轮里一起调。读出的正文每块前有块号（如 [b12]），这次对话里一直有效，提到具体某块时可以带上；\
+        <keep ref=\"b12\"/> 是没法用文字表示的块（分栏、倒计时之类）。只读不写：你改不了文档。\n\
         回答用用户说话的语言，用 Markdown（标题、列表、粗体），简洁直接。提到某篇文档时写它的标题。\n";
     if let Some((y, m, d, h, min)) = shelf.now { s += &format!("现在是 {y}-{m:02}-{d:02} {h:02}:{min:02}。\n"); }
     let guide = shelf.guide.trim();
-    if !guide.is_empty() { s += &format!("\n用户写给你的空间说明（SPACE.md）：\n\n{}\n", clip(guide, 4000)); }
+    if !guide.is_empty() {
+        s += &format!("\n用户写给你的空间说明（SPACE.md）：\n\n{}\n", clip(guide, GUIDE));
+        if guide.chars().count() > GUIDE { s += "\n（SPACE.md 太长，上面只是开头；全文用 read_document(\"SPACE.md\") 读。）\n"; }
+    }
     s += &format!("\n{}里有 {} 篇文档", space(shelf), shelf.docs.len());
     let recent = shelf.recent(15);
     if recent.is_empty() { s += "。\n"; } else {
@@ -53,10 +61,10 @@ pub fn system(shelf: &Shelf) -> String {
     for a in &shelf.attached {
         s += "\n";
         match a {
-            Attached::Folder { name, docs } => {
-                s += &format!("用户附带了文件夹「{}」，里面有 {} 篇文档：\n", title(name), docs.len());
+            Attached::Folder { id, name, docs } => {
+                s += &format!("用户附带了文件夹「{}」(id: {id})，里面有 {} 篇文档：\n", title(name), docs.len());
                 for id in docs.iter().take(30) { s += &format!("- 《{}》(id: {id})\n", title(&shelf.find(id).map(|d| d.title.clone()).unwrap_or_default())); }
-                if docs.len() > 30 { s += "- ……（更多用 list_documents）\n"; }
+                if docs.len() > 30 { s += "- ……（更多用 list_folder）\n"; }
             }
             Attached::Doc(f) => match &f.picked {
                 Some(p) => s += &format!("用户附带了文档《{}》(id: {}) 里的这些内容：\n\n{}\n\n要看这篇的其他部分用 read_document。\n", title(&f.title), f.id, clip(p, 6000)),

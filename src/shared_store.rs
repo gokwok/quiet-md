@@ -15,6 +15,9 @@ impl SharedStore {
     pub fn externally_changed(&self, id: &str) -> Result<bool> { self.0.borrow().externally_changed(id) }
     pub fn download_state(&self, id: &str) -> DownloadState { self.0.borrow().download_state(id) }
     pub fn load(&self, id: &str) -> Result<Document> { self.0.borrow_mut().load(id) }
+    /// 后台线程上只读地读正文（iOS 上助手的工具用）。
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    pub fn reader(&self) -> crate::store::Reader { self.0.borrow().reader() }
     pub fn load_for_edit(&self, id: &str, shared: bool) -> Result<Document> { self.0.borrow().load_for_edit(id, shared) }
     pub fn forget_loaded(&self, id: &str) { self.0.borrow().forget_loaded(id); }
     pub fn recover_later(&self, doc: &Document) -> Result<()> { self.0.borrow().recover_later(doc) }

@@ -44,7 +44,7 @@ pub fn material(shelf: &Shelf) -> String {
     let docs = shelf.attached.iter().filter(|a| matches!(a, Attached::Doc(f) if f.picked.is_none())).count().max(1);
     for a in &shelf.attached {
         parts.push(match a {
-            Attached::Folder { name, docs } => {
+            Attached::Folder { name, docs, .. } => {
                 let titles: Vec<String> = docs.iter().take(40).map(|id| format!("《{}》", title(&shelf.find(id).map(|d| d.title.clone()).unwrap_or_default()))).collect();
                 format!("用户附带了文件夹「{}」，里面有 {} 篇文档：{}。", title(name), docs.len(), titles.join("、"))
             }

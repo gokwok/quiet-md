@@ -76,6 +76,11 @@ impl Refs {
         self.entries.get(&n).map(|e| (e.doc.as_str(), e.id))
     }
 
+    /// 给 `doc` 里这一块编个号（已有就是原来的），不读出它：列待办、搜索结果这些只报块号的地方用。
+    pub fn mark(&mut self, doc: &str, id: BlockId) -> String {
+        format!("b{}", self.number(doc, id))
+    }
+
     fn number(&mut self, doc: &str, id: BlockId) -> u32 {
         if let Some(n) = self.by_block.get(&(doc.to_string(), id)) { return *n; }
         self.next += 1;

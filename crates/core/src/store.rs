@@ -260,6 +260,24 @@ pub struct TrashEntry {
     pub folder: bool,
 }
 
+/// `Store::reader`：照建的那一刻记下的位置读文档，只读，可以跨线程。还没下载下来的读不了。
+#[derive(Clone, Debug, Default)]
+pub struct Reader {
+    /// 标识 → 文件，Markdown 文件还有它的标题和所在文件夹。
+    docs: std::sync::Arc<HashMap<String, (PathBuf, Option<(String, Option<PathBuf>)>)>>,
+}
+
+impl Reader {
+    pub fn load(&self, id: &str) -> Result<Document> {
+        let (path, md) = self.docs.get(id).with_context(|| format!("{id} is not in the library"))?;
+        let text = crate::file_io::read_to_string(path)?;
+        match md {
+            None => docxml::parse(&text),
+            Some((title, base)) => Ok(crate::markdown::parse_file(&text, title, base.as_deref())),
+        }
+    }
+}
+
 /// The 回收站 is emptied after 30 days.
 pub const TRASH_DAYS: u64 = 30;
 
@@ -716,6 +734,15 @@ impl Store {
     pub fn load(&self, id: &str) -> Result<Document> {
         self.ensure_downloaded(id)?;
         self.parse_doc(id, &crate::file_io::read_to_string(self.path(id))?)
+    }
+
+    /// 文档库里每篇的文件位置，拿到后台线程上只读地读正文（`Reader::load`），不借 `Store`。
+    pub fn reader(&self) -> Reader {
+        let docs = self.index.iter().filter(|(_, m)| m.folder.is_none()).map(|(id, m)| {
+            let md = m.markdown.then(|| (self.markdown_title(id), self.base(id)));
+            (id.clone(), (self.path(id), md))
+        }).collect();
+        Reader { docs: std::sync::Arc::new(docs) }
     }
 
     /// Only opening an editor establishes a new save baseline; previews must
@@ -1250,6 +1277,24 @@ mod tests {
 
     fn doc(title: &str) -> Document {
         Document { title: crate::model::RichText::plain(title), ..Default::default() }
+    }
+
+    /// 后台读正文：XML 和 Markdown 文档都读得出，和 `load` 一样；不在文档库里的、文件夹读不出。
+    #[test]
+    fn reader_loads_off_the_store() {
+        let lib = Lib::new("reader");
+        let mut s = lib.open();
+        let mut d = doc("XML");
+        d.blocks = vec![crate::model::Block::text("正文")];
+        let xml = s.create_from(&d).unwrap();
+        let md = s.create_markdown(&crate::markdown::parse_file("Hello *there*\n", "Note", None), "").unwrap();
+        let folder = s.create_folder("dir", None).unwrap();
+        s.list();
+        let reader = s.reader();
+        let back = std::thread::spawn(move || (reader.load(&xml).ok(), reader.load(&md).ok(), reader.load(&folder).is_err(), reader.load("nope").is_err())).join().unwrap();
+        assert_eq!(back.0.map(|d| (d.title.text, d.blocks[0].text.text.clone())), Some(("XML".into(), "正文".into())));
+        assert_eq!(back.1.map(|d| d.title.text), Some("Note".into()));
+        assert!(back.2 && back.3);
     }
 
     #[test]
