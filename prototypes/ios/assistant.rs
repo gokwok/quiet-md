@@ -52,7 +52,7 @@ pub fn parent(page: Page) -> Option<Page> {
 /// 打开助手设置的某一页时：重新看一眼钥匙串，文本页顺便取模型列表。
 pub fn opened(page: Page, cx: &mut Context<Workspace>) {
     match page {
-        Page::AssistantSpeech => refresh_key_status(),
+        Page::AssistantSpeech => { refresh_key_status(); roles::reload(); }
         Page::AssistantImage | Page::AssistantStyle | Page::AssistantPerson => { image::opened(); prompts::opened(); }
         Page::AssistantText | Page::AssistantModels | Page::AssistantProvider => text::opened(page, cx),
         Page::AssistantWriting | Page::AssistantPreset | Page::AssistantEntries | Page::AssistantEntry | Page::AssistantRegexes | Page::AssistantRegex | Page::AssistantCard => writing::opened(page, cx),
@@ -78,7 +78,7 @@ pub fn voice(cx: &mut Context<Workspace>) -> AnyElement {
     div().w_full().pt(px(18.)).flex().flex_col().gap(px(32.))
         .child(general::titled(Some(tr("服务商连接", "Provider Connection")), vec![provider]))
         .child(model_cards("speech-models", tr("语音模型", "Speech Model"), MODELS, current, |p, id| p.speech_model = id.into(), cx))
-        .child(roles::section(&p.speech_roles, cx))
+        .child(roles::section(&roles::all(), cx))
         .into_any_element()
 }
 

@@ -1,5 +1,5 @@
 //! 设置 › 助手设置 › 写作：预设、助手和人设。
-//! 预设在空间的 `tavern/` 目录里，跟着 iCloud 走（`fdl_ai::tavern::library`）；每改一处就整份写回去。内置的「默认」只能看，可以复制一份再改。
+//! 预设在全局库里（`fdl_ai::global`，各空间共用，`fdl_ai::tavern::library`）；每改一处就整份写回去。内置的「默认」只能看，可以复制一份再改。
 //! 第二级：预设（名称、条目、正则、文件）→ 条目列表（搜索、开关、长按拖动排序）→ 一条条目；正则列表 → 一条正则；助手或人设。
 //! 长的字（提示词、正则、描述）在系统的文字页里改（`sheet.rs`），引号和破折号原样留着。
 use std::{cell::{Cell, RefCell}, collections::HashSet, path::PathBuf, time::{Duration, Instant}};

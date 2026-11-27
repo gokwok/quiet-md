@@ -1,4 +1,5 @@
-//! ElevenLabs 音色列表和本机保存的语音角色。
+//! ElevenLabs 音色列表和语音角色。角色和自选的头像存在全局库（`fdl_ai::global`）的 `voices.json`、`avatars/`，各空间共用；
+//! 旧版存在这台设备的偏好（`Preferences::speech_roles`）和主目录的 `assistant-avatars/` 里，第一次读时并进来（按音色去重），旧的原样留着。
 use std::{cell::{Cell, RefCell}, collections::HashSet, fmt::Write, path::{Path, PathBuf}, ptr::null_mut, rc::Rc};
 
 use gpui::{prelude::FluentBuilder, *};
@@ -34,6 +35,46 @@ impl Role {
     pub fn name(&self) -> &str { &self.name }
     pub fn voice_name(&self) -> &str { &self.voice_name }
     pub fn traits(&self) -> &str { &self.traits }
+}
+
+thread_local! { static ROLES: RefCell<Option<Vec<Role>>> = const { RefCell::new(None) }; }
+
+fn voices_file() -> PathBuf { fdl_ai::global::dir().join("voices.json") }
+fn load_roles() -> Vec<Role> {
+    let mut roles: Vec<Role> = fdl_core::file_io::read(voices_file()).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| serde_json::from_value(v.get("roles")?.clone()).ok()).unwrap_or_default();
+    if !fdl_ai::global::device_migrated() {
+        let fresh: Vec<Role> = prefs().speech_roles.into_iter().filter(|r| !roles.iter().any(|x| x.voice_id == r.voice_id)).collect();
+        let added = !fresh.is_empty();
+        roles.extend(fresh);
+        let saved = !added || save_roles(&roles).is_ok();
+        let copied = fdl_ai::global::copy_files(&old_avatars_dir(), &avatars_dir());
+        if saved && copied.is_ok() && let Err(e) = fdl_ai::global::mark_device_migrated() { log::warn!("Could not mark voice roles migrated: {e}"); }
+    }
+    roles
+}
+fn save_roles(roles: &[Role]) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "roles": roles })).map_err(std::io::Error::other)?;
+    let path = voices_file();
+    if let Some(dir) = path.parent() { fdl_core::file_io::create_dir_all(dir)?; }
+    fdl_core::file_io::with_write(&path, |p| {
+        let tmp = p.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes)?;
+        Ok(std::fs::rename(&tmp, p)?)
+    }).map_err(std::io::Error::other)
+}
+
+/// 所有语音角色，按设置里排的顺序（也是配音菜单的顺序）。
+pub fn all() -> Vec<Role> { ROLES.with(|r| r.borrow_mut().get_or_insert_with(load_roles).clone()) }
+/// 打开语音设置时重新读一遍：另一台设备可能改过。
+pub fn reload() { ROLES.with(|r| *r.borrow_mut() = Some(load_roles())); }
+/// 改语音角色：整份写回去；写不了就提示，不改。
+pub fn update(w: &mut Workspace, f: impl FnOnce(&mut Vec<Role>), cx: &mut Context<Workspace>) {
+    let mut roles = all();
+    f(&mut roles);
+    if let Err(e) = save_roles(&roles) { return w.show_toast_kind(ui::ToastKind::Error, &format!("{}: {e}", tr("设置保存失败", "Could not save settings")), cx); }
+    ROLES.with(|r| *r.borrow_mut() = Some(roles));
+    cx.notify();
 }
 
 /// 台词语言：(菜单项, 代码, 名称)。
@@ -318,7 +359,7 @@ pub(super) fn section(roles: &[Role], cx: &mut Context<Workspace>) -> AnyElement
                         set_shift(id, visual - slot(k));
                     }
                     if t != d.from {
-                        let _ = ws.update(cx, |w, cx| w.set_pref(|p| p.speech_roles.sort_by_key(|r| order.iter().position(|id| *id == r.voice_id).unwrap_or(usize::MAX)), cx));
+                        let _ = ws.update(cx, |w, cx| update(w, |roles| roles.sort_by_key(|r| order.iter().position(|id| *id == r.voice_id).unwrap_or(usize::MAX)), cx));
                     }
                 }
                 _ => { REORDER.with(|r| *r.borrow_mut() = None); }
@@ -351,7 +392,7 @@ fn preview_role(role: &Role, cx: &mut Context<Workspace>) {
         let voice: Voice = serde_json::from_slice(&fetch_bytes(&url, Some(&key?)).await.ok()?.ok()?.ok()?).ok()?;
         let found = voice.preview_url.clone().filter(|u| !u.is_empty())?;
         let save = found.clone();
-        menu::dispatch(move |w, _, cx| w.set_pref(|p| if let Some(r) = p.speech_roles.iter_mut().find(|r| r.voice_id == lookup) {
+        menu::dispatch(move |w, _, cx| update(w, |roles| if let Some(r) = roles.iter_mut().find(|r| r.voice_id == lookup) {
             r.preview_url = Some(save.clone());
             if r.traits.is_empty() { r.traits = voice.traits(); }
         }, cx));
@@ -412,7 +453,7 @@ pub fn catalog(cx: &mut Context<Workspace>) -> AnyElement {
             _ => tr("无法获取 ElevenLabs 音色。", "Could not load ElevenLabs voices."),
         }), general::action("speech-retry-voices", tr("重试", "Retry"), false, |_, cx| fetch(cx), cx)]).into_any_element()),
         Catalog::Ready(voices) => {
-            let roles = prefs().speech_roles;
+            let roles = all();
             let local = |v: &Voice| roles.iter().find(|r| r.voice_id == v.voice_id);
             let shown: Vec<_> = voices.iter().filter(|v| v.matches(filter) && (query.is_empty() || v.name().to_lowercase().contains(&query)
                 || v.traits().to_lowercase().contains(&query) || local(v).is_some_and(|r| r.name.to_lowercase().contains(&query)))).collect();
@@ -477,12 +518,12 @@ fn voice_row(v: &Voice, role: Option<&Role>, cx: &mut Context<Workspace>) -> Any
 
 /// 收藏为角色：没收藏过的存下来，星星弹一下，留在列表里接着挑；收藏过的进它的角色设置（改名字、换头像、移除）。
 fn add_role(w: &mut Workspace, voice: &Voice, cx: &mut Context<Workspace>) {
-    if prefs().speech_roles.iter().any(|r| r.voice_id == voice.voice_id) { return open_role(w, voice.voice_id.clone(), cx); }
+    if all().iter().any(|r| r.voice_id == voice.voice_id) { return open_role(w, voice.voice_id.clone(), cx); }
     super::super::glass::haptic();
     let name = voice.name().to_owned();
     let role = Role { voice_id: voice.voice_id.clone(), voice_name: name.clone(), name: name.clone(), avatar: None, preview_url: voice.preview_url.clone(), traits: voice.traits(), tags: false, lang: String::new() };
-    w.set_pref(|p| p.speech_roles.push(role), cx);
-    if prefs().speech_roles.iter().any(|r| r.voice_id == voice.voice_id) {
+    update(w, |roles| roles.push(role), cx);
+    if all().iter().any(|r| r.voice_id == voice.voice_id) {
         POPPED.with(|p| { let mut p = p.borrow_mut(); p.0 = voice.voice_id.clone(); p.1 += 1; });
         w.show_toast_kind(ui::ToastKind::Success, tr("已收藏", "Saved"), cx);
     }
@@ -496,9 +537,9 @@ fn open_role(w: &mut Workspace, id: String, cx: &mut Context<Workspace>) {
 }
 
 /// 角色设置：上面是圆头像（右下角换头像的玻璃钮，进「选择头像」）、本地名称、对应的 ElevenLabs 音色和「试听」；
-/// 下面「本地资料」是名称和头像，只存在这台设备上，ElevenLabs 那边的音色不改。
+/// 下面「本地资料」是名称和头像，存在全局库里，ElevenLabs 那边的音色不改。
 pub fn detail(cx: &mut Context<Workspace>) -> AnyElement {
-    let Some(role) = EDITING.with(|id| prefs().speech_roles.into_iter().find(|r| r.voice_id == *id.borrow())) else { return div().into_any_element() };
+    let Some(role) = EDITING.with(|id| all().into_iter().find(|r| r.voice_id == *id.borrow())) else { return div().into_any_element() };
     let (name, clear, play) = (role.clone(), role.voice_id.clone(), role.clone());
     let mut rows = vec![
         item("speech-role-name", tr("名称", "Name"), Some(role.name.clone().into()), None, ui::icon("chevron-right", 14., row_chevron()))
@@ -547,7 +588,7 @@ fn script_rows(role: &Role, cx: &mut Context<Workspace>) -> AnyElement {
     let tags = item("speech-role-tags", tr("语气标签", "Audio Tags"), None, None, general::toggle("speech-role-tags-toggle", role.tags))
         .on_click(cx.listener(move |w, _, _, cx| {
             super::super::glass::haptic();
-            w.set_pref(|p| if let Some(r) = p.speech_roles.iter_mut().find(|r| r.voice_id == id) { r.tags = !r.tags; }, cx);
+            update(w, |roles| if let Some(r) = roles.iter_mut().find(|r| r.voice_id == id) { r.tags = !r.tags; }, cx);
         })).into_any_element();
     let items = LANGS.iter().map(|&(action, code, _)| menu::Item::new(action, lang_name(code), "", 0).checked(role.lang == code)).collect();
     let lang = div().relative().w_full().h(px(54.)).px(px(18.)).flex().items_center().gap(px(12.))
@@ -563,7 +604,7 @@ fn script_rows(role: &Role, cx: &mut Context<Workspace>) -> AnyElement {
 pub fn menu_action(action: &str, w: &mut Workspace, cx: &mut Context<Workspace>) -> bool {
     let Some(&(_, code, _)) = LANGS.iter().find(|l| l.0 == action) else { return false };
     let id = EDITING.with(|e| e.borrow().clone());
-    w.set_pref(|p| if let Some(r) = p.speech_roles.iter_mut().find(|r| r.voice_id == id) { r.lang = code.into(); }, cx);
+    update(w, |roles| if let Some(r) = roles.iter_mut().find(|r| r.voice_id == id) { r.lang = code.into(); }, cx);
     true
 }
 
@@ -574,7 +615,7 @@ fn rename(w: &mut Workspace, role: &Role, cx: &mut Context<Workspace>) {
         let id = id.clone();
         menu::dispatch(move |w, _, cx| match value {
             Some(name) if name.is_empty() => w.show_toast_kind(ui::ToastKind::Error, tr("请输入角色名称", "Enter a role name"), cx),
-            Some(name) => w.set_pref(|p| { if let Some(role) = p.speech_roles.iter_mut().find(|r| r.voice_id == id) { role.name = name; } }, cx),
+            Some(name) => update(w, |roles| { if let Some(role) = roles.iter_mut().find(|r| r.voice_id == id) { role.name = name; } }, cx),
             None => remove_role(w, &id, cx),
         });
     }) { w.show_toast_kind(ui::ToastKind::Error, tr("无法打开角色设置", "Could not open role settings"), cx); }
@@ -582,16 +623,20 @@ fn rename(w: &mut Workspace, role: &Role, cx: &mut Context<Workspace>) {
 
 fn remove_role(w: &mut Workspace, id: &str, cx: &mut Context<Workspace>) {
     super::preview::stop();
-    let old = prefs().speech_roles.into_iter().find(|r| r.voice_id == id).and_then(|r| r.avatar);
-    w.set_pref(|p| p.speech_roles.retain(|r| r.voice_id != id), cx);
-    if prefs().speech_roles.iter().any(|r| r.voice_id == id) { return; }
+    let old = all().into_iter().find(|r| r.voice_id == id).and_then(|r| r.avatar);
+    update(w, |roles| roles.retain(|r| r.voice_id != id), cx);
+    if all().iter().any(|r| r.voice_id == id) { return; }
     discard_avatar(old.as_deref());
     super::super::settings_back(w, cx);
 }
 
+fn old_avatars_dir() -> PathBuf { crate::store::Store::home_dir().join("assistant-avatars") }
+fn avatars_dir() -> PathBuf { fdl_ai::global::dir().join("avatars") }
+/// 照片头像的文件：全局库的 `avatars/`；还没搬过来的（旧版存在主目录）用原处的。
 fn avatar_path(id: &str) -> Option<PathBuf> {
-    let id = uuid::Uuid::parse_str(id).ok()?;
-    Some(crate::store::Store::home_dir().join("assistant-avatars").join(format!("{id}.png")))
+    let file = format!("{}.png", uuid::Uuid::parse_str(id).ok()?);
+    let (path, old) = (avatars_dir().join(&file), old_avatars_dir().join(&file));
+    Some(if !path.is_file() && old.is_file() { old } else { path })
 }
 
 /// 自带的头像（`avatars/*.webp`，语音角色和图像的人物用，编进二进制）。选了的话 `Role::avatar` 存 `builtin-NN`（从 1 数）。
@@ -713,7 +758,7 @@ pub fn avatars(cx: &mut Context<Workspace>) -> AnyElement {
     let (current, set): (Option<String>, SetAvatar) = match chosen {
         Some(found) => found,
         None => {
-            let Some(role) = EDITING.with(|id| prefs().speech_roles.into_iter().find(|r| r.voice_id == *id.borrow())) else { return div().into_any_element() };
+            let Some(role) = EDITING.with(|id| all().into_iter().find(|r| r.voice_id == *id.borrow())) else { return div().into_any_element() };
             let id = role.voice_id.clone();
             (role.avatar, Rc::new(move |w, next, cx| set_avatar(w, &id, next, cx)))
         }
@@ -775,9 +820,9 @@ fn write_avatar(from: &Path) -> anyhow::Result<String> {
 pub(super) fn discard_avatar(id: Option<&str>) { if let Some(path) = id.and_then(avatar_path) { let _ = std::fs::remove_file(path); } }
 
 fn set_avatar(w: &mut Workspace, id: &str, next: Option<String>, cx: &mut Context<Workspace>) {
-    let Some(old) = prefs().speech_roles.into_iter().find(|r| r.voice_id == id) else { discard_avatar(next.as_deref()); return; };
-    w.set_pref(|p| { if let Some(r) = p.speech_roles.iter_mut().find(|r| r.voice_id == id) { r.avatar = next.clone(); } }, cx);
-    if prefs().speech_roles.iter().any(|r| r.voice_id == id && r.avatar == next) { discard_avatar(old.avatar.as_deref()); }
+    let Some(old) = all().into_iter().find(|r| r.voice_id == id) else { discard_avatar(next.as_deref()); return; };
+    update(w, |roles| { if let Some(r) = roles.iter_mut().find(|r| r.voice_id == id) { r.avatar = next.clone(); } }, cx);
+    if all().iter().any(|r| r.voice_id == id && r.avatar == next) { discard_avatar(old.avatar.as_deref()); }
     else { discard_avatar(next.as_deref()); }
 }
 

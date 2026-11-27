@@ -122,7 +122,7 @@ fn save_info(clip: &str, info: &Clip) {
 
 /// 角色，上次用的排第一。
 fn roles() -> Vec<Role> {
-    let mut roles = prefs().speech_roles;
+    let mut roles = assistant::roles::all();
     let last = LAST.with(|l| l.borrow().clone());
     if let Some(i) = roles.iter().position(|r| r.voice_id() == last) { let r = roles.remove(i); roles.insert(0, r); }
     roles.truncate(PICKS.len());
@@ -508,7 +508,7 @@ fn request(doc: &Document, clip: &str, info: &Clip) -> (String, String, Vec<std:
     let (before, after) = (before.replace('\u{fffc}', ""), after.replace('\u{fffc}', ""));
     let tail = |s: &str, n: usize| { let c = s.chars().count(); s.chars().skip(c.saturating_sub(n)).collect::<String>() };
     let head = |s: &str, n: usize| s.chars().take(n).collect::<String>();
-    let role = prefs().speech_roles.into_iter().find(|r| r.voice_id() == info.voice_id);
+    let role = assistant::roles::all().into_iter().find(|r| r.voice_id() == info.voice_id);
     let voice = role.as_ref().map(|r| [r.voice_name(), r.traits()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).unwrap_or_default();
     let language = match info.lang.as_str() { "en" => "English", "ja" => "Japanese", "zh" => "Simplified Chinese", _ => "original" };
     let lines: Vec<Value> = segs.iter().enumerate().map(|(i, r)| json!({ "n": i + 1, "text": &info.text[r.clone()] })).collect();
@@ -701,7 +701,7 @@ fn row(clip: String, doc: &Document, cx: &mut Context<Editor>) -> AnyElement {
     let info = clip_info(&clip);
     let job = JOBS.with(|j| j.borrow().get(&clip).map(|j| match j { Job::Running | Job::Writing => None, Job::Failed(e) => Some(e.clone()) }));
     let on = playing(&clip);
-    let role = info.as_ref().and_then(|i| prefs().speech_roles.into_iter().find(|r| r.voice_id() == i.voice_id));
+    let role = info.as_ref().and_then(|i| assistant::roles::all().into_iter().find(|r| r.voice_id() == i.voice_id));
     let face = match (&role, &info) {
         (Some(r), _) => assistant::roles::avatar(r, 20.),
         (None, Some(i)) => assistant::roles::orb(&i.voice_id, 20.).into_any_element(),

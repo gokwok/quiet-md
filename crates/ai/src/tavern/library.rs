@@ -1,10 +1,10 @@
-//! 助手的素材库：文档库的 `tavern/` 目录。
+//! 助手的素材库：一个目录（现在是全局库 `global` 的目录，以前是每个空间的 `tavern/`）。
 //! - `presets/<标识>.json`：导入的预设，原样存（导出时还是那份文件，只少了我们记文件名的那个字段）。
 //!   标识就是文件名，导入时取内容的哈希：同一份导入两次不会多一份；同名的文件已经改过了，就另起一个标识，不盖掉改过的。
 //! - `settings.json`：选中的预设、助手和人设，助手和人设的列表，上一次的要求。
 //!
 //! 没导入过预设时用内置的「默认」（`default-preset.json`，本项目自己写的，很短）；标识是空串。
-//! 整个目录跟着文档库走 iCloud：读写都经过 `file_io`（协调访问），还没下载的预设只有 `.<标识>.json.icloud` 占位。
+//! 目录可能在 iCloud 里：读写都经过 `file_io`（协调访问），还没下载的预设只有 `.<标识>.json.icloud` 占位。
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -51,7 +51,7 @@ impl Default for Settings {
 }
 
 /// 先写临时文件再改名（在对目标的同一次协调写里，和文档库的写法一样）。
-fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() { file_io::create_dir_all(dir)?; }
     file_io::with_write(path, |p| {
         let tmp = p.with_extension("json.tmp");
@@ -90,8 +90,8 @@ impl Settings {
 
 pub fn default_preset() -> Preset { Preset::parse(include_bytes!("default-preset.json")).expect("内置预设") }
 
-fn presets_dir(dir: &Path) -> PathBuf { dir.join("presets") }
-fn path(dir: &Path, id: &str) -> PathBuf { presets_dir(dir).join(format!("{id}.json")) }
+pub(crate) fn presets_dir(dir: &Path) -> PathBuf { dir.join("presets") }
+pub(crate) fn path(dir: &Path, id: &str) -> PathBuf { presets_dir(dir).join(format!("{id}.json")) }
 fn valid(id: &str) -> bool { !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') }
 /// 我们自己加的字段：预设没写 `name` 时记导入的文件名。导出时去掉。
 const FILE_NAME: &str = "quiet_md_file_name";

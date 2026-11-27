@@ -13,7 +13,7 @@ use fdl_ai::tavern::{assemble::{Identity, Request, assemble}, history, library::
 use futures::{StreamExt, channel::mpsc};
 use gpui::{prelude::FluentBuilder, *};
 
-use crate::{app::Workspace, editor::view::Editor, model::{Block, BlockId}, settings::tr, store::Store, theme::Theme, ui};
+use crate::{app::Workspace, editor::view::Editor, model::{Block, BlockId}, settings::tr, theme::Theme, ui};
 use super::{assistant::{self, llm::Event}, menu};
 
 #[path = "assist_card.rs"]
@@ -75,8 +75,16 @@ thread_local! {
     static SHOWING: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// 文档库里助手的素材：预设、助手和人设、上一次的要求。
-pub fn dir() -> PathBuf { Store::root_dir().join("tavern") }
+/// 助手的素材（预设、助手和人设、上一次的要求、图像库）：全局库（`fdl_ai::global`），所有空间共用。
+/// 这次启动第一次用时，把各空间 `tavern/` 里还没并过的并进来（还在从 iCloud 下载的下次再并）。
+pub fn dir() -> PathBuf {
+    static MIGRATE: std::sync::Once = std::sync::Once::new();
+    MIGRATE.call_once(|| match fdl_ai::global::migrate() {
+        Ok(out) => for (id, r) in out { match r { Ok(m) => log::info!("MarginAI: merged space {id}: {m:?}"), Err(e) => log::info!("MarginAI: space {id} skipped this time: {e}") } },
+        Err(e) => log::warn!("MarginAI: could not record migrated spaces: {e}"),
+    });
+    fdl_ai::global::dir()
+}
 
 fn toast(text: String) { menu::dispatch(move |w, _, cx| w.show_toast_kind(ui::ToastKind::Error, &text, cx)); }
 
