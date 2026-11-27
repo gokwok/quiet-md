@@ -10,6 +10,9 @@
 //! 做完刷新快照（`Host::refresh`），改过、新建的那篇用宿主写好的样子放回 `Shelf::library`，块标识和短号接着对得上；
 //! 结果里用这次 run 的短号读出改过的块，接着改用得上。每样都记进改动日志（`changes`），可以回滚。
 //! 几处一起改（`edits`）要么全改要么都不改。
+//!
+//! 创作：`generate_image` 照一句英文标签画一张（宿主套上助手的形象、现在的画风），给了 doc 就照 `insert_blocks` 的位置插一个图片块
+//! （和插块一样记进改动日志，能回滚），不给就画在对话里。先插好块、再开始画（`Host::paint`）：位置不对不白花一次生图。
 use std::sync::Arc;
 
 use fdl_core::dialect::{self, Refs};
@@ -21,12 +24,18 @@ use super::tools::{self, SPACE_MD, arg_bool, arg_str, args, title, title_of};
 use super::{Call, Shelf, clip};
 
 /// 写的工具的名字。
-pub const NAMES: [&str; 9] = ["create_document", "insert_blocks", "update_blocks", "replace_text", "create_folder", "move", "rename", "trash", "restore"];
+pub const NAMES: [&str; 10] = ["create_document", "insert_blocks", "update_blocks", "replace_text", "create_folder", "move", "rename", "trash", "restore", "generate_image"];
+/// `generate_image` 的画幅。
+pub const RATIOS: [&str; 3] = ["1:1", "2:3", "3:2"];
 pub fn is_write(name: &str) -> bool { NAMES.contains(&name) }
 
 /// 一样东西现在在哪：上一层（`None` 顶层）、后一个（回去时排在它前面）；`local`：本机文件（文档库外面的，助手不动）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Place { pub parent: Option<String>, pub next: Option<String>, pub local: bool }
+
+/// 要画的一张：宿主记下的标识、图片块的地址和像素宽高。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Picture { pub id: String, pub src: String, pub width: u32, pub height: u32 }
 
 /// 宿主落到文档库里的办法（主线程上调）。出错是一句给人（和模型）看的话。
 pub trait Host {
@@ -49,6 +58,10 @@ pub trait Host {
     fn restore(&mut self, id: &str) -> Result<(), String>;
     /// 照文档库现在的样子刷新快照里的文档、文件夹和最近删除（正文的块不动）。
     fn refresh(&mut self, shelf: &mut Shelf);
+    /// 记下要画的一张（`prompt` 是画面，`me` 时带上助手的形象），还不开始画。
+    fn picture(&mut self, prompt: &str, ratio: &str, me: bool) -> Result<Picture, String>;
+    /// 开始画：插进了 `doc`，或者（`None`）画在对话里。
+    fn paint(&mut self, id: &str, doc: Option<&str>);
 }
 
 /// 工具的定义（OpenAI 的 `tools` 格式）。
@@ -82,6 +95,13 @@ pub fn defs() -> Value {
         f("rename", "给文档或文件夹改名。", json!({ "type": "object", "properties": { "id": s("文档或文件夹的标识"), "title": s("新名字") }, "required": ["id", "title"] })),
         f("trash", "把文档或文件夹移到最近删除（子文档跟着走，30 天内能恢复）。", json!({ "type": "object", "properties": { "ids": ids("标识") }, "required": ["ids"] })),
         f("restore", "从最近删除里恢复。", json!({ "type": "object", "properties": { "ids": ids("最近删除里的标识（list_trash 看）") }, "required": ["ids"] })),
+        f("generate_image", "画一张图（NovelAI）。prompt 用英文的 Danbooru 标签写画面：人数、构图、动作、表情、场景、光线，逗号隔开；画风和质量词会自动加上，人物外貌不用写。给了 doc 就插进那篇（位置同 insert_blocks），不给就画在对话里。一张要等几十秒，会花用户的额度，不要一次画很多张。",
+            json!({ "type": "object", "properties": {
+                "prompt": s("画面的英文标签，如 1girl, sitting, reading book, window, sunlight"),
+                "me": json!({ "type": "boolean", "description": "画面里有你自己时给 true，会用你的形象；不画你就不给" }),
+                "ratio": s("画幅：1:1（默认）、2:3（竖）或 3:2（横）"),
+                "doc": s("插进哪篇文档（标识），不给就画在对话里"),
+                "position": s("before、after（都要给 block）、start 或 end（默认）"), "block": s("插在哪块前后：块号，如 b12") }, "required": ["prompt"] })),
     ])
 }
 
@@ -100,6 +120,7 @@ pub fn label(shelf: &Shelf, call: &Call) -> String {
         "rename" => format!("把{}改名为《{}》", name(&arg_str(&a, "id")), clip(&arg_str(&a, "title"), 20)),
         "trash" => format!("删除{}", many("ids")),
         "restore" => format!("恢复{}", many("ids")),
+        "generate_image" => if arg_str(&a, "doc").is_empty() { "画一张图".into() } else { format!("在{}里画一张图", doc()) },
         other => other.to_owned(),
     }
 }
@@ -118,6 +139,7 @@ pub fn run(shelf: &mut Shelf, host: &mut dyn Host, log: &mut Changes, call: &Cal
         "rename" => rename(shelf, host, log, &a),
         "trash" => trash(shelf, host, log, &a),
         "restore" => restore(shelf, host, log, &a),
+        "generate_image" => generate_image(shelf, host, log, &a),
         other => Err(format!("没有叫 {other} 的写工具。")),
     };
     out.unwrap_or_else(|e| format!("错误：{e}"))
@@ -259,28 +281,64 @@ fn insert_blocks(shelf: &mut Shelf, host: &mut dyn Host, log: &mut Changes, a: &
     let id = doc_arg(a, "doc");
     let new = content(shelf, a)?;
     if new.is_empty() { return Err("没有要插入的内容：给 markdown 或 copy_from。".into()); }
+    let (position, at) = position_arg(a)?;
+    let ids: Vec<BlockId> = new.iter().map(|b| b.id).collect();
+    edit(shelf, host, log, &id, "插入到", |blocks, refs| { put_at(blocks, refs, &id, &position, &at, new)?; Ok(ids) })
+}
+
+/// 插在哪：`position`（默认 end）和 before、after 要的块号。
+fn position_arg(a: &Value) -> Result<(String, String), String> {
     let position = match arg_str(a, "position").to_lowercase() { p if p.is_empty() => "end".to_owned(), p => p };
     if !["start", "end", "before", "after"].contains(&position.as_str()) { return Err(format!("position 只能是 before、after、start 或 end，不是 {position}。")); }
     let at = arg_str(a, "block");
-    let ids: Vec<BlockId> = new.iter().map(|b| b.id).collect();
-    edit(shelf, host, log, &id, "插入到", |blocks, refs| {
-        match position.as_str() {
-            "start" => { blocks.splice(0..0, new); }
-            "end" => {
-                // 只有一个空段落的新文档：换掉它。
-                if blocks.len() == 1 && blocks[0].kind == BlockKind::Text && blocks[0].text.is_empty() && blocks[0].children.is_empty() { blocks.clear(); }
-                blocks.extend(new);
-            }
-            p => {
-                if at.is_empty() { return Err(format!("position 是 {p} 时要给 block（块号）。")); }
-                let target = block_arg(refs, &id, &at)?;
-                let (row, i) = locate(blocks, target).ok_or_else(|| format!("块 {at} 已经不在这篇里了，重新读一遍。"))?;
-                let i = if p == "after" { i + 1 } else { i };
-                row.splice(i..i, new);
-            }
+    if matches!(position.as_str(), "before" | "after") && at.is_empty() { return Err(format!("position 是 {position} 时要给 block（块号）。")); }
+    Ok((position, at))
+}
+
+/// 照位置把新块放进正文。
+fn put_at(blocks: &mut Vec<Block>, refs: &mut Refs, doc: &str, position: &str, at: &str, new: Vec<Block>) -> Result<(), String> {
+    match position {
+        "start" => { blocks.splice(0..0, new); }
+        "end" => {
+            // 只有一个空段落的新文档：换掉它。
+            if blocks.len() == 1 && blocks[0].kind == BlockKind::Text && blocks[0].text.is_empty() && blocks[0].children.is_empty() { blocks.clear(); }
+            blocks.extend(new);
         }
-        Ok(ids)
-    })
+        p => {
+            let target = block_arg(refs, doc, at)?;
+            let (row, i) = locate(blocks, target).ok_or_else(|| format!("块 {at} 已经不在这篇里了，重新读一遍。"))?;
+            let i = if p == "after" { i + 1 } else { i };
+            row.splice(i..i, new);
+        }
+    }
+    Ok(())
+}
+
+/// 画一张：先查参数，插进文档的先插块（记进日志），都成了才开始画。
+fn generate_image(shelf: &mut Shelf, host: &mut dyn Host, log: &mut Changes, a: &Value) -> Out {
+    let prompt = arg_str(a, "prompt").trim().to_owned();
+    if prompt.is_empty() { return Err("prompt 是空的：用英文标签写画面，如 1girl, reading book, window。".into()); }
+    if prompt.chars().count() > 1000 { return Err("prompt 太长了，1000 字以内。".into()); }
+    let ratio = match arg_str(a, "ratio") { r if r.is_empty() => "1:1".to_owned(), r => r };
+    if !RATIOS.contains(&ratio.as_str()) { return Err(format!("ratio 只能是 1:1、2:3 或 3:2，不是 {ratio}。")); }
+    let me = arg_bool(a, "me");
+    let id = doc_arg(a, "doc");
+    if id.is_empty() {
+        let pic = host.picture(&prompt, &ratio, me)?;
+        host.paint(&pic.id, None);
+        return Ok(format!("开始画了（{ratio}），画好会显示在对话里。"));
+    }
+    if id == SPACE_MD { return Err("SPACE.md 里不放图：不给 doc 就画在对话里。".into()); }
+    tools::load(shelf, &id)?;
+    let (position, at) = position_arg(a)?;
+    if !at.is_empty() && matches!(position.as_str(), "before" | "after") { block_arg(&shelf.refs.lock().unwrap(), &id, &at)?; }
+    let pic = host.picture(&prompt, &ratio, me)?;
+    let mut b = Block::new(BlockKind::Image { src_kind: "src".into(), src: pic.src.clone(), width: Some(pic.width as f32), height: Some(pic.height as f32), caption: None, crop: None }, RichText::default());
+    b.align = fdl_core::model::Align::Center;
+    let new = b.id;
+    let out = edit(shelf, host, log, &id, "插入图片到", |blocks, refs| { put_at(blocks, refs, &id, &position, &at, vec![b])?; Ok(vec![new]) })?;
+    host.paint(&pic.id, Some(&id));
+    Ok(out)
 }
 
 /// 行首带没带块号（`[b12]`，前面可以有缩进）。

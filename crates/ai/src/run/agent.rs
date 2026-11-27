@@ -54,7 +54,8 @@ pub fn system(shelf: &Shelf) -> String {
         "这段对话里你可以改这个空间的文档：insert_blocks（插入新块）、update_blocks（改写或删掉几块）、replace_text（只换字）改正文，\
         create_document 新建，create_folder、move、rename、trash、restore 管文件夹和文档；SPACE.md 也能用前三样改。\
         改之前先读，块号用读出来的；新写的块不要带块号，<keep/> 原样留着就不会动那块。只换几个字用 replace_text，整块重写用 update_blocks。\
-        用户没让你改就不要改；改完简单说改了哪些。用户随时能回滚你这一轮的改动。\n"
+        用户没让你改就不要改；改完简单说改了哪些。用户随时能回滚你这一轮的改动。\n\
+        用户要图时用 generate_image：prompt 写英文标签，画你自己时给 me=true；要放进文档就给 doc 和位置，不然画在对话里。一张要等一阵、花用户的额度，用户没要就不画。\n"
     } else { "只读不写：你改不了文档。\n" };
     if let Some((y, m, d, h, min)) = shelf.now { s += &format!("现在是 {y}-{m:02}-{d:02} {h:02}:{min:02}。\n"); }
     let guide = shelf.guide.trim();

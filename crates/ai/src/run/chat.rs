@@ -1,5 +1,5 @@
 //! 助手的对话记录：空间里的 `assistant/chats/<标识>.json`，一段对话一个文件，跟着空间走 iCloud。和核心无关：
-//! 记的是谁说了什么（用户的每句话带着当时附带的资源）、助手那边走了哪几步、改了什么（`changes`，回滚用）、用的哪个助手、核心和模型、权限。
+//! 记的是谁说了什么（用户的每句话带着当时附带的资源）、助手那边走了哪几步、改了什么（`changes`，回滚用）、画在对话里的图（`images`）、用的哪个助手、核心和模型、权限。
 //! 下一次 run 的「之前的对话」从这里来（`history`）。读得宽松：缺的字段按默认，读不了的文件跳过。
 //! 旧的对话（整段一个范围 `scope`、选中的块 `picked`、一定写了核心）读进来时，范围挂到第一句话上，核心当成这段自己选的。
 use std::path::{Path, PathBuf};
@@ -26,6 +26,8 @@ pub struct Item {
     pub stopped: bool,
     /// 助手这一轮改了文档库里的什么（回滚用）。
     pub changes: super::changes::Changes,
+    /// 助手这一轮画在对话里的图（`generate_image` 没给 doc）：宿主记的标识。
+    pub images: Vec<String>,
 }
 
 /// 一段对话。`assistant`：这段自己选的助手（`None` 跟着空间的默认助手）；`core`：临时换的核心（`None` 用助手自己的）。
@@ -100,6 +102,7 @@ impl Chat {
                 if let Some(f) = &i.failed { v["failed"] = json!(f); }
                 if i.stopped { v["stopped"] = json!(true); }
                 if !i.changes.is_empty() { v["changes"] = i.changes.to_json(); }
+                if !i.images.is_empty() { v["images"] = json!(i.images); }
                 v
             }).collect::<Vec<_>>(),
         });
@@ -121,6 +124,7 @@ impl Chat {
             failed: i.get("failed").and_then(Value::as_str).map(str::to_owned),
             stopped: i.get("stopped").and_then(Value::as_bool).unwrap_or(false),
             changes: i.get("changes").map(super::changes::Changes::read).unwrap_or_default(),
+            images: strings(i, "images"),
         }).collect());
         // 旧格式：整段的范围挂到第一句话上。
         if let Some(r) = v.get("scope").and_then(|s| old_scope(s, text(v, "picked")))

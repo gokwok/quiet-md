@@ -819,7 +819,7 @@ fn pick_avatar(set: SetAvatar, cx: &mut Context<Workspace>) {
     }).detach();
 }
 
-fn write_avatar(from: &Path) -> anyhow::Result<String> {
+pub(super) fn write_avatar(from: &Path) -> anyhow::Result<String> {
     let id = uuid::Uuid::new_v4().to_string();
     let to = avatar_path(&id).unwrap();
     let image = image::open(from)?.thumbnail(384, 384);

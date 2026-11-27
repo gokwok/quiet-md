@@ -31,6 +31,8 @@ use super::{assistant::{self, list, llm::Event, roles}, menu};
 pub mod card;
 #[path = "margin_write.rs"]
 mod host;
+#[path = "margin_speak.rs"]
+mod speak;
 
 pub const SEND: &str = "margin-send";
 const CLOSE: &str = "margin-close";
@@ -64,6 +66,8 @@ struct Live {
     model: String,
     /// 这一轮改了什么（写的工具记的）。
     changes: Changes,
+    /// 这一轮画在对话里的图（`imagine` 的记录标识）。
+    images: Vec<String>,
 }
 
 struct Page {
@@ -171,15 +175,17 @@ fn show(_: &mut Workspace, entry: Vec<Resource>, _: &mut Window, cx: &mut Contex
 
 /// 正在跑的被换下去（开了别的范围）：停掉，说到哪儿存到哪儿。
 fn save_live(p: &mut Page) {
+    speak::stop();
     if let Some(live) = p.live.take() {
         live.call.abort();
-        p.chat.items.push(Item { role: Role::Assistant, text: live.stored, steps: live.steps, at: now(), model: live.model, stopped: true, changes: live.changes, ..Default::default() });
+        p.chat.items.push(Item { role: Role::Assistant, text: live.stored, steps: live.steps, at: now(), model: live.model, stopped: true, changes: live.changes, images: live.images, ..Default::default() });
         let _ = chat::save(&dir(), &p.chat);
     }
 }
 
 fn close(cx: &mut Context<Workspace>) {
     card::blur();
+    speak::stop();
     OPEN.with(|o| o.set(false));
     MOTION.with(|m| m.set(Some((false, None))));
     cx.notify();
@@ -367,7 +373,7 @@ fn send(w: &mut Workspace, input: String, cx: &mut Context<Workspace>) {
             if p.chat.items.is_empty() && !a.greeting.trim().is_empty() { p.chat.items.push(Item { role: Role::Assistant, text: a.greeting.trim().to_owned(), at: p.chat.created, ..Default::default() }); }
         }
         p.chat.items.push(Item { role: Role::User, text: input, resources, at: now(), ..Default::default() });
-        p.live = Some(Live { turn, call: call.abort_handle(), _ticket: ticket, steps: vec![], blocks: vec![], stored: String::new(), model, changes: Changes::default() });
+        p.live = Some(Live { turn, call: call.abort_handle(), _ticket: ticket, steps: vec![], blocks: vec![], stored: String::new(), model, changes: Changes::default(), images: vec![] });
         let _ = chat::save(&dir(), &p.chat);
     });
     card::blur();
@@ -447,7 +453,7 @@ fn apply(p: &mut Page, u: Up) {
         Up::Preview { stored, blocks } => { live.stored = stored; live.blocks = blocks; }
         Up::Done { stored, blocks } => {
             let live = p.live.take().unwrap();
-            p.chat.items.push(Item { role: Role::Assistant, text: stored, steps: live.steps, at: now(), model: live.model, changes: live.changes, ..Default::default() });
+            p.chat.items.push(Item { role: Role::Assistant, text: stored, steps: live.steps, at: now(), model: live.model, changes: live.changes, images: live.images, ..Default::default() });
             p.shaped.insert(p.chat.items.len() - 1, blocks);
             let _ = chat::save(&dir(), &p.chat);
         }
@@ -455,7 +461,7 @@ fn apply(p: &mut Page, u: Up) {
         Up::Failed(e) => {
             let live = p.live.take().unwrap();
             live._ticket.fail();
-            p.chat.items.push(Item { role: Role::Assistant, text: live.stored, steps: live.steps, at: now(), model: live.model, failed: Some(e), changes: live.changes, ..Default::default() });
+            p.chat.items.push(Item { role: Role::Assistant, text: live.stored, steps: live.steps, at: now(), model: live.model, failed: Some(e), changes: live.changes, images: live.images, ..Default::default() });
             let _ = chat::save(&dir(), &p.chat);
         }
     }
@@ -479,34 +485,56 @@ fn retry(w: &mut Workspace, cx: &mut Context<Workspace>) {
         let input = p.chat.items[at].text.clone();
         p.resources = p.chat.items[at].resources.clone();
         // 出错前已经改了的，记到重问的那一轮上（照样能回滚）。
-        let mut carry = Changes::default();
-        for i in &p.chat.items[at..] { if !i.changes.undone { carry.ops.extend(i.changes.ops.iter().cloned()); } }
+        let (mut carry, mut images) = (Changes::default(), vec![]);
+        for i in &p.chat.items[at..] { if !i.changes.undone { carry.ops.extend(i.changes.ops.iter().cloned()); } images.extend(i.images.iter().cloned()); }
         p.chat.items.truncate(at);
         p.shaped.retain(|k, _| *k < at);
-        Some((input, carry))
+        Some((input, carry, images))
     });
-    if let Some((input, carry)) = input {
+    if let Some((input, carry, images)) = input {
         send(w, input, cx);
-        PAGE.with(|p| if let Some(l) = p.borrow_mut().as_mut().and_then(|p| p.live.as_mut()) { l.changes = carry; });
+        PAGE.with(|p| if let Some(l) = p.borrow_mut().as_mut().and_then(|p| p.live.as_mut()) { (l.changes, l.images) = (carry, images); });
     }
 }
 
 /// 主线程上做一次写的调用：还是这一轮、对话还是可编辑才做（权限随时能改），改动记进这一轮。
+/// 开始画图的（`generate_image`）等那张画完或失败了再回话，步骤一直停在「画一张图」上。
 fn write_now(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>, turn: u64, mut shelf: Shelf, call: Call, reply: oneshot::Sender<(Shelf, String)>) {
-    let state = PAGE.with(|p| p.borrow_mut().as_mut().and_then(|p| { let permission = p.chat.permission; p.live.as_mut().filter(|l| l.turn == turn).map(|l| (std::mem::take(&mut l.changes), permission)) }));
-    let Some((mut log, permission)) = state else { let _ = reply.send((shelf, tr("错误：这一轮已经停了，没有改。", "Error: this turn has stopped; nothing was changed.").into())); return };
+    let state = PAGE.with(|p| p.borrow_mut().as_mut().and_then(|p| {
+        let (permission, look) = (p.chat.permission, look(&who(&p.chat, p.space.as_deref())));
+        p.live.as_mut().filter(|l| l.turn == turn).map(|l| (std::mem::take(&mut l.changes), permission, look))
+    }));
+    let Some((mut log, permission, look)) = state else { let _ = reply.send((shelf, tr("错误：这一轮已经停了，没有改。", "Error: this turn has stopped; nothing was changed.").into())); return };
     shelf.permission = permission;
     // 不借着 `PAGE` 做：文档库、编辑器那边可能回头来问助手页的状态。
-    let out = write::run(&mut shelf, &mut host::Ios { w, window, cx }, &mut log, &call);
+    let mut host = host::Ios::new(w, window, cx);
+    host.look = look;
+    let out = write::run(&mut shelf, &mut host, &mut log, &call);
+    let (pending, shown) = (host.pending.take(), std::mem::take(&mut host.shown));
+    let out = if host.unbound { format!("{out}\n{}", tr("（这个助手没绑形象，画的不是固定的你，照提示词画的。）", "(This assistant has no bound look, so it was drawn from the prompt alone.)")) } else { out };
     PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() {
         match p.live.as_mut().filter(|l| l.turn == turn) {
-            Some(l) => l.changes = log,
+            Some(l) => { l.changes = log; l.images.extend(shown); }
             // 做的时候这一轮被换下去了：记到它留下的那条上。
-            None => if let Some(i) = p.chat.items.iter_mut().rev().find(|i| i.role == Role::Assistant) { i.changes.ops.extend(log.ops); let _ = chat::save(&dir(), &p.chat); },
+            None => if let Some(i) = p.chat.items.iter_mut().rev().find(|i| i.role == Role::Assistant) { i.changes.ops.extend(log.ops); i.images.extend(shown); let _ = chat::save(&dir(), &p.chat); },
         }
     });
-    let _ = reply.send((shelf, out));
     cx.notify();
+    let Some(id) = pending else { let _ = reply.send((shelf, out)); return };
+    super::imagine::on_done(&id, move |r| {
+        let more = match r {
+            Ok(()) => tr("图已经画好了。", "The image is done.").to_owned(),
+            Err(e) => crate::localized_format!("但没画成：{}。占位还在，用户点它能重试；别再调一次。", "But it failed: {}. The placeholder stays and the user can tap it to retry; do not call again.", e),
+        };
+        let _ = reply.send((shelf, format!("{out}\n{more}")));
+        menu::dispatch(|_, _, cx| cx.notify());
+    });
+}
+
+/// 助手的形象：图像库里那个人物的名字（`imagine` 照名字找人物）。
+fn look(a: &Assistant) -> Option<String> {
+    let id = a.character.as_deref()?;
+    assistant::prompts::lib().characters.into_iter().find(|c| c.id == id).map(|c| c.name)
 }
 
 /// 点了「回滚」：之后有人手动改过就先问一次，不然直接回滚。
@@ -515,7 +543,7 @@ fn ask_undo(w: &mut Workspace, i: usize, window: &mut Window, cx: &mut Context<W
     let Some(changes) = PAGE.with(|p| p.borrow().as_ref().and_then(|p| p.chat.items.get(i).map(|x| x.changes.clone()))) else { return };
     if changes.undone || changes.is_empty() { return; }
     super::glass::haptic();
-    let edited = changes.edited(&mut host::Ios { w, window, cx });
+    let edited = changes.edited(&mut host::Ios::new(w, window, cx));
     if edited.is_empty() { return undo(w, i, window, cx); }
     PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() { p.asking = Some((i, edited)); });
     cx.notify();
@@ -524,7 +552,7 @@ fn ask_undo(w: &mut Workspace, i: usize, window: &mut Window, cx: &mut Context<W
 /// 回滚第 `i` 条回复改的东西，记成已回滚。
 fn undo(w: &mut Workspace, i: usize, window: &mut Window, cx: &mut Context<Workspace>) {
     let Some(mut changes) = PAGE.with(|p| p.borrow_mut().as_mut().and_then(|p| { p.asking = None; p.chat.items.get(i).map(|x| x.changes.clone()) })) else { return };
-    let problems = changes.undo(&mut host::Ios { w, window, cx });
+    let problems = changes.undo(&mut host::Ios::new(w, window, cx));
     PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() && let Some(x) = p.chat.items.get_mut(i) { x.changes = changes; let _ = chat::save(&dir(), &p.chat); });
     if problems.is_empty() { w.show_toast(tr("已回滚", "Reverted"), cx); }
     else { w.show_toast_kind(ui::ToastKind::Error, &crate::localized_format!("有几样没能回滚：{}", "Some changes could not be reverted: {}", problems.join("；")), cx); }
@@ -584,13 +612,15 @@ fn content(p: &Page, w: &Workspace, settled: bool, window: &mut Window, cx: &mut
     if p.chat.items.is_empty() && !a.greeting.trim().is_empty() {
         list = list.child(render_blocks(&fdl_core::markdown::parse_file(a.greeting.trim(), "", None).blocks));
     }
+    // 对话里的图最宽到列表的宽。
+    let wide = (f32::from(super::layout().2.width) - 40.).max(120.);
     for (i, item) in p.chat.items.iter().enumerate() {
         list = list.child(match item.role {
             Role::User => user(w, item),
-            _ => assistant_item(p, i, item, cx),
+            _ => assistant_item(p, i, item, &a, wide, cx),
         });
     }
-    if let Some(live) = &p.live { list = list.child(live_item(live)); }
+    if let Some(live) = &p.live { list = list.child(live_item(live, wide)); }
     if p.live.is_some() { window.request_animation_frame(); }
 
     let top: Vec<card::Chip> = p.resources.iter().take(REMOVE.len()).enumerate().map(|(i, r)| {
@@ -695,11 +725,13 @@ fn changes_row(i: usize, c: &Changes, open: bool, busy: bool, cx: &mut Context<W
         .into_any_element()
 }
 
-fn assistant_item(p: &Page, i: usize, item: &Item, cx: &mut Context<Workspace>) -> AnyElement {
+/// 助手的一条：步骤、正文、画在对话里的图、改动，底下拷贝和朗读。
+fn assistant_item(p: &Page, i: usize, item: &Item, a: &Assistant, wide: f32, cx: &mut Context<Workspace>) -> AnyElement {
     let blocks = p.shaped.get(&i).cloned().unwrap_or_else(|| if item.text.trim().is_empty() { vec![] } else { fdl_core::markdown::parse_file(&item.text, "", None).blocks });
     let mut col = div().w_full().flex().flex_col().gap(px(10.));
     if !item.steps.is_empty() { col = col.child(steps_row(i, &item.steps, p.expanded.contains(&i), cx)); }
     if !blocks.is_empty() { col = col.child(render_blocks(&blocks)); }
+    col = col.children(item.images.iter().map(|id| super::imagine::chat_picture(id, wide)));
     if !item.changes.is_empty() { col = col.child(changes_row(i, &item.changes, p.listed.contains(&i), p.live.is_some(), cx)); }
     if let Some(e) = &item.failed {
         col = col.child(div().flex().items_center().gap(px(12.)).text_size(px(14.)).line_height(px(20.))
@@ -711,15 +743,17 @@ fn assistant_item(p: &Page, i: usize, item: &Item, cx: &mut Context<Workspace>) 
     }
     if item.failed.is_none() && !item.text.trim().is_empty() {
         let text = item.text.clone();
-        col = col.child(div().flex().child(div().id(("margin-copy", i)).size(px(32.)).ml(px(-6.)).flex().items_center().justify_center().rounded(px(8.)).active(|s| s.bg(Theme::fill_pressed()))
+        let speak = speak::button(i, speak::key(&p.chat.id, i), text.clone(), a.voice.clone(), cx);
+        col = col.child(div().flex().ml(px(-6.)).child(div().id(("margin-copy", i)).size(px(32.)).flex().items_center().justify_center().rounded(px(8.)).active(|s| s.bg(Theme::fill_pressed()))
             .child(ui::icon("copy", 16., Theme::text_caption()))
-            .on_click(cx.listener(move |w, _, _, cx| { super::glass::haptic(); cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); w.show_toast(tr("已拷贝", "Copied"), cx); }))));
+            .on_click(cx.listener(move |w, _, _, cx| { super::glass::haptic(); cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); w.show_toast(tr("已拷贝", "Copied"), cx); })))
+            .child(speak));
     }
     col.into_any_element()
 }
 
 /// 正在跑的那条：步骤、写出来的，还没出字时一行在做什么（淡淡地一明一暗）。
-fn live_item(live: &Live) -> AnyElement {
+fn live_item(live: &Live, wide: f32) -> AnyElement {
     let mut col = div().w_full().flex().flex_col().gap(px(10.));
     let pulse = |text: String| div().text_size(px(14.)).text_color(Theme::text_caption())
         .child(text).with_animation("margin-pulse", Animation::new(Duration::from_millis(1400)).repeat(), |d, t| d.opacity(0.45 + 0.55 * (1. - (t * std::f32::consts::TAU).cos()) / 2.));
@@ -731,7 +765,8 @@ fn live_item(live: &Live) -> AnyElement {
         if !live.steps.is_empty() { col = col.child(div().text_size(px(14.)).text_color(Theme::text_caption()).child(crate::localized_format!("{} 步", "{} steps", live.steps.len()))); }
         col = col.child(render_blocks(&live.blocks));
     }
-    col.into_any_element()
+    // 这一轮已经画在对话里的（`generate_image` 等它画完才往下，所以放在最后）。
+    col.children(live.images.iter().map(|id| super::imagine::chat_picture(id, wide))).into_any_element()
 }
 
 // ── 块：和文档同样的层级，简化的样子（只读） ─────────────────────────

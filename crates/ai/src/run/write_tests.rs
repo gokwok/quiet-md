@@ -12,7 +12,8 @@ use super::write::{self, Host, Place};
 use super::*;
 
 /// 临时文档库（和设备上的状态一起放在临时文件夹里，用完删掉）。`open`：编辑器里开着的那篇。
-struct Lib { root: PathBuf, store: Store, guide: String, open: Option<(String, Editor)> }
+/// `pictures`：假的图像后端记下的每一张（画面、画幅、带不带形象）；`painted`：开始画的（标识、插进的文档）。
+struct Lib { root: PathBuf, store: Store, guide: String, open: Option<(String, Editor)>, pictures: Vec<(String, String, bool)>, painted: Vec<(String, Option<String>)> }
 
 fn local_data() {
     static ONCE: std::sync::Once = std::sync::Once::new();
@@ -26,7 +27,7 @@ impl Lib {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let root = std::env::temp_dir().join(format!("fdl-ai-write-{}-{}-{}", std::process::id(), fdl_core::time::now_ms(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
         let store = Store::open_at(root.clone()).unwrap();
-        Lib { root, store, guide: String::new(), open: None }
+        Lib { root, store, guide: String::new(), open: None, pictures: vec![], painted: vec![] }
     }
     fn doc(&mut self, title: &str, md: &str, parent: Option<&str>) -> String {
         let id = self.store.create_from(&fdl_core::markdown::parse_file(md, title, None)).unwrap();
@@ -97,6 +98,14 @@ impl Host for Lib {
         Ok(done)
     }
     fn restore(&mut self, id: &str) -> Result<(), String> { self.store.restore(id).map(|_| ()).map_err(|e| e.to_string()) }
+    fn picture(&mut self, prompt: &str, ratio: &str, me: bool) -> Result<write::Picture, String> {
+        if prompt.contains("fail") { return Err("图像服务没有 Key".into()); }
+        self.pictures.push((prompt.into(), ratio.into(), me));
+        let id = format!("p{}", self.pictures.len());
+        let (width, height) = match ratio { "2:3" => (832, 1216), "3:2" => (1216, 832), _ => (1024, 1024) };
+        Ok(write::Picture { src: format!("assets/imagine/{id}.png"), id, width, height })
+    }
+    fn paint(&mut self, id: &str, doc: Option<&str>) { self.painted.push((id.into(), doc.map(str::to_owned))); }
     fn refresh(&mut self, shelf: &mut Shelf) {
         let all = self.store.list();
         let names: std::collections::HashMap<String, String> = all.iter().filter(|e| e.meta.folder.is_some()).map(|e| (e.id.clone(), e.title.clone())).collect();
@@ -140,11 +149,11 @@ fn write_tools_only_when_editable() {
     assert!(out.starts_with("错误：这段对话是只读的"), "{out}");
     assert!(tools::run(&shelf, &call("trash", serde_json::json!({ "ids": [id] }))).starts_with("错误：这段对话是只读的"));
     assert!(log.is_empty() && lib.text(&id) == ["第一段。"]);
-    // 可编辑：十五样，提示里说了能改。
+    // 可编辑：十六样，提示里说了能改。
     shelf.permission = Permission::Write;
     let Act::Ask(body) = core.begin("改一下", &[], &shelf) else { panic!() };
     let names: Vec<&str> = body["tools"].as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 15);
+    assert_eq!(names.len(), 16);
     assert!(write::NAMES.iter().all(|n| names.contains(n)));
     assert!(body["messages"][0]["content"].as_str().unwrap().contains("你可以改这个空间的文档"));
 }
@@ -397,7 +406,7 @@ fn undo_notices_later_hand_edits() {
         let out = w(&mut shelf, &mut lib, &mut log, "insert_blocks", serde_json::json!({ "doc": id, "markdown": "助手加的。" }));
         assert!(!out.starts_with("错误"), "{out}");
     }
-    let mut fresh = Lib { root: lib.root.clone(), store: Store::open_at(lib.root.clone()).unwrap(), guide: String::new(), open: None };
+    let mut fresh = Lib { root: lib.root.clone(), store: Store::open_at(lib.root.clone()).unwrap(), guide: String::new(), open: None, pictures: vec![], painted: vec![] };
     assert!(log.edited(&mut fresh).is_empty());
     std::mem::forget(fresh);
     // 用户又改了周报。
@@ -486,9 +495,77 @@ fn change_log_round_trips_with_the_chat() {
     assert_eq!(log.ops[2], Op::Move { id: "b".into(), title: "读书".into(), parent: Some("f".into()), next: None });
     assert_eq!(Changes::read(&log.to_json()), log);
     let mut chat = chat::Chat::new("x".into(), 1);
-    chat.items.push(chat::Item { role: Role::Assistant, text: "改好了".into(), changes: log.clone(), ..Default::default() });
+    chat.items.push(chat::Item { role: Role::Assistant, text: "改好了".into(), changes: log.clone(), images: vec!["abc".into(), "def".into()], ..Default::default() });
     chat.items.push(chat::Item { role: Role::Assistant, text: "没改".into(), ..Default::default() });
     let back = chat::Chat::read(&chat.to_json()).unwrap();
     assert_eq!(back, chat);
-    assert!(chat.to_json()["items"][1].get("changes").is_none());
+    assert!(chat.to_json()["items"][1].get("changes").is_none() && chat.to_json()["items"][1].get("images").is_none());
+}
+
+#[test]
+fn generate_image_checks_places_and_rolls_back() {
+    use fdl_core::model::BlockKind;
+    let mut lib = Lib::new();
+    let id = lib.doc("笔记", "第一段。\n\n第二段。", None);
+    let mut shelf = lib.shelf();
+    let mut log = Changes::default();
+    let src = |lib: &mut Lib| lib.load(&id).unwrap().blocks.iter().map(|b| match &b.kind { BlockKind::Image { src, .. } => src.clone(), _ => b.text.text.clone() }).collect::<Vec<_>>();
+    // 参数不对：什么都不画、不改。
+    let first = num(&read(&shelf, &id), "第一段");
+    for (args, want) in [
+        (serde_json::json!({ "prompt": "  " }), "prompt 是空的"),
+        (serde_json::json!({ "prompt": "cat", "ratio": "16:9" }), "ratio 只能是"),
+        (serde_json::json!({ "prompt": "cat", "doc": "SPACE.md" }), "SPACE.md 里不放图"),
+        (serde_json::json!({ "prompt": "cat", "doc": "nope" }), "没有标识为 nope 的文档"),
+        (serde_json::json!({ "prompt": "cat", "doc": id, "position": "middle" }), "position 只能是"),
+        (serde_json::json!({ "prompt": "cat", "doc": id, "position": "after" }), "要给 block"),
+        (serde_json::json!({ "prompt": "cat", "doc": id, "position": "after", "block": "b999" }), "没有块 b999"),
+        (serde_json::json!({ "prompt": "fail", "doc": id }), "图像服务没有 Key"),
+    ] {
+        let out = w(&mut shelf, &mut lib, &mut log, "generate_image", args);
+        assert!(out.starts_with("错误：") && out.contains(want), "{want}: {out}");
+    }
+    assert!(lib.pictures.is_empty() && lib.painted.is_empty() && log.is_empty());
+    // 不给 doc：画在对话里，文档不动、日志里没有。
+    let out = w(&mut shelf, &mut lib, &mut log, "generate_image", serde_json::json!({ "prompt": "1girl, reading book", "me": true, "ratio": "2:3" }));
+    assert!(out.contains("显示在对话里"), "{out}");
+    assert_eq!(lib.pictures, [("1girl, reading book".to_owned(), "2:3".to_owned(), true)]);
+    assert_eq!(lib.painted, [("p1".to_owned(), None)]);
+    assert!(log.is_empty());
+    // 插在第一段后面：居中的图片块，宽高照画幅，先插块再开始画，记进日志。
+    let out = w(&mut shelf, &mut lib, &mut log, "generate_image", serde_json::json!({ "prompt": "window, sunlight", "doc": id, "position": "after", "block": first, "ratio": "3:2" }));
+    assert!(out.starts_with("已插入图片到《笔记》"), "{out}");
+    assert_eq!(src(&mut lib), ["第一段。", "assets/imagine/p2.png", "第二段。"]);
+    let doc = lib.load(&id).unwrap();
+    assert!(matches!(&doc.blocks[1].kind, BlockKind::Image { width: Some(w), height: Some(h), .. } if *w == 1216. && *h == 832.));
+    assert_eq!(doc.blocks[1].align, Align::Center);
+    assert!(!lib.pictures[1].2);
+    assert_eq!(lib.painted[1], ("p2".to_owned(), Some(id.clone())));
+    // 开头、默认结尾。
+    w(&mut shelf, &mut lib, &mut log, "generate_image", serde_json::json!({ "prompt": "a", "doc": id, "position": "start" }));
+    w(&mut shelf, &mut lib, &mut log, "generate_image", serde_json::json!({ "prompt": "b", "doc": id }));
+    assert_eq!(src(&mut lib), ["assets/imagine/p3.png", "第一段。", "assets/imagine/p2.png", "第二段。", "assets/imagine/p4.png"]);
+    assert_eq!(log.count(), 1);
+    assert!(log.lines()[0].contains("笔记"));
+    // 回滚：图片块都拿掉。
+    assert!(log.undo(&mut lib).is_empty());
+    assert_eq!(src(&mut lib), ["第一段。", "第二段。"]);
+}
+
+#[test]
+fn generate_image_is_a_write_tool() {
+    let mut lib = Lib::new();
+    let mut shelf = lib.shelf();
+    shelf.permission = Permission::Read;
+    let mut log = Changes::default();
+    let out = w(&mut shelf, &mut lib, &mut log, "generate_image", serde_json::json!({ "prompt": "cat" }));
+    assert!(out.starts_with("错误：这段对话是只读的"), "{out}");
+    assert!(lib.pictures.is_empty());
+    let Act::Ask(body) = agent::Agent::new(4).begin("画一只猫", &[], &shelf) else { panic!() };
+    assert!(!body["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "generate_image"));
+    shelf.permission = Permission::Write;
+    let Act::Ask(body) = agent::Agent::new(4).begin("画一只猫", &[], &shelf) else { panic!() };
+    assert!(body["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "generate_image"));
+    assert!(body["messages"][0]["content"].as_str().unwrap().contains("generate_image"));
+    assert_eq!(write::label(&shelf, &call("generate_image", serde_json::json!({ "prompt": "cat" }))), "画一张图");
 }

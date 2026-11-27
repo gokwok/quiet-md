@@ -1,15 +1,22 @@
 //! 助手写的工具在手机上怎么落地（`fdl_ai::run::write::Host`），主线程上：
 //! 编辑器里开着的那篇走编辑器（`Core::replace_body`，一步撤销、马上看得到；阅读模式也让它写进去），别的走文档库；
 //! 新建、移动、改名、删除、恢复和界面上的操作一样走 `Workspace` / `SharedStore`，做完刷新列表。回滚也走这里。
+//! `generate_image` 走文档里配图的那条队列（`imagine`）：`me` 时带上助手的形象（`look`，图像库里人物的名字），开始画的那张记在 `pending`（对话页等它画完再回话），
+//! 画在对话里的记在 `shown`。
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use fdl_ai::run::{self, Shelf, changes::print, write::{Host, Place}};
+use fdl_ai::run::{self, Shelf, changes::print, write::{Host, Picture, Place}};
 use gpui::{Context, Window};
 
 use crate::{app::Workspace, editor::core::Core, model::{Block, Document}, settings::{diagnostic, tr}, store::Store};
 
-pub struct Ios<'a, 'b> { pub w: &'a mut Workspace, pub window: &'a mut Window, pub cx: &'a mut Context<'b, Workspace> }
+pub struct Ios<'a, 'b> {
+    pub w: &'a mut Workspace, pub window: &'a mut Window, pub cx: &'a mut Context<'b, Workspace>,
+    pub look: Option<String>, pub pending: Option<String>, pub shown: Vec<String>,
+    /// 要画自己（`me`），助手却没绑形象。
+    pub unbound: bool,
+}
 
 fn err(e: impl std::fmt::Display) -> String { diagnostic(&e.to_string()) }
 
@@ -27,6 +34,10 @@ pub fn catalog(w: &Workspace) -> (Vec<run::Doc>, Vec<run::Folder>, Vec<run::Tras
     let mut trash: Vec<run::Trashed> = w.trash.iter().map(|t| run::Trashed { id: t.id.clone(), title: t.title.clone(), deleted: t.deleted, folder: t.folder }).collect();
     trash.sort_by_key(|t| std::cmp::Reverse(t.deleted));
     (docs, dirs, trash)
+}
+
+impl<'a, 'b> Ios<'a, 'b> {
+    pub fn new(w: &'a mut Workspace, window: &'a mut Window, cx: &'a mut Context<'b, Workspace>) -> Self { Ios { w, window, cx, look: None, pending: None, shown: vec![], unbound: false } }
 }
 
 impl Ios<'_, '_> {
@@ -123,4 +134,19 @@ impl Host for Ios<'_, '_> {
     fn restore(&mut self, id: &str) -> Result<(), String> { self.tracked(|s| s.w.store.restore(id).map(|_| ()).map_err(err)) }
 
     fn refresh(&mut self, shelf: &mut Shelf) { (shelf.docs, shelf.folders, shelf.trash) = catalog(self.w); }
+
+    fn picture(&mut self, prompt: &str, ratio: &str, me: bool) -> Result<Picture, String> {
+        if super::super::assistant::image::key().is_none() { return Err(tr("用户还没在 设置 › MarginAI › 图像 里添加 NovelAI Key，现在画不了图。", "No NovelAI key in Settings › MarginAI › Image yet, so images cannot be drawn.").into()); }
+        let cast = if me { self.look.iter().cloned().collect() } else { vec![] };
+        let (id, src, width, height) = super::super::imagine::reserve(prompt, ratio, cast).ok_or_else(|| tr("无法保存生成记录", "Could not save the image record").to_owned())?;
+        // 要画自己却没绑形象：照样画（照提示词），回话时说一声。
+        if me && self.look.is_none() { self.unbound = true; }
+        Ok(Picture { id, src, width, height })
+    }
+
+    fn paint(&mut self, id: &str, doc: Option<&str>) {
+        self.pending = Some(id.to_owned());
+        if doc.is_none() { self.shown.push(id.to_owned()); }
+        super::super::imagine::start(id, self.cx);
+    }
 }

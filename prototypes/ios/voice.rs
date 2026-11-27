@@ -33,7 +33,7 @@ const MORE: [&str; 8] = ["voice-more-0", "voice-more-1", "voice-more-2", "voice-
 const REDO: [&str; 8] = ["voice-redo-0", "voice-redo-1", "voice-redo-2", "voice-redo-3", "voice-redo-4", "voice-redo-5", "voice-redo-6", "voice-redo-7"];
 const DROP: [&str; 8] = ["voice-drop-0", "voice-drop-1", "voice-drop-2", "voice-drop-3", "voice-drop-4", "voice-drop-5", "voice-drop-6", "voice-drop-7"];
 /// 一次最多念多少字（ElevenLabs 各模型的上限不同，最小的是 5000）。
-const MAX_CHARS: usize = 5000;
+pub(crate) const MAX_CHARS: usize = 5000;
 
 /// 「…」菜单里各项的 id，按 `slot` 编号。
 macro_rules! slots { ($p:literal) => { [concat!($p, "0"), concat!($p, "1"), concat!($p, "2"), concat!($p, "3"), concat!($p, "4"), concat!($p, "5"), concat!($p, "6"), concat!($p, "7")] } }
@@ -291,7 +291,7 @@ fn refresh(then: impl FnOnce(&mut Editor, &mut Context<Editor>) + 'static) {
 }
 
 /// 音频、每个字开始的秒数、总长。
-async fn speak(key: &str, voice: &str, model: &str, lang: &str, text: &str) -> Result<(Vec<u8>, Vec<f32>, f32), String> {
+pub(crate) async fn speak(key: &str, voice: &str, model: &str, lang: &str, text: &str) -> Result<(Vec<u8>, Vec<f32>, f32), String> {
     let failed = |_| tr("无法连接 ElevenLabs", "Could not reach ElevenLabs").to_owned();
     let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(120)).build().map_err(|e| e.to_string())?;

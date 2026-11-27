@@ -10,6 +10,8 @@
 //! 任务按 id 记，不按块：生成完只写文件、不改文档，所以换篇文档、撤销重做、复制块都不用另外处理，文件在不在就是做完没有。
 //! NovelAI 同一个 Key 一次只出一张（同时发的回 429），所以排队，一次只发一个；排着的和在生成的占位一个样子。
 //! 块动作栏的「配图」（`open_passage`）给选中的块配一张：卡片上写的是可不填的补充要求，一定先整理（带前后文，人物是候选，模型挑画面里有的），图插在选中的最后一块下面。
+//! 助手的 `generate_image`（`margin_write.rs`）也走这条队列：`reserve` 先记下（插进文档的由助手那头插块），`start` 排进队，`on_done` 等它画完或失败；
+//! 画在对话里的图不进文档，由对话页照 `status` 画（`margin.rs`）。
 //! 长按生成的图（`touch.rs` 的 `lift_block` 先问 `press`）出系统菜单：生成中是「取消生成」，生成好了是「视图」（同封面的全屏看图）、「重新生成」「查看提示词」「编辑提示词」（照记录摊开改，改完按改好的重新生成）。
 use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet, VecDeque}, f32::consts::TAU, path::PathBuf, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 
@@ -108,7 +110,52 @@ thread_local! {
     static PLANNING: Cell<(u64, bool)> = const { Cell::new((0, false)) };
     /// 占位动画的时钟：所有占位共用，状态换了（排队 → 生成 → 淡出）光也不跳。
     static EPOCH: Instant = Instant::now();
+    /// 等着这一张画完（或失败、取消）的：助手的 `generate_image`。
+    static WAITERS: RefCell<HashMap<String, Vec<Box<dyn FnOnce(Result<(), String>)>>>> = RefCell::new(HashMap::new());
 }
+
+/// 这一张有了结果：告诉等着的。
+fn settle(id: &str, result: Result<(), String>) {
+    for f in WAITERS.with(|w| w.borrow_mut().remove(id)).unwrap_or_default() { f(result.clone()); }
+}
+
+// ---- 助手画的图
+
+/// `generate_image` 的画幅（`1:1`、`2:3`、`3:2`）对应的尺寸键。
+fn ratio_key(ratio: &str) -> &'static str { match ratio { "2:3" => "portrait", "3:2" => "landscape", _ => "square" } }
+
+/// 记下助手要画的一张：画面原文、画幅，出场的人（助手的形象，按名字），还不开始画。返回标识、图片块的地址和像素宽高。
+pub fn reserve(input: &str, ratio: &str, cast: Vec<String>) -> Option<(String, String, u32, u32)> {
+    let (width, height) = image::size(ratio_key(ratio));
+    let id = new_id();
+    save(&id, &Record::fresh(input.to_owned(), (width, height), None, Some(cast))).then(|| (id.clone(), src_of(&id), width, height))
+}
+
+/// 开始画（排进队里）。
+pub fn start(id: &str, cx: &mut App) { enqueue(id.to_owned(), cx); }
+
+/// 画完或失败时叫一声（已经有图了马上叫）。
+pub fn on_done(id: &str, f: impl FnOnce(Result<(), String>) + 'static) {
+    if png(id).is_file() { return f(Ok(())); }
+    WAITERS.with(|w| w.borrow_mut().entry(id.to_owned()).or_default().push(Box::new(f)));
+}
+
+/// 画在对话里的一张现在怎样。
+pub enum Status { Ready(PathBuf), Busy, Failed(String), Missing }
+pub fn status(id: &str) -> Status {
+    if !valid(id) { return Status::Missing; }
+    if png(id).is_file() { return Status::Ready(png(id)); }
+    match JOBS.with(|j| j.borrow().get(id).map(|j| match &j.state { State::Failed(e) => Some(e.clone()), _ => None })) {
+        Some(None) => Status::Busy,
+        Some(Some(e)) => Status::Failed(e),
+        None if known(id) => Status::Failed(tr("生成已中断", "Generation was interrupted").into()),
+        None => Status::Missing,
+    }
+}
+/// 记着的像素宽高。
+pub fn size_of(id: &str) -> Option<(u32, u32)> { load(id).map(|r| (r.width, r.height)).filter(|(w, h)| *w > 0 && *h > 0) }
+/// 对话里的图点了重试：照记录原样再排一次。
+pub fn retry(id: &str, cx: &mut App) { if known(id) && !png(id).is_file() { enqueue(id.to_owned(), cx); } }
 
 fn dir() -> PathBuf { Store::assets_dir().join("imagine") }
 fn valid(id: &str) -> bool { !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric()) }
@@ -485,9 +532,11 @@ fn enqueue(id: String, cx: &mut App) {
 fn forget(id: &str) {
     drop(JOBS.with(|j| j.borrow_mut().remove(id)));
     QUEUE.with(|q| q.borrow_mut().retain(|x| x != id));
+    settle(id, Err(tr("用户取消了这张图", "The user cancelled this image").into()));
 }
 
 fn fail(id: &str, error: String) {
+    settle(id, Err(error.clone()));
     let live = JOBS.with(|j| j.borrow_mut().get_mut(id).map(|job| { job.state = State::Failed(error); job.live.take() }));
     if let Some(Some(live)) = live { live.ticket.fail(); }
 }
@@ -524,7 +573,7 @@ fn pump(cx: &mut App) {
                 crate::store::write_file(&png(&id), &bytes).map_err(|_| tr("无法保存图片", "Could not save the image").to_owned())
             });
             match written {
-                Ok(()) => { DONE.with(|d| d.borrow_mut().insert(id.clone(), Instant::now())); drop(JOBS.with(|j| j.borrow_mut().remove(&id))); }
+                Ok(()) => { DONE.with(|d| d.borrow_mut().insert(id.clone(), Instant::now())); drop(JOBS.with(|j| j.borrow_mut().remove(&id))); settle(&id, Ok(())); }
                 Err(e) => fail(&id, e),
             }
             refresh();
@@ -551,8 +600,8 @@ pub fn placeholder(src: &str, local: bool, w: f32, h: f32, radius: f32) -> Optio
         let failed = JOBS.with(|j| j.borrow().get(&id).map(|j| match &j.state { State::Failed(e) => Some(e.clone()), _ => None }));
         match failed {
             Some(None) => Some(developing(w, h, radius).into_any_element()),
-            Some(Some(e)) => Some(stopped(id, tr("生成失败", "Generation failed"), Some(e), w, h, radius)),
-            None if known(&id) => Some(stopped(id, tr("生成已中断", "Generation was interrupted"), None, w, h, radius)),
+            Some(Some(e)) => Some(stopped(id, tr("生成失败", "Generation failed"), Some(e), w, h, radius, false)),
+            None if known(&id) => Some(stopped(id, tr("生成已中断", "Generation was interrupted"), None, w, h, radius, false)),
             // 不是这里生成的（文件丢了、也没有记录）：照普通图片显示「找不到」。
             None => return None,
         }
@@ -588,7 +637,8 @@ pub(crate) fn developing(w: f32, h: f32, radius: f32) -> Div {
 }
 
 /// 停下了（失败、中断）：浅底上写一句为什么，点一下重试。
-fn stopped(id: String, title: &'static str, detail: Option<String>, w: f32, h: f32, radius: f32) -> AnyElement {
+/// `chat`：画在助手对话里的（没有文档块），点一下照记录原样再排一次。
+fn stopped(id: String, title: &'static str, detail: Option<String>, w: f32, h: f32, radius: f32, chat: bool) -> AnyElement {
     let roomy = w > 160. && h > 120.;
     div().absolute().inset_0().rounded(px(radius)).overflow_hidden().bg(Theme::fill_hover()).px(px(24.))
         .flex().flex_col().items_center().justify_center().gap(px(4.)).font_family(theme::UI_FONT).text_center()
@@ -601,10 +651,35 @@ fn stopped(id: String, title: &'static str, detail: Option<String>, w: f32, h: f
             window.prevent_default();
             if PRESSED.with(|p| p.take()).is_some_and(|t| t.elapsed() < Duration::from_secs(3)) { return; }
             super::glass::haptic();
+            if chat { retry(&id, cx); return window.refresh(); }
             TARGET.with(|t| *t.borrow_mut() = Some(id.clone()));
             menu::chosen(RETRY);
         })
         .into_any_element()
+}
+
+/// 助手对话里的一张（`generate_image` 不给文档时）：画好了是图，点一下全屏看（那里能存到相册、分享）；
+/// 在画是生成中的占位，失败了点一下重试。`w` 是可用的宽，高照成图的比例。
+pub fn chat_picture(id: &str, w: f32) -> AnyElement {
+    let (pw, ph) = size_of(id).unwrap_or((1, 1));
+    let h = (w * ph as f32 / pw as f32).min(w * 1.5);
+    let w = h * pw as f32 / ph as f32;
+    const R: f32 = 12.;
+    let inner = match status(id) {
+        Status::Ready(path) => {
+            let key = id.to_owned();
+            let at = path.clone();
+            div().id(SharedString::from(format!("margin-picture-{id}"))).absolute().inset_0().rounded(px(R)).overflow_hidden()
+                .child(img(path).size_full().rounded(px(R)).object_fit(ObjectFit::Cover))
+                .child(canvas(move |b, _, _| { FRAMES.with(|f| f.borrow_mut().insert(key, b)); }, |_, _, _, _| {}).absolute().inset_0())
+                .on_click({ let id = id.to_owned(); move |_, _, _| if let Some(frame) = FRAMES.with(|f| f.borrow().get(&id).copied()) { super::glass::haptic(); super::coveredit::view(&at, frame, R as f64); } })
+                .into_any_element()
+        }
+        Status::Busy => developing(w, h, R).into_any_element(),
+        Status::Failed(e) => stopped(id.to_owned(), tr("生成失败", "Generation failed"), Some(e), w, h, R, true),
+        Status::Missing => stopped(id.to_owned(), tr("找不到这张图", "Image missing"), None, w, h, R, true),
+    };
+    div().relative().flex_none().w(px(w)).h(px(h)).child(inner).into_any_element()
 }
 
 // ---- 长按菜单

@@ -2,9 +2,10 @@
 //! 第一级是助手的列表（头像、名字、设定的第一行），最后一行「添加助手」；内置的 MarginAI 排最前。
 //! 点开一个：大头像（右下角换头像，借语音的「选择头像」页）、名称；设定和开场白（在系统文字页里改）；
 //! 核心（酒馆 / Agent，酒馆再选预设）、默认权限、模型（跟随全局，或借「选择模型」页选一个）、形象（图像的人物）、声线（语音角色）；
+//! 头像下面还有「从形象画一张」：照绑定的人物和当前画风画一张方图，先摆在大头像的位置，选用了才换上，不满意重画。
 //! 复制一份、删除（内置的删不了）。每改一处整份写回去。
 //! 设置 › 高级设置 里的「MarginAI 资料位置」也在这里：全局库放 iCloud 还是本机（`fdl_ai::global::set_place`）。
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::{Cell, RefCell}, collections::HashMap, rc::Rc, sync::Arc, time::Duration};
 
 use fdl_ai::assistants::{Assistant, Assistants, Core, Kind, Model, Permission};
 use fdl_ai::global::{self, Place};
@@ -41,7 +42,16 @@ thread_local! {
     static ALL: RefCell<Option<Assistants>> = const { RefCell::new(None) };
     /// 正在看的助手。
     static EDITING: RefCell<String> = const { RefCell::new(String::new()) };
+    /// 从形象画的头像：哪个助手的、画到哪了。
+    static DRAFT: RefCell<Option<(String, Draft)>> = const { RefCell::new(None) };
+    /// 第几次画（重画、放弃就加一，晚到的不要）。
+    static DRAW_RUN: Cell<u64> = const { Cell::new(0) };
 }
+
+enum Draft { Drawing, Ready(Arc<Image>, Vec<u8>) }
+
+/// 画头像的场景：照人物的外貌画半身，脸在正中，背景简单（头像是圆的，裁掉四角）。
+const PORTRAIT: &str = "portrait, upper body, looking at viewer, centered, simple background, soft lighting";
 
 fn dir() -> std::path::PathBuf { super::super::assist::dir() }
 fn haptic() { super::super::glass::haptic(); }
@@ -137,6 +147,7 @@ pub fn page(cx: &mut Context<Workspace>) -> AnyElement {
 }
 
 fn show(w: &mut Workspace, id: String, cx: &mut Context<Workspace>) {
+    if id != editing() { drop_draft(); }
     EDITING.with(|e| *e.borrow_mut() = id);
     w.open_settings(Page::AssistantDetail, cx);
 }
@@ -187,6 +198,59 @@ fn set_avatar(next: Option<String>, cx: &mut Context<Workspace>) {
     cx.notify();
 }
 
+/// 「从形象画一张」画不了的原因：没绑形象、人物不见了、没有图像的 Key。
+fn cannot_draw(a: &Assistant) -> Option<&'static str> {
+    let Some(id) = a.character.as_deref() else { return Some(tr("先在下面「形象」里选一个人物", "Choose a person under Look first")) };
+    let Some(person) = super::prompts::lib().characters.into_iter().find(|c| c.id == id) else { return Some(tr("绑定的人物找不到了，重新选一个形象", "The bound person is missing; choose a Look again")) };
+    if person.look.trim().is_empty() { return Some(tr("这个人物还没写外貌，先在 设置 › MarginAI › 图像 里补上", "This person has no look tags yet; add them in Settings › MarginAI › Image")) }
+    if super::image::key().is_none() { return Some(tr("先在 设置 › MarginAI › 图像 里添加 NovelAI Key", "Add a NovelAI key in Settings › MarginAI › Image first")) }
+    None
+}
+
+/// 照形象画一张方图，画好了摆在大头像的位置等选用。
+fn draw_avatar(w: &mut Workspace, cx: &mut Context<Workspace>) {
+    let Some(a) = open_one() else { return };
+    if let Some(why) = cannot_draw(&a) { return toast(w, why, cx); }
+    let Some(key) = super::image::key() else { return };
+    let lib = super::prompts::lib();
+    let Some(person) = a.character.as_deref().and_then(|id| lib.characters.iter().find(|c| c.id == id)).cloned() else { return };
+    let style = lib.current_style(crate::settings::prefs().english);
+    let p = fdl_ai::imagine::assemble(style.as_ref(), &[&person], PORTRAIT, None, (lib.quality(), lib.quality_negative()));
+    let request = super::image::Request { prompt: p.base, negative: p.negative, characters: p.characters.into_iter().map(|c| (c.tags, c.negative)).collect(), seed: None };
+    let (model, size, url) = (super::image::current().0, super::image::size("square"), super::image::endpoint());
+    let run = DRAW_RUN.with(|r| { r.set(r.get() + 1); r.get() });
+    DRAFT.with(|d| *d.borrow_mut() = Some((a.id.clone(), Draft::Drawing)));
+    cx.notify();
+    let (tx, rx) = futures::channel::oneshot::channel();
+    super::llm::runtime().spawn(async move { let _ = tx.send(super::image::generate(&url, &key, model, size, &request).await); });
+    cx.spawn(async move |this, cx| {
+        let result = rx.await.unwrap_or_else(|_| Err(tr("请求中断了", "The request was interrupted").into()));
+        if DRAW_RUN.with(Cell::get) != run { return; }
+        let _ = this.update(cx, |w, cx| {
+            match result {
+                Ok(png) => DRAFT.with(|d| if let Some((_, draft)) = d.borrow_mut().as_mut() { *draft = Draft::Ready(Arc::new(Image::from_bytes(ImageFormat::Png, png.clone())), png); }),
+                Err(e) => { DRAFT.with(|d| *d.borrow_mut() = None); toast(w, &e, cx); }
+            }
+            cx.notify();
+        });
+    }).detach();
+}
+
+/// 不要这张（或换了页）：在画的也不要了。
+fn drop_draft() { DRAW_RUN.with(|r| r.set(r.get() + 1)); DRAFT.with(|d| *d.borrow_mut() = None); }
+
+/// 选用画好的：和从照片选一样缩成头像存进全局库，换上。
+fn use_draft(w: &mut Workspace, cx: &mut Context<Workspace>) {
+    let Some(png) = DRAFT.with(|d| match d.borrow().as_ref() { Some((id, Draft::Ready(_, png))) if *id == editing() => Some(png.clone()), _ => None }) else { return };
+    let tmp = std::env::temp_dir().join(format!("margin-avatar-{}.png", uuid::Uuid::new_v4().simple()));
+    let saved = std::fs::write(&tmp, &png).map_err(anyhow::Error::from).and_then(|()| super::roles::write_avatar(&tmp));
+    let _ = std::fs::remove_file(&tmp);
+    match saved {
+        Ok(id) => { drop_draft(); set_avatar(Some(id), cx); }
+        Err(e) => toast(w, &crate::settings::diagnostic(&e.to_string()), cx),
+    }
+}
+
 // ---- 一个助手
 
 /// 一段长字（设定、开场白）：小标题和预览，点开在系统文字页里改。
@@ -218,9 +282,28 @@ pub fn detail(cx: &mut Context<Workspace>) -> AnyElement {
             else { d.bg(Theme::bg_body()).shadow(theme::shadow_button()).flex().items_center().justify_center().child(ui::icon("pen-line", 15., Theme::text())) })
         .on_click(cx.listener(move |w, _, _, cx| { if glass { super::super::glass::pulse("marginai-avatar-glass"); } change_avatar(w, cx); }));
     let kind = a.core.kind();
+    // 从形象画的那张：在画是转圈，画好了先摆在头像的位置，底下选用 / 重画 / 放弃。
+    let draft = DRAFT.with(|d| d.borrow().as_ref().filter(|(id, _)| *id == a.id).map(|(_, d)| match d { Draft::Drawing => None, Draft::Ready(img, _) => Some(img.clone()) }));
+    let avatar = match &draft {
+        Some(Some(image)) => img(image.clone()).size(px(SIZE)).flex_none().rounded_full().into_any_element(),
+        Some(None) => div().size(px(SIZE)).flex_none().rounded_full().bg(general::card_bg()).flex().items_center().justify_center()
+            .child(svg().path("editor-icons/spinner.svg").size(px(28.)).flex_none().text_color(Theme::text_caption())
+                .with_animation("marginai-draw-spin", Animation::new(Duration::from_millis(900)).repeat(), |s, t| s.with_transformation(Transformation::rotate(percentage(t)))))
+            .into_any_element(),
+        None => face(&a, SIZE),
+    };
+    let shadow = matches!(draft, Some(Some(_))) || draft.is_none() && super::roles::avatar_image(a.avatar.as_deref(), 1.).is_some();
+    let pick = |id: &'static str, label: &'static str, color: Hsla, on: fn(&mut Workspace, &mut Context<Workspace>)| div().id(id).px(px(14.)).h(px(36.)).flex().items_center().rounded_full()
+        .active(|d| d.bg(Theme::fill_pressed())).text_size(px(16.)).text_color(color).child(label)
+        .on_click(cx.listener(move |w, _, _, cx| { haptic(); on(w, cx); }));
+    let choices = matches!(draft, Some(Some(_))).then(|| div().mt(px(12.)).flex().items_center().gap(px(4.))
+        .child(pick("marginai-draft-use", tr("选用", "Use"), Theme::primary(), use_draft))
+        .child(pick("marginai-draft-again", tr("重画", "Redraw"), Theme::primary(), draw_avatar))
+        .child(pick("marginai-draft-drop", tr("放弃", "Discard"), Theme::text_caption(), |_, cx| { drop_draft(); cx.notify(); })));
     let hero = div().w_full().px(px(24.)).flex().flex_col().items_center()
         // 首字的圆底是半透明的，垫阴影会透出一团灰：只给图片垫。
-        .child(div().relative().size(px(SIZE)).child(div().rounded_full().when(super::roles::avatar_image(a.avatar.as_deref(), 1.).is_some(), |d| d.shadow(theme::shadow_card())).child(face(&a, SIZE))).child(camera))
+        .child(div().relative().size(px(SIZE)).child(div().rounded_full().when(shadow, |d| d.shadow(theme::shadow_card())).child(avatar)).when(draft.is_none(), |d| d.child(camera)))
+        .children(choices)
         .child(div().mt(px(18.)).max_w_full().truncate().text_size(px(28.)).line_height(px(34.)).font_weight(FontWeight::BOLD).text_color(Theme::text()).child(a.name.clone()))
         .child(div().mt(px(4.)).text_size(px(14.)).line_height(px(19.)).text_color(Theme::text_caption()).child(core_name(kind)));
 
@@ -232,6 +315,14 @@ pub fn detail(cx: &mut Context<Workspace>) -> AnyElement {
         })).into_any_element(),
         general::action("marginai-photo", tr("更换头像", "Change Avatar"), false, change_avatar, cx),
     ];
+    // 从形象画：画不了的灰着，点了说为什么；在画的时候也灰着。
+    let drawing = matches!(draft, Some(None));
+    basics.push(if cannot_draw(&a).is_none() && !drawing { general::action("marginai-photo-draw", tr("从形象画一张", "Draw from Look"), false, draw_avatar, cx) } else {
+        div().id("marginai-photo-draw").w_full().h(px(52.)).px(px(18.)).flex().items_center().text_size(px(17.)).text_color(Theme::text_placeholder())
+            .child(if drawing { tr("正在画…", "Drawing…") } else { tr("从形象画一张", "Draw from Look") })
+            .on_click(cx.listener(|w, _, _, cx| if let Some(a) = open_one() && let Some(why) = cannot_draw(&a) { toast(w, why, cx); }))
+            .into_any_element()
+    });
     if a.avatar.is_some() { basics.push(general::action("marginai-photo-reset", tr("恢复默认头像", "Use Default Avatar"), false, |_, cx| set_avatar(None, cx), cx)); }
 
     // 核心：酒馆再选预设。
