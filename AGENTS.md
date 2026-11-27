@@ -40,6 +40,7 @@ scripts/check.sh        # 桌面 workspace：cargo test --release + 指南校验
 ```sh
 prototypes/ios/run-simulator.sh            # 不带参数：打补丁并构建签名模拟器包
 prototypes/ios/verify-simulator.sh "$dev"  # 专用 iPhone 18 Pro 模拟器 UI 冒烟测试
+QUIET_MD_IOS_PROFILE=… prototypes/ios/run-device.sh "$udid"  # 真机：构建、签名、安装并启动
 ```
 
 改了编辑内核时，多跑一些随机种子：`FDL_FUZZ_SEEDS=2000 cargo test --release random_edits`。

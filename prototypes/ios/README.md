@@ -68,7 +68,7 @@ iOS 自己的代码在本目录，补丁里只留挂接点：
 - **每篇文档可以有自己的样式。** 文档页「…」›「样式」：文字颜色、字体、纸的颜色、纸后面的背景（纯色、渐变、图片）、分隔符（线、和纸胶带、涂鸦），还有一个样式图库。「字体」页照 Craft：没选的是一排圆钮（Aa / Ss / 00 / Rr，各用自己的字体写），选中的那颗拉长成「字样 名字」的胶囊。样式记在索引里（`Meta::style`），不进文档文件；目前只有手机上能设、能看到。图库依次列出「你的样式」（有保存时显示）、「内置样式」、「Astra 的样式」、「Claude 的样式」和「Neon 的样式」。Astra 和 Neon 的各 12 套均有配套背景、封面和胶带；点选带封面的作者样式只给还没有封面的文档补上封面。改过的样式点「保存」时起名，存在文档库旁的 `styles.json`；卡片长按或底栏「…」可以重命名、删除、设置为默认样式（`default-style.json`，新建文档时由 `Workspace::new_doc` 调 `stylepanel::apply_default` 套上）。
 - **背景设置。** 在无背景、纯色、渐变和照片之间切换，纯色支持自选，渐变可分别设置两端和方向。照片支持换一组建议、从系统相册或文件选取、在 Unsplash 搜索并选用照片（构建里没有 Unsplash Key 时退回 Wikimedia Commons）。选中的在线照片和署名保存在文档库中，之后可以离线使用。照片可模糊，纯色、渐变和照片均可在沉浸式与淡化之间切换。
 - **封面设置。** 样式面板的「封面」格进到「选择一张图片」：随机、Unsplash、相册三格，下面六张自带封面，点了立刻换；有封面时标题栏的重置会去掉封面。
-- **Unsplash（`unsplash.rs`）。** 系统半屏卡片：左上 ✕、标题，两列瀑布流（按原图比例，左下摄影师名），底部玻璃搜索框跟着键盘。空关键词是编辑精选，滚到底加载下一页。选中后按 Unsplash 规范先请求 `download_location`，再下载 1600 宽的 JPEG 设为封面或背景（背景照片连同作者和链接一起存）。Access Key 不进仓库：放在 `prototypes/ios/unsplash.key`（已忽略），`run-simulator.sh` 和 `testflight/archive.sh` 构建时读成 `UNSPLASH_ACCESS_KEY` 编进二进制；手动构建真机包时自己导出这个环境变量。
+- **Unsplash（`unsplash.rs`）。** 系统半屏卡片：左上 ✕、标题，两列瀑布流（按原图比例，左下摄影师名），底部玻璃搜索框跟着键盘。空关键词是编辑精选，滚到底加载下一页。选中后按 Unsplash 规范先请求 `download_location`，再下载 1600 宽的 JPEG 设为封面或背景（背景照片连同作者和链接一起存）。Access Key 不进仓库：放在 `prototypes/ios/unsplash.key`（已忽略），`run-simulator.sh`、`run-device.sh` 和 `testflight/archive.sh` 构建时读成 `UNSPLASH_ACCESS_KEY` 编进二进制；手动构建时自己导出这个环境变量。
 - **底部没有标签栏，首页是唯一的起点。** 首页、文件夹和浏览页右下角只有一颗玻璃的新建按钮。首页「收藏」一栏照 Craft：标题的箭头进「收藏」整页（大标题、搜索、一块说明、卡片网格），右边「…」是收藏文档（系统半屏面板里列出文档，点一下收藏 / 取消，可搜索，`starpick.rs`）、自定义主页、折叠收藏；收藏的文档卡片在标题那一行末尾有一颗金色的星。首页「文件夹」里每个文件夹右边的箭头可以就地展开、收起（里面的文件夹还能再展开，每层缩进 16pt），点的时候轻震一下；点行的其余地方照旧进文件夹。设置从首页左上角的空间头像进；回收站是首页最后的「最近删除」，点进去和「所有文档」同一套：左上玻璃返回，右上玻璃「…」（清空回收站），大标题跟着内容滚走，下面是铺在底色上的行（图标、标题、还剩几天），长按「恢复 / 彻底删除」。两页都在主页这一摞里，左缘右滑跟手回首页；滑动时首页的顶部玻璃先收起，滑完再出来。主页不再拉抽屉（文档树和主页的卡片是同一份内容）。
 - **设置从主页进入，不用侧栏。** 设置首页顶上是空间的大头像和「空间名 ⌄」，下面有「空间设置」「助手设置」「常规设置」；分类页使用居中页名和玻璃返回钮。页面是首页的底色，分组是不描边的卡片。可用左缘右滑返回上一级。
 - **助手设置。** 按「文本」「语音」「图像」排列。语音页可以添加、替换或移除 ElevenLabs API Key（存放在当前设备的系统钥匙串中），用一排横向的模型卡片选择默认模型（初始为 Eleven v4）。「语音角色」是一排可横滑的圆头像，长按一个拖动可以排序（拖到两头自动滚），这个顺序也是配音菜单里角色的顺序；「添加」进入音色库，可搜索、按女声 / 男声 / 我的筛选，轻点一行试听，点星标收藏为本地角色。角色可以单独设置本地名称和头像，与 ElevenLabs 上的音色一一对应，不改动远端。换头像进「选择头像」：第一个圆从照片里选（裁成正方形），后面是 38 个自带头像（`avatars/*.webp`，语音角色和图像的人物共用，编进二进制，不放在 `assets/` 里，免得桌面版也打包进去）。没换头像的音色用按 voice_id 生成的柔光球。试听放的是 ElevenLabs 托管的样音（请求不带 API Key，不花额度），用 `AVAudioPlayer` 播放，同一时间只放一个，离开语音的几页时停止。筛选、试听、换头像这些按钮在 iOS 26 起是原生 Liquid Glass。文本页配置 OpenAI 兼容的文本模型：上面两张并排的卡片是「主模型」（能力优先）和「快速模型」（速度优先），各自指向某个服务商的某个模型，两个可以来自不同的服务商。「服务商」可以添加多个（系统菜单里有 OpenAI、DeepSeek、OpenRouter、硅基流动，或自定义地址），每家一颗柔光球；点进去改名称、接口地址和 API Key（按服务商分开存在钥匙串里），或删除（同时删掉 Key、清空用着它的位置）。点卡片进第二级的模型列表：所有服务商的模型按服务商分组（向各家的 `/models` 要，多于八个时可搜索，也可以手动输入模型 ID）。模型给了 `reasoning_levels` 时，「推理强度」里多一行可选。「测试连接」给两个模型同时发一句 ping，收到第一个字就算通，写用时；不通就写服务自己的说法。协议、SSE 解析用 async-openai（byot，宽松读 JSON），网络是 reqwest + 系统 TLS，跑在一个单线程的 tokio 运行时上（`assistant_llm.rs`）；它不走 NSURLSession，所以 `http://` 地址不受 ATS 限制。图像页只接 NovelAI 协议：同样在钥匙串里存一个 API Key；「接口地址」默认是官方的 `image.novelai.net`，也可以填同协议的别的服务（填根地址就接上 `/ai/generate-image`，已带这一段的原样用；直接回 PNG、不包 zip 的也认），Key 按地址分开存，换回官方不用重填，「恢复官方地址」清掉自定义的地址；「模型」是一排四个带底图的小方块（这一页自己的样子，不和语音页共用）：大数字是哪一代（5 / 4.5），下面小字是完整 / 精选，底图每一代一张（`canvas/model-5.webp` 蓝天、`model-45.webp` 土路，从画布自带的图里裁的）；选中的外面描一圈，方块上面一行写它的名字和一句说明（照官方文档的说法：Full 数据更全，Curated 更干净）（初始为 V5 完整）；画幅三种：竖版 2:3（832 × 1216，初始）、横版 3:2（1216 × 832）、方形 1:1（1024 × 1024）；步数 28、CFG 3.5、采样器 `k_euler_ancestral` 固定，种子每次随机。请求发到接口地址的 `/ai/generate-image`，几个模型都要 V4 那种 `v4_prompt` / `v4_negative_prompt` 结构，`params_version` V5 写 4、V4.5 写 3，不让服务端加质量词和负面预设；返回的 zip 里只有一张 PNG（本地头不带长度，从数据起点解到 deflate 流结束）。页面最上面是「画布」：顶到屏幕上沿和左右两边（页面内容用负的外边距伸出去），高矮跟着画幅变（竖版 500、方形 410、横版 340，换的时候变过去），下面一张圆角的面板压着它的下沿，托着其余设置；面板抬头的大字是现在的画风（平时下面不写别的）。试画过的图铺满画布（裁着看，点开用 `coveredit::view` 看全图），上沿一道很淡的底色让页名看得清；没画过时铺的是这种画幅自带的一张图（`canvas/portrait.webp`、`landscape.webp`、`square.webp`，使用者提供，编进二进制，只这一页用，不放在 `assets/` 里）。画布下沿浮着一排原生玻璃（没有 Liquid Glass 的系统上是 GPUI 画的实心胶囊）：左边三格是画幅（`glass::page_tab_pane`），右边一颗带字的胶囊是试画的对象（只有字：「静物」或人物的名字；点了出系统菜单：「静物场景」或一个写了外貌的人物，外貌和排除照正式生成那样拼），最右是「试画」（和旁边一样的透明玻璃，只有半粗的字，没有图标），用现在的模型、尺寸、画风和质量词生成一张图；生成中画布是占位（和文档里的同一个 `imagine::developing`），按钮变成「停止」，面板抬头下面多一行「正在生成…」，失败时这一行写原因，画好了就收起。这张图存在临时目录（`margin-image-test.png` 和同名 `.json`），下次进来还在，换了接口地址或 Key 就删掉。没有 Key 时没有右边两颗，「服务商连接」排在面板最前；连上以后它排到页面最后。静物试画成功后，把图居中裁成 3:2 存成这个画风的样张（和头像照片一样只在这台设备上，`assistant-style-thumbs/`，文件名是画风标识加标签的指纹，改了标签就不再用旧的），画风那排用。「生成」里是「质量词」「质量排除」两行：每张图都带的画质标签和负向标签（默认的写在 `fdl_ai::imagine::QUALITY` / `QUALITY_NEGATIVE`，带权重的 `2.0::…::` 原样保留），右边灰字写「默认」「已修改」或「无」，点开在文字页里改，改回和默认一样就算默认；标题下面一行等宽灰字是现在的内容（放不下就截断），改过时最后多一行「恢复默认质量词」，两行一起恢复。质量词和画风是两回事：画风管画成什么样，质量词管画得好不好。「画风」是一排横滑的 3:2 小图，名字在下面：「默认」（不加画风标签）、内置的动画 / 厚涂 / 水彩 / 黑白线稿 / 绘本，和自己建的，最后一张「新建画风」；有样张的显示样张，没有的写一句话或它的标签；选中的描一圈、右上角打勾；点一张就是以后生图用的画风，再点选中的那张或长按选「编辑」进它的页面（名称、标签、排除，长字在系统文字页里改）。内置的只能看，可以「复制一份」再改；标签和排除拆成胶囊显示（带权重的组一颗，前面写倍数；超过 16 颗折成「+N」），人物的外貌和排除也一样，点开整段改。「人物」是一排和语音角色一样的横滑圆头像（名字在下面，最前面是「添加」；没换头像的是名字的第一个字），点进去上面是大头像（右下角换头像，借语音的「选择头像」页，选完回到人物；照片只存在这台设备上，别的设备同步过来的人物照片不在就显示首字），下面改名称、别名（少于两个字的不收，免得「夕」撞上「夕阳」）、外貌标签（空着时灰字示例 `girl, long black hair, red eyes, serafuku`）和排除标签（只压这个人的特征，如 `long hair`，原样发、不拆权重）。画风和人物存在空间的 `tavern/imagine.json`，跟着 iCloud 走；拼装在 `crates/ai/src/imagine.rs`。
@@ -153,14 +153,13 @@ prototypes/ios/run-simulator.sh "$device"
 
 `Cargo.toml` 关掉了 `gpui-pre` 的调试断言：桌面代码会对同一元素再次设置 hover / active 样式（后设的生效），上游只在调试构建里对此 panic。
 
-调试构建没有优化，换页和滚动会明显发涩；要看真实的流畅度，用 `cargo build --release` 的构建。
+调试构建没有优化，换页和滚动会明显发涩；要看真实的流畅度，用 `RELEASE=1 prototypes/ios/run-simulator.sh "$device"` 构建 release 包。调试构建也不带调试信息（`[profile.dev] debug = 0`），要在 lldb 里按源码行下断点，先临时改成 `debug = "line-tables-only"`。
 
 ## 在 Apple Silicon 模拟器运行
 
-需要 带 iOS 26 或更新 SDK 的 Xcode、已安装的 iOS Simulator 运行时，以及仓库指定的 Rust 工具链。
+需要带 iOS 26 或更新 SDK 的 Xcode、已安装的 iOS Simulator 运行时，以及仓库指定的 Rust 工具链。`rust-toolchain.toml` 已声明 `aarch64-apple-ios` 和 `aarch64-apple-ios-sim` 两个目标，rustup 首次构建时自动安装。
 
 ```sh
-rustup target add --toolchain 1.99.1 aarch64-apple-ios-sim
 xcrun simctl list devices available
 device="<现有 Quiet.md Smoke Diagnostic 的 UDID>"
 xcrun simctl bootstatus "$device" -b
@@ -171,15 +170,25 @@ prototypes/ios/run-simulator.sh "$device"
 
 省略设备参数时，脚本只构建并签名 `target/ios/Quiet.md Prototype.app`。原型使用独立的 bundle ID，文档库在模拟器的沙盒里。测试时用 `SIMCTL_CHILD_QUIET_MD_HOME` 指定别的文档库；相对路径落在沙盒的临时目录。
 
-## 真机开发签名
+## 真机开发签名与安装
 
-先准备为真机目标 `aarch64-apple-ios` 构建的 App 包，以及为 `com.s1dashu.quietmd.prototype` 创建的开发描述文件。描述文件须包含测试设备、允许 [QuietMd.entitlements](QuietMd.entitlements) 请求的 iCloud 权限，并与本机钥匙串中的开发签名身份匹配。对已有的真机包执行：
+先准备为 `com.s1dashu.quietmd.prototype` 创建的 iOS 开发描述文件：须是显式 App ID（通配符的开不了 iCloud）、包含测试设备、允许 [QuietMd.entitlements](QuietMd.entitlements) 请求的 iCloud 权限，并与本机钥匙串中的开发签名身份匹配。iPhone 要打开开发者模式（设置 › 隐私与安全性 › 开发者模式），并和这台 Mac 配对过。描述文件、签名私钥和设备标识由开发者本地管理，只通过参数和环境变量传给脚本，不写进仓库。
+
+```sh
+export QUIET_MD_IOS_PROFILE=/path/to/profile.mobileprovision
+xcrun devicectl list devices
+prototypes/ios/run-device.sh "<设备 UDID 或名称>"
+```
+
+脚本拼装源码，构建 release 版的 `aarch64-apple-ios` 程序，组成 `target/ios/device/Quiet.md Prototype.app`，用 `sign-device.py` 嵌入描述文件、签名并核对最终权限，再用 `devicectl` 安装和启动。设备也可以用 `QUIET_MD_IOS_DEVICE` 给；都不给时只构建并签名。`DEBUG=1` 构建 debug 包，`BUILD_NUMBER=<n>` 改包里的构建号，`CONSOLE=1` 启动后接上应用的输出。
+
+已有真机包时，也可以单独签名：
 
 ```sh
 python3 prototypes/ios/sign-device.py /path/to/profile.mobileprovision --app "/path/to/Quiet.md Prototype.app"
 ```
 
-脚本会检查描述文件，将其嵌入指定的 App 包，重新签名并核对最终权限。描述文件和签名私钥由开发者本地管理。
+开发包和 TestFlight 包是同一个 bundle ID，装上开发包会替换 TestFlight 版（数据保留），要回去就在 TestFlight 里重新安装。开发包签的是 iCloud 的 Development 环境，TestFlight 是 Production，CloudKit 的数据两边不相通；测 iCloud 同步时几台设备要装同一种包。release 程序的 dSYM 在 `target/ios/aarch64-apple-ios/release/quiet_md_ios.dSYM`。
 
 ## 通过 TestFlight 发布到 iPhone
 
@@ -198,7 +207,7 @@ python3 prototypes/ios/sign-device.py /path/to/profile.mobileprovision --app "/p
    ```
 
    归档脚本打包 Release 真机程序、App Store 图标和对应的 Rust dSYM，验证签名、arm64 UUID 和调试行表。保留每次发布的归档以便解析崩溃。上传脚本使用 Xcode 自动管理分发签名，保留构建号，随包上传符号，并将构建限定为内部测试。使用 Xcode 管理开发签名时可省略 `DEVELOPMENT_PROFILE`。
-3. 等 Apple 完成处理。若状态为 **Missing Compliance**，按该构建实际使用的加密实现回答问卷。确认目标构建状态为 **Testing**，已关联「个人设备测试」，且目标账号显示 **Invited** 或已接受邀请。遇到登录或双重验证时，由账号持有人在 Apple 页面完成。
+3. 等 Apple 完成处理。`Info.plist` 声明了 `ITSAppUsesNonExemptEncryption` 为否（只用系统 TLS 走 HTTPS），正常不会停在 **Missing Compliance**；以后加了别的加密实现，要改这个声明并按实际回答问卷。确认目标构建状态为 **Testing**，已关联「个人设备测试」，且目标账号显示 **Invited** 或已接受邀请。遇到登录或双重验证时，由账号持有人在 Apple 页面完成。
 4. 首次在 iPhone 安装 TestFlight，从 Apple 邀请邮件进入并点「接受」和「安装」。以后从 TestFlight 更新，也可以开启自动更新。每个构建可测试 90 天。
 
 ## 验证

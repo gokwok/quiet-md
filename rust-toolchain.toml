@@ -1,4 +1,6 @@
 [toolchain]
 channel = "1.99.1"
 components = ["clippy"]
+# iOS 原型（prototypes/ios）的真机和 Apple Silicon 模拟器目标。
+targets = ["aarch64-apple-ios", "aarch64-apple-ios-sim"]
 profile = "minimal"
