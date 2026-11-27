@@ -5,22 +5,23 @@
 //! 文件夹页左下角的 ✦ 带这个文件夹，主页的 ✦ 什么都不带（整个空间本来就是范围）。从别处进来开一段新对话；从同一处进来接着上次那段。
 //!
 //! 用哪个助手：这段对话自己选的 > 空间的默认助手 > 内置的 MarginAI（`fdl_ai::assistants::Assistants::resolve`）。
-//! 卡片左下的胶囊是助手（头像和名字），菜单里换助手、临时换核心（酒馆 / Agent）；旁边是权限（只读 / 可编辑，默认照助手的；
-//! 这一版只记着传给 run，写的工具以后接）。用户说了第一句以后助手和核心就定了（换的话开新对话），权限随时能改。
+//! 卡片左下的胶囊是助手（头像和名字），菜单里换助手、临时换核心（酒馆 / Agent）；旁边是权限（只读 / 可编辑，按对话记，默认照助手的；
+//! 酒馆不调工具，权限灰着）。用户说了第一句以后助手和核心就定了（换的话开新对话），权限随时能改。
 //! 新对话先显示助手的开场白（有的话），说第一句时它才记进对话。
 //!
-//! 一次 run 由选定的核心驱动（`fdl_ai::run`）：酒馆一次请求，Agent 带只读文档工具循环。宿主在这里：素材快照（`Shelf`：
+//! 一次 run 由选定的核心驱动（`fdl_ai::run`）：酒馆一次请求，Agent 带文档工具循环（可编辑时还有写的工具）。宿主在这里：素材快照（`Shelf`：
 //! 空间的 `SPACE.md`、助手的名字和设定、附带的资源）在主线程上备好，整个 run 在 `assistant::llm` 的运行时上跑（网络、执行工具、成形），
 //! 每一步经 channel 交回主线程给界面。一次只有一个 run；关掉页面、切到后台照样跑完（`background`）。
-//! 对话记录存在空间的 `assistant/chats/`（`run::chat`）。
-//!
-//! 第一版不往文档里插：回复可以拷贝。
-use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::{Duration, Instant}};
+//! 读的工具在运行时上照快照做；写的工具带着快照交回主线程（`Up::Write`），照 `margin_write.rs` 落到编辑器和文档库里，
+//! 带着刷新过的快照回去。改了什么记在这一轮回复上（`run::changes`），回复下面是「改了 N 篇 · 回滚」；
+//! 回滚前要是有哪篇之后又被手动改过，先用系统提示框问一次。
+//! 对话记录（连同改动日志）存在空间的 `assistant/chats/`（`run::chat`）。回复可以拷贝。
+use std::{cell::{Cell, RefCell}, collections::{HashMap, HashSet}, path::PathBuf, time::{Duration, Instant}};
 
 use fdl_ai::assistants::Assistant;
-use fdl_ai::run::{self, Act, Attached, Call, Core, Identity, Kind, Permission, Reply, Resource, Role, Shelf, chat::{self, Chat, Item}, tools};
+use fdl_ai::run::{self, Act, Attached, Call, Core, Identity, Kind, Permission, Reply, Resource, Role, Shelf, changes::Changes, chat::{self, Chat, Item}, tools, write};
 use fdl_ai::tavern::library::{self, Settings};
-use futures::{StreamExt, channel::mpsc};
+use futures::{StreamExt, channel::{mpsc, oneshot}};
 use gpui::{prelude::FluentBuilder, *};
 
 use crate::{app::{View, Workspace}, model::{Block, BlockKind}, settings::tr, store::Store, theme::Theme, ui};
@@ -28,6 +29,8 @@ use super::{assistant::{self, list, llm::Event, roles}, menu};
 
 #[path = "margin_card.rs"]
 pub mod card;
+#[path = "margin_write.rs"]
+mod host;
 
 pub const SEND: &str = "margin-send";
 const CLOSE: &str = "margin-close";
@@ -45,6 +48,8 @@ const CORE_TAVERN: &str = "margin-core-tavern";
 const CORE_AGENT: &str = "margin-core-agent";
 const PERM_READ: &str = "margin-perm-read";
 const PERM_WRITE: &str = "margin-perm-write";
+const UNDO_OK: &str = "margin-undo-ok";
+const UNDO_CANCEL: &str = "margin-undo-cancel";
 const SLIDE: Duration = Duration::from_millis(320);
 
 /// 正在跑的 run。
@@ -57,6 +62,8 @@ struct Live {
     blocks: Vec<Block>,
     stored: String,
     model: String,
+    /// 这一轮改了什么（写的工具记的）。
+    changes: Changes,
 }
 
 struct Page {
@@ -74,6 +81,10 @@ struct Page {
     expanded: HashSet<usize>,
     /// 最近的对话（历史菜单），打开历史菜单前算好。
     recent: Vec<(String, String)>,
+    /// 展开了改动列表的条目。
+    listed: HashSet<usize>,
+    /// 要回滚的那条，之后又被手动改过的几篇：先问一次。
+    asking: Option<(usize, Vec<String>)>,
 }
 
 thread_local! {
@@ -145,7 +156,7 @@ fn show(_: &mut Workspace, entry: Vec<Resource>, _: &mut Window, cx: &mut Contex
         let same = p.as_ref().is_some_and(|p| p.entry == entry);
         if same { if let Some(p) = p.as_mut() { p.space = space; } } else {
             if let Some(p) = p.as_mut() { save_live(p); }
-            *p = Some(Page { chat: fresh(space.as_deref()), resources: entry.clone(), entry, space, live: None, shaped: HashMap::new(), expanded: HashSet::new(), recent: vec![] });
+            *p = Some(Page { chat: fresh(space.as_deref()), resources: entry.clone(), entry, space, live: None, shaped: HashMap::new(), expanded: HashSet::new(), recent: vec![], listed: HashSet::new(), asking: None });
         }
     });
     let fresh = PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| !p.chat.started()));
@@ -162,7 +173,7 @@ fn show(_: &mut Workspace, entry: Vec<Resource>, _: &mut Window, cx: &mut Contex
 fn save_live(p: &mut Page) {
     if let Some(live) = p.live.take() {
         live.call.abort();
-        p.chat.items.push(Item { role: Role::Assistant, text: live.stored, steps: live.steps, at: now(), model: live.model, stopped: true, ..Default::default() });
+        p.chat.items.push(Item { role: Role::Assistant, text: live.stored, steps: live.steps, at: now(), model: live.model, stopped: true, changes: live.changes, ..Default::default() });
         let _ = chat::save(&dir(), &p.chat);
     }
 }
@@ -194,7 +205,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 save_live(p);
                 p.chat = fresh(p.space.as_deref());
                 p.resources = p.entry.clone();
-                (p.shaped, p.expanded) = (HashMap::new(), HashSet::new());
+                (p.shaped, p.expanded, p.listed, p.asking) = (HashMap::new(), HashSet::new(), HashSet::new(), None);
             });
             card::focus();
             cx.notify();
@@ -205,7 +216,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                 let _ = chat::delete(&dir(), &p.chat.id);
                 p.chat = fresh(p.space.as_deref());
                 p.resources = p.entry.clone();
-                (p.shaped, p.expanded) = (HashMap::new(), HashSet::new());
+                (p.shaped, p.expanded, p.listed, p.asking) = (HashMap::new(), HashSet::new(), HashSet::new(), None);
             });
             refresh_recent();
             cx.notify();
@@ -229,6 +240,10 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
             with(&mut |p| if !p.chat.started() { let own = who(&p.chat, p.space.as_deref()).core.kind(); p.chat.core = (k != own).then_some(k); });
             cx.notify();
         }
+        UNDO_OK => {
+            if let Some(i) = PAGE.with(|p| p.borrow().as_ref().and_then(|p| p.asking.as_ref().map(|a| a.0))) { undo(w, i, window, cx); }
+        }
+        UNDO_CANCEL => { with(&mut |p| p.asking = None); cx.notify(); }
         PERM_READ | PERM_WRITE => {
             let to = if id == PERM_WRITE { Permission::Write } else { Permission::Read };
             with(&mut |p| { p.chat.permission = to; if p.chat.started() { let _ = chat::save(&dir(), &p.chat); } });
@@ -241,7 +256,7 @@ pub fn menu_action(id: &str, w: &mut Workspace, window: &mut Window, cx: &mut Co
                     save_live(p);
                     p.resources = c.last_resources().unwrap_or_default().iter().take(REMOVE.len()).cloned().collect();
                     p.chat = c.clone();
-                    (p.shaped, p.expanded) = (HashMap::new(), HashSet::new());
+                    (p.shaped, p.expanded, p.listed, p.asking) = (HashMap::new(), HashSet::new(), HashSet::new(), None);
                 });
                 FOLLOW.with(|f| f.set(true));
                 cx.notify();
@@ -263,17 +278,7 @@ fn attach(r: Resource, cx: &mut Context<Workspace>) {
 /// 素材快照：文档库里每篇的标题、所在、标签、链接和正文（纯文字），文件夹，最近删除，读正文的办法（后台线程上只读地读文件，
 /// 编辑器里开着的那篇用编辑器里的），空间的 `SPACE.md`，助手，附带的资源（文档是 Markdown）。
 fn shelf(w: &Workspace, resources: &[Resource], a: &Assistant, permission: Permission, cx: &App) -> Shelf {
-    let folders: HashMap<&str, &str> = w.entries.iter().filter(|e| e.meta.folder.is_some()).map(|e| (e.id.as_str(), e.title.as_str())).collect();
-    let docs = w.entries.iter().filter(|e| e.meta.folder.is_none()).map(|e| run::Doc {
-        id: e.id.clone(), title: e.title.clone(), folder: e.meta.parent.as_deref().and_then(|p| folders.get(p)).map(|s| s.to_string()),
-        parent: e.meta.parent.clone(), created: e.meta.created, modified: e.meta.modified,
-        tags: e.tags.iter().map(|(t, _)| t.clone()).collect(),
-        links: e.links.iter().map(|l| (l.target.clone(), l.line.iter().map(|(t, _)| t.as_str()).collect())).collect(),
-        text: Arc::from(&*e.body),
-    }).collect();
-    let dirs = w.entries.iter().filter(|e| e.meta.folder.is_some()).map(|e| run::Folder { id: e.id.clone(), name: e.title.clone(), parent: e.meta.parent.clone() }).collect();
-    let mut trash: Vec<run::Trashed> = w.trash.iter().map(|t| run::Trashed { id: t.id.clone(), title: t.title.clone(), deleted: t.deleted, folder: t.folder }).collect();
-    trash.sort_by_key(|t| std::cmp::Reverse(t.deleted));
+    let (docs, dirs, trash) = host::catalog(w);
     let reader = w.store.reader();
     let library = run::Library::new(move |id| reader.load(id).ok());
     // 文档：编辑器里开着就用编辑器里的（可能还没存）；已经删了就没有。
@@ -327,7 +332,8 @@ fn picked(d: &crate::model::Document, ids: &[String]) -> String {
 }
 
 /// 网络那头交回来的。
-enum Up { Thinking, Step(String), Preview { stored: String, blocks: Vec<Block> }, Done { stored: String, blocks: Vec<Block> }, Failed(String) }
+/// `Write`：一次写的调用交给主线程做，带着快照过去、带着刷新过的快照和结果回来。
+enum Up { Thinking, Step(String), Preview { stored: String, blocks: Vec<Block> }, Done { stored: String, blocks: Vec<Block> }, Failed(String), Write { shelf: Shelf, call: Call, reply: oneshot::Sender<(Shelf, String)> } }
 
 fn send(w: &mut Workspace, input: String, cx: &mut Context<Workspace>) {
     let input = input.trim().to_owned();
@@ -361,7 +367,7 @@ fn send(w: &mut Workspace, input: String, cx: &mut Context<Workspace>) {
             if p.chat.items.is_empty() && !a.greeting.trim().is_empty() { p.chat.items.push(Item { role: Role::Assistant, text: a.greeting.trim().to_owned(), at: p.chat.created, ..Default::default() }); }
         }
         p.chat.items.push(Item { role: Role::User, text: input, resources, at: now(), ..Default::default() });
-        p.live = Some(Live { turn, call: call.abort_handle(), _ticket: ticket, steps: vec![], blocks: vec![], stored: String::new(), model });
+        p.live = Some(Live { turn, call: call.abort_handle(), _ticket: ticket, steps: vec![], blocks: vec![], stored: String::new(), model, changes: Changes::default() });
         let _ = chat::save(&dir(), &p.chat);
     });
     card::blur();
@@ -369,6 +375,7 @@ fn send(w: &mut Workspace, input: String, cx: &mut Context<Workspace>) {
     cx.notify();
     cx.spawn(async move |this, cx| {
         while let Some(u) = rx.next().await {
+            if let Up::Write { shelf, call, reply } = u { menu::dispatch(move |w, window, cx| write_now(w, window, cx, turn, shelf, call, reply)); continue; }
             let end = matches!(u, Up::Done { .. } | Up::Failed(_));
             let fresh = PAGE.with(|p| p.borrow_mut().as_mut().is_some_and(|p| p.live.as_ref().is_some_and(|l| l.turn == turn) && { apply(p, u); true }));
             if !fresh { return; }
@@ -379,7 +386,7 @@ fn send(w: &mut Workspace, input: String, cx: &mut Context<Workspace>) {
 }
 
 /// 在运行时上：照核心的吩咐一步步做，直到说完。
-async fn drive(mut core: Box<dyn Core>, shelf: Shelf, input: String, history: Vec<run::Turn>, (base, key, model, effort): (String, String, String, Option<String>), id: String, tx: mpsc::UnboundedSender<Up>) {
+async fn drive(mut core: Box<dyn Core>, mut shelf: Shelf, input: String, history: Vec<run::Turn>, (base, key, model, effort): (String, String, String, Option<String>), id: String, tx: mpsc::UnboundedSender<Up>) {
     let send = |u: Up| tx.unbounded_send(u).is_ok();
     let mut act = core.begin(&input, &history, &shelf);
     loop {
@@ -414,7 +421,11 @@ async fn drive(mut core: Box<dyn Core>, shelf: Shelf, input: String, history: Ve
                 let mut results: Vec<(Call, String)> = vec![];
                 for c in calls {
                     if !send(Up::Step(tools::label(&shelf, &c))) { return; }
-                    let out = tools::run(&shelf, &c);
+                    let out = if write::is_write(&c.name) {
+                        let (reply, back) = oneshot::channel();
+                        if !send(Up::Write { shelf: shelf.clone(), call: c.clone(), reply }) { return; }
+                        match back.await { Ok((s, out)) => { shelf = s; out } Err(_) => tr("错误：没写成（应用没在前台）。", "Error: not written (the app is not in front).").into() }
+                    } else { tools::run(&shelf, &c) };
                     results.push((c, out));
                 }
                 core.results(&shelf, results)
@@ -436,14 +447,15 @@ fn apply(p: &mut Page, u: Up) {
         Up::Preview { stored, blocks } => { live.stored = stored; live.blocks = blocks; }
         Up::Done { stored, blocks } => {
             let live = p.live.take().unwrap();
-            p.chat.items.push(Item { role: Role::Assistant, text: stored, steps: live.steps, at: now(), model: live.model, ..Default::default() });
+            p.chat.items.push(Item { role: Role::Assistant, text: stored, steps: live.steps, at: now(), model: live.model, changes: live.changes, ..Default::default() });
             p.shaped.insert(p.chat.items.len() - 1, blocks);
             let _ = chat::save(&dir(), &p.chat);
         }
+        Up::Write { .. } => {}
         Up::Failed(e) => {
             let live = p.live.take().unwrap();
             live._ticket.fail();
-            p.chat.items.push(Item { role: Role::Assistant, text: live.stored, steps: live.steps, at: now(), model: live.model, failed: Some(e), ..Default::default() });
+            p.chat.items.push(Item { role: Role::Assistant, text: live.stored, steps: live.steps, at: now(), model: live.model, failed: Some(e), changes: live.changes, ..Default::default() });
             let _ = chat::save(&dir(), &p.chat);
         }
     }
@@ -466,11 +478,57 @@ fn retry(w: &mut Workspace, cx: &mut Context<Workspace>) {
         let at = p.chat.items.iter().rposition(|i| i.role == Role::User)?;
         let input = p.chat.items[at].text.clone();
         p.resources = p.chat.items[at].resources.clone();
+        // 出错前已经改了的，记到重问的那一轮上（照样能回滚）。
+        let mut carry = Changes::default();
+        for i in &p.chat.items[at..] { if !i.changes.undone { carry.ops.extend(i.changes.ops.iter().cloned()); } }
         p.chat.items.truncate(at);
         p.shaped.retain(|k, _| *k < at);
-        Some(input)
+        Some((input, carry))
     });
-    if let Some(input) = input { send(w, input, cx); }
+    if let Some((input, carry)) = input {
+        send(w, input, cx);
+        PAGE.with(|p| if let Some(l) = p.borrow_mut().as_mut().and_then(|p| p.live.as_mut()) { l.changes = carry; });
+    }
+}
+
+/// 主线程上做一次写的调用：还是这一轮、对话还是可编辑才做（权限随时能改），改动记进这一轮。
+fn write_now(w: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>, turn: u64, mut shelf: Shelf, call: Call, reply: oneshot::Sender<(Shelf, String)>) {
+    let state = PAGE.with(|p| p.borrow_mut().as_mut().and_then(|p| { let permission = p.chat.permission; p.live.as_mut().filter(|l| l.turn == turn).map(|l| (std::mem::take(&mut l.changes), permission)) }));
+    let Some((mut log, permission)) = state else { let _ = reply.send((shelf, tr("错误：这一轮已经停了，没有改。", "Error: this turn has stopped; nothing was changed.").into())); return };
+    shelf.permission = permission;
+    // 不借着 `PAGE` 做：文档库、编辑器那边可能回头来问助手页的状态。
+    let out = write::run(&mut shelf, &mut host::Ios { w, window, cx }, &mut log, &call);
+    PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() {
+        match p.live.as_mut().filter(|l| l.turn == turn) {
+            Some(l) => l.changes = log,
+            // 做的时候这一轮被换下去了：记到它留下的那条上。
+            None => if let Some(i) = p.chat.items.iter_mut().rev().find(|i| i.role == Role::Assistant) { i.changes.ops.extend(log.ops); let _ = chat::save(&dir(), &p.chat); },
+        }
+    });
+    let _ = reply.send((shelf, out));
+    cx.notify();
+}
+
+/// 点了「回滚」：之后有人手动改过就先问一次，不然直接回滚。
+fn ask_undo(w: &mut Workspace, i: usize, window: &mut Window, cx: &mut Context<Workspace>) {
+    if busy() { return; }
+    let Some(changes) = PAGE.with(|p| p.borrow().as_ref().and_then(|p| p.chat.items.get(i).map(|x| x.changes.clone()))) else { return };
+    if changes.undone || changes.is_empty() { return; }
+    super::glass::haptic();
+    let edited = changes.edited(&mut host::Ios { w, window, cx });
+    if edited.is_empty() { return undo(w, i, window, cx); }
+    PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() { p.asking = Some((i, edited)); });
+    cx.notify();
+}
+
+/// 回滚第 `i` 条回复改的东西，记成已回滚。
+fn undo(w: &mut Workspace, i: usize, window: &mut Window, cx: &mut Context<Workspace>) {
+    let Some(mut changes) = PAGE.with(|p| p.borrow_mut().as_mut().and_then(|p| { p.asking = None; p.chat.items.get(i).map(|x| x.changes.clone()) })) else { return };
+    let problems = changes.undo(&mut host::Ios { w, window, cx });
+    PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() && let Some(x) = p.chat.items.get_mut(i) { x.changes = changes; let _ = chat::save(&dir(), &p.chat); });
+    if problems.is_empty() { w.show_toast(tr("已回滚", "Reverted"), cx); }
+    else { w.show_toast_kind(ui::ToastKind::Error, &crate::localized_format!("有几样没能回滚：{}", "Some changes could not be reverted: {}", problems.join("；")), cx); }
+    cx.notify();
 }
 
 // ── 画 ──────────────────────────────────────────────────────────────
@@ -537,9 +595,14 @@ fn content(p: &Page, w: &Workspace, settled: bool, window: &mut Window, cx: &mut
 
     let top: Vec<card::Chip> = p.resources.iter().take(REMOVE.len()).enumerate().map(|(i, r)| {
         let (title, glyph) = label(w, r);
-        card::Chip { title, glyph, picture: None, menu: vec![menu::Item::new(REMOVE[i], tr("移除", "Remove"), "minus.circle", 0)] }
+        card::Chip { title, glyph, picture: None, menu: vec![menu::Item::new(REMOVE[i], tr("移除", "Remove"), "minus.circle", 0)], off: false }
     }).collect();
-    let chips = [who_chip(&p.chat, &a), perm_chip(p.chat.permission)];
+    let chips = [who_chip(&p.chat, &a), perm_chip(p.chat.permission, core_of(&p.chat, &a) == Kind::Tavern)];
+    // 要回滚的那条之后又被手动改过：系统提示框问一次。
+    if let Some((_, titles)) = &p.asking && settled {
+        let body = crate::localized_format!("{} 在助手改完之后又被改过，回滚会把这些修改一起撤掉。", "{} changed after the assistant edited it. Reverting also discards those edits.", titles.join("、"));
+        super::alert::ask(tr("之后又改过", "Edited since"), &body, tr("仍然回滚", "Revert anyway"), true, None, (UNDO_OK, UNDO_CANCEL));
+    }
     let mention = card::mention().map(|q| mention_list(w, p, &q, bottom + px(card::HEIGHT + 8.), cx));
     div().size_full().flex().flex_col().pt(top_inset).pb(keyboard)
         .child(bar)
@@ -560,16 +623,16 @@ fn who_chip(c: &Chat, a: &Assistant) -> card::Chip {
     let k = core_of(c, a);
     let kinds = [Kind::Tavern, Kind::Agent].map(|x| { let it = menu::Item::new(if x == Kind::Agent { CORE_AGENT } else { CORE_TAVERN }, core_name(x), "", 0).checked(x == k); if locked && x != k { it.disabled() } else { it } });
     items.push(menu::Item::new("margin-core", tr("核心", "Core"), "cpu", 1).sub(core_name(k)).kids(kinds.to_vec()));
-    card::Chip { title: a.name.clone(), glyph: "person.crop.circle", picture: roles::avatar_picture(a.avatar.as_deref()), menu: items }
+    card::Chip { title: a.name.clone(), glyph: "person.crop.circle", picture: roles::avatar_picture(a.avatar.as_deref()), menu: items, off: false }
 }
 
-/// 权限那颗：只读 / 可编辑。
-fn perm_chip(p: Permission) -> card::Chip {
+/// 权限那颗：只读 / 可编辑。酒馆核心不调工具，改不了文档：灰着。
+fn perm_chip(p: Permission, tavern: bool) -> card::Chip {
     let (title, glyph) = match p { Permission::Read => (tr("只读", "Read only"), "eye"), Permission::Write => (tr("可编辑", "Can edit"), "pencil") };
     card::Chip { title: title.into(), glyph, picture: None, menu: vec![
         menu::Item::new(PERM_READ, tr("只读", "Read only"), "eye", 0).checked(p == Permission::Read),
         menu::Item::new(PERM_WRITE, tr("可编辑", "Can edit"), "pencil", 0).checked(p == Permission::Write),
-    ] }
+    ], off: tavern }
 }
 
 /// @ 搜索：标题里有这些字的文件夹和文档（空着是最近改过的），点一个带上。浮在卡片上面。
@@ -616,11 +679,28 @@ fn steps_row(i: usize, steps: &[String], open: bool, cx: &mut Context<Workspace>
         .into_any_element()
 }
 
+/// 这一轮改了文档：「改了 N 篇 · 回滚」，点前半截逐条列出改了什么；回滚过的是「已回滚」。助手在说的时候先不让回滚。
+fn changes_row(i: usize, c: &Changes, open: bool, busy: bool, cx: &mut Context<Workspace>) -> AnyElement {
+    let head = div().id(("margin-changes", i)).flex().items_center().gap(px(4.))
+        .child(ui::icon(if open { "chevron-down" } else { "chevron-right" }, 12., Theme::text_caption()))
+        .child(crate::localized_format!("改了 {} 篇", "Changed {}", c.count()))
+        .on_click(cx.listener(move |_, _, _, cx| { PAGE.with(|p| if let Some(p) = p.borrow_mut().as_mut() { if !p.listed.remove(&i) { p.listed.insert(i); } }); cx.notify(); }));
+    let action = if c.undone { div().child(tr("已回滚", "Reverted")).into_any_element() } else {
+        div().id(("margin-undo", i)).text_color(if busy { Theme::text_caption() } else { Theme::primary() }).child(tr("回滚", "Revert"))
+            .when(!busy, |d| d.on_click(cx.listener(move |w, _, window, cx| ask_undo(w, i, window, cx)))).into_any_element()
+    };
+    div().flex().flex_col().gap(px(4.)).text_size(px(14.)).line_height(px(20.)).text_color(Theme::text_caption())
+        .child(div().flex().items_center().gap(px(6.)).child(head).child("·").child(action))
+        .when(open, |d| d.children(c.lines().into_iter().map(|l| div().pl(px(16.)).child(l))))
+        .into_any_element()
+}
+
 fn assistant_item(p: &Page, i: usize, item: &Item, cx: &mut Context<Workspace>) -> AnyElement {
     let blocks = p.shaped.get(&i).cloned().unwrap_or_else(|| if item.text.trim().is_empty() { vec![] } else { fdl_core::markdown::parse_file(&item.text, "", None).blocks });
     let mut col = div().w_full().flex().flex_col().gap(px(10.));
     if !item.steps.is_empty() { col = col.child(steps_row(i, &item.steps, p.expanded.contains(&i), cx)); }
     if !blocks.is_empty() { col = col.child(render_blocks(&blocks)); }
+    if !item.changes.is_empty() { col = col.child(changes_row(i, &item.changes, p.listed.contains(&i), p.live.is_some(), cx)); }
     if let Some(e) = &item.failed {
         col = col.child(div().flex().items_center().gap(px(12.)).text_size(px(14.)).line_height(px(20.))
             .child(div().flex_1().min_w_0().text_color(Theme::danger()).child(e.clone()))

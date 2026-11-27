@@ -2426,6 +2426,17 @@ impl Core {
         Some(last)
     }
 
+    /// 助手改了正文（或回滚它改的）：整篇的块换成 `blocks`，标题、图标、封面不动，一步撤销。光标还在的块里就留着，不然回到开头。
+    pub fn replace_body(&mut self, blocks: Vec<Block>) {
+        self.checkpoint(EditKind::Other);
+        self.break_coalescing();
+        (self.block_sel, self.cell_sel, self.pick) = (None, None, None);
+        self.doc.blocks = blocks;
+        if self.doc.blocks.is_empty() { self.doc.blocks.push(Block::text("")); }
+        self.normalize();
+        self.fix_selection();
+    }
+
     pub fn column_ratios(&self, grid: BlockId) -> Vec<f32> {
         self.block(grid)
             .map(|g| g.children.iter().map(|c| if let BlockKind::Column { ratio } = c.kind { ratio } else { 0. }).collect())

@@ -8,14 +8,18 @@
 //! - 酒馆（`tavern`）：照酒馆预设拼一次请求，模型说完就完，不调工具；
 //! - Agent（`agent`）：ReAct 式循环，带只读的文档工具（`tools`：列文件夹、搜索、读文档、待办、反向链接、回收站），
 //!   自己决定读什么、读几轮。正文用 `fdl_core::dialect` 读出，块带短号；一次 run 的短号记在 `Shelf::refs`，各工具一致。
+//!   对话的权限是「可编辑」时还有写的工具（`write`：改正文、新建、移动、改名、删除、恢复），在主线程上照 `write::Host` 落到文档库里，
+//!   改了什么记进改动日志（`changes`），挂在那一轮回复上，可以回滚。
 //!
 //! 每次都带上：空间的 `SPACE.md`、用的那个助手（名字和设定）、这句话附带的资源（`Resource`：文件夹、文档、文档里的几块）。
 //! 素材怎么填由核心自己定：酒馆把能塞的一次塞进去，Agent 只给个开头、要更多自己去读。
 //! 对话记录（`chat`）和核心无关，两个核心共用。
 pub mod agent;
+pub mod changes;
 pub mod chat;
 pub mod tavern;
 pub mod tools;
+pub mod write;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -77,6 +81,9 @@ impl Library {
     pub fn new(load: impl Fn(&str) -> Option<Document> + Send + Sync + 'static) -> Library { Library { load: Some(Arc::new(load)), cache: Default::default() } }
     /// 这篇已经在手上（比如编辑器里开着、可能还没存的那篇）：就用它。
     pub fn put(&self, id: &str, doc: Document) { self.cache.lock().unwrap().insert(id.to_owned(), Arc::new(doc)); }
+    /// 已经在手上的（不去读）。
+    pub fn cached(&self, id: &str) -> Option<Arc<Document>> { self.cache.lock().unwrap().get(id).cloned() }
+    pub fn forget(&self, id: &str) { self.cache.lock().unwrap().remove(id); }
     pub fn get(&self, id: &str) -> Option<Arc<Document>> {
         if let Some(d) = self.cache.lock().unwrap().get(id) { return Some(d.clone()); }
         let doc = Arc::new((self.load.as_ref()?)(id)?);
@@ -110,7 +117,7 @@ pub struct Shelf {
     pub refs: Arc<Mutex<Refs>>,
     /// 这句话附带的资源（照 `Resource` 的顺序；找不到的不在）。
     pub attached: Vec<Attached>,
-    /// 助手能不能改文档。这一版只记着传下来，写的工具以后接。
+    /// 助手能不能改文档：可编辑时才有写的工具（`write`）。
     pub permission: Permission,
     pub now: Option<(i64, u32, u32, u32, u32)>,
 }
@@ -118,6 +125,12 @@ pub struct Shelf {
 impl Shelf {
     pub fn find(&self, id: &str) -> Option<&Doc> { self.docs.iter().find(|d| d.id == id) }
     pub fn folder(&self, id: &str) -> Option<&Folder> { self.folders.iter().find(|f| f.id == id) }
+    /// `SPACE.md` 按 Markdown 读成的块（读过的留着，短号才对得上）。
+    pub fn space_doc(&self) -> Arc<Document> {
+        if let Some(d) = self.library.cached(tools::SPACE_MD) { return d; }
+        self.library.put(tools::SPACE_MD, fdl_core::markdown::parse_file(&self.guide, "", None));
+        self.library.cached(tools::SPACE_MD).unwrap_or_default()
+    }
     /// 一篇文档的块（读不出来是 None：不在文档库里、还没下载……）。
     pub fn document(&self, id: &str) -> Option<Arc<Document>> { self.find(id)?; self.library.get(id) }
     /// `id`（文档或文件夹）是不是在 `under`（文件夹或文档）下面，隔几层都算。
@@ -205,3 +218,5 @@ pub fn ends(s: &str, head: usize, tail: usize) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod write_tests;

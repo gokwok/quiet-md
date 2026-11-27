@@ -1,9 +1,9 @@
-//! 助手的能力里给 Agent 用的那几样：只读的文档工具，都只作用于当前空间。都在 run 开始时的快照（`Shelf`）上做，
+//! 助手的能力里给 Agent 用的那几样：只读的文档工具（写的在 `write`），都只作用于当前空间。都在 run 开始时的快照（`Shelf`）上做，
 //! 正文的块现读（`Shelf::document`，读过的留着），不改文档库。
 //!
 //! - `list_folder`：不给文件夹是空间总览（篇数、常用标签、顶层的文件夹和文档），给了列它下面的；
 //! - `search`：跨文档找篇（关键词可省，只按文件夹、标签、时间筛也行），给了 `doc` 在这篇里找块，带前后几块；
-//! - `read_document`：读一篇，正文用 `fdl_core::dialect` 读出、每块带短号，分页；`outline` 只给标题；`SPACE.md` 是空间说明全文；
+//! - `read_document`：读一篇，正文用 `fdl_core::dialect` 读出、每块带短号，分页；`outline` 只给标题；`SPACE.md` 是空间说明全文（按 Markdown 读成块，也带短号）；
 //! - `list_tasks`：待办和行内提醒；`backlinks`：哪些文档 @ 了这篇；`list_trash`：最近删除。
 //!
 //! 块短号一次 run 里共用一份（`Shelf::refs`），哪个工具报的都一样。结果是给模型看的纯文字，太长就分页或截；
@@ -64,13 +64,13 @@ pub fn defs() -> Value {
     ])
 }
 
-fn args(call: &Call) -> Value { serde_json::from_str(&call.args).unwrap_or(Value::Null) }
-fn arg_str(v: &Value, k: &str) -> String { v.get(k).and_then(|x| x.as_str().map(str::to_owned).or_else(|| x.as_u64().map(|n| n.to_string()))).unwrap_or_default().trim().to_owned() }
+pub(super) fn args(call: &Call) -> Value { serde_json::from_str(&call.args).unwrap_or(Value::Null) }
+pub(super) fn arg_str(v: &Value, k: &str) -> String { v.get(k).and_then(|x| x.as_str().map(str::to_owned).or_else(|| x.as_u64().map(|n| n.to_string()))).unwrap_or_default().trim().to_owned() }
 fn arg_num(v: &Value, k: &str) -> Option<usize> { v.get(k).and_then(|x| x.as_u64().or_else(|| x.as_str()?.trim().parse().ok())).map(|n| n as usize) }
-fn arg_bool(v: &Value, k: &str) -> bool { v.get(k).is_some_and(|x| x.as_bool().unwrap_or_else(|| x.as_str() == Some("true"))) }
+pub(super) fn arg_bool(v: &Value, k: &str) -> bool { v.get(k).is_some_and(|x| x.as_bool().unwrap_or_else(|| x.as_str() == Some("true"))) }
 
-fn title(t: &str) -> String { if t.trim().is_empty() { "无标题".into() } else { t.trim().to_owned() } }
-fn title_of(shelf: &Shelf, id: &str) -> String { shelf.find(id).map(|d| title(&d.title)).unwrap_or_else(|| id.to_owned()) }
+pub(super) fn title(t: &str) -> String { if t.trim().is_empty() { "无标题".into() } else { t.trim().to_owned() } }
+pub(super) fn title_of(shelf: &Shelf, id: &str) -> String { shelf.find(id).map(|d| title(&d.title)).unwrap_or_else(|| id.to_owned()) }
 fn date(secs: u64) -> String { let (y, m, d, _, _) = fdl_core::time::civil(secs); format!("{y}-{m:02}-{d:02}") }
 fn datetime(secs: u64) -> String { let (y, m, d, h, mi) = fdl_core::time::civil(secs); format!("{y}-{m:02}-{d:02} {h:02}:{mi:02}") }
 
@@ -103,6 +103,7 @@ pub fn label(shelf: &Shelf, call: &Call) -> String {
         "list_tasks" => "查看待办".into(),
         "backlinks" => format!("查看谁链接了《{}》", clip(&title_of(shelf, &arg_str(&a, "id")), 16)),
         "list_trash" => "查看最近删除".into(),
+        other if super::write::is_write(other) => super::write::label(shelf, call),
         other => other.to_owned(),
     }
 }
@@ -117,7 +118,9 @@ pub fn run(shelf: &Shelf, call: &Call) -> String {
         "list_tasks" => list_tasks(shelf, &a),
         "backlinks" => backlinks(shelf, &a),
         "list_trash" => list_trash(shelf, &a),
-        other => Err(format!("没有叫 {other} 的工具。能用的是 list_folder、search、read_document、list_tasks、backlinks、list_trash。")),
+        other if super::write::is_write(other) => Err("这段对话是只读的，改不了文档。要改的话请用户把权限换成「可编辑」。".into()),
+        other => Err(format!("没有叫 {other} 的工具。能用的是 list_folder、search、read_document、list_tasks、backlinks、list_trash{}。",
+            if shelf.permission == super::Permission::Write { "，还有写的 ".to_owned() + &super::write::NAMES.join("、") } else { String::new() })),
     };
     out.unwrap_or_else(|e| format!("错误：{e}"))
 }
@@ -127,7 +130,7 @@ type Out = Result<String, String>;
 // ---- 文件夹和文档
 
 /// 文件夹：标识，或名字（一样的优先，再是含这几个字的）；也可以是一篇文档（它的子文档）。
-fn resolve(shelf: &Shelf, f: &str) -> Result<String, String> {
+pub(super) fn resolve(shelf: &Shelf, f: &str) -> Result<String, String> {
     if shelf.folder(f).is_some() || shelf.find(f).is_some() { return Ok(f.to_owned()); }
     let l = f.to_lowercase();
     let exact = shelf.folders.iter().find(|x| x.name.trim().to_lowercase() == l);
@@ -310,7 +313,7 @@ fn search_in(shelf: &Shelf, id: &str, ql: &str, q: &str, limit: usize, n: usize)
 
 // ---- 读一篇
 
-fn load(shelf: &Shelf, id: &str) -> Result<std::sync::Arc<Document>, String> {
+pub(super) fn load(shelf: &Shelf, id: &str) -> Result<std::sync::Arc<Document>, String> {
     if shelf.find(id).is_none() { return Err(format!("没有标识为 {id} 的文档。先用 search 或 list_folder 找到标识。")); }
     shelf.document(id).ok_or_else(|| format!("《{}》现在读不出来（可能还没从 iCloud 下载完），先看别的。", title_of(shelf, id)))
 }
@@ -323,7 +326,9 @@ fn read_document(shelf: &Shelf, a: &Value) -> Out {
     if id.is_empty() { return Err("没有给 id。".into()); }
     if id.eq_ignore_ascii_case(SPACE_MD) {
         let g = shelf.guide.trim();
-        return Ok(if g.is_empty() { "这个空间还没有 SPACE.md（空间说明）。".into() } else { format!("SPACE.md（{} 字）：\n\n{g}", g.chars().count()) });
+        if g.is_empty() { return Ok("这个空间还没有 SPACE.md（空间说明）。".into()); }
+        let doc = shelf.space_doc();
+        return Ok(format!("SPACE.md（{} 字）：\n\n{}", g.chars().count(), fdl_core::dialect::read(SPACE_MD, &doc.blocks, &mut shelf.refs.lock().unwrap())));
     }
     let doc = load(shelf, &id)?;
     let d = shelf.find(&id).ok_or("文档不见了")?;

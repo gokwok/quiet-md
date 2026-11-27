@@ -18,6 +18,9 @@ impl SharedStore {
     /// 后台线程上只读地读正文（iOS 上助手的工具用）。
     #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     pub fn reader(&self) -> crate::store::Reader { self.0.borrow().reader() }
+    /// 挂到 `parent` 下面、排在 `before` 前面（iOS 上助手回滚移动用）。
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    pub fn move_in_tree(&mut self, id: &str, parent: Option<&str>, before: Option<&str>) -> Result<()> { self.0.borrow_mut().move_in_tree(id, parent, before) }
     pub fn load_for_edit(&self, id: &str, shared: bool) -> Result<Document> { self.0.borrow().load_for_edit(id, shared) }
     pub fn forget_loaded(&self, id: &str) { self.0.borrow().forget_loaded(id); }
     pub fn recover_later(&self, doc: &Document) -> Result<()> { self.0.borrow().recover_later(doc) }

@@ -30,7 +30,8 @@ pub const MENTION: &str = "margin-mention";
 
 /// 一颗胶囊上写什么、菜单里有什么：标题、SF Symbol（有 `picture` 时用图）、菜单（`menu::Item`，点了交给 `ios::menu_action`）。
 #[derive(Clone, PartialEq)]
-pub struct Chip { pub title: String, pub glyph: &'static str, pub picture: Option<(SharedString, std::sync::Arc<[u8]>)>, pub menu: Vec<menu::Item> }
+/// `off`：灰着点不动（比如酒馆核心不调工具，权限无从谈起）。
+pub struct Chip { pub title: String, pub glyph: &'static str, pub picture: Option<(SharedString, std::sync::Arc<[u8]>)>, pub menu: Vec<menu::Item>, pub off: bool }
 
 struct Card {
     view: *mut AnyObject, at: *mut AnyObject, strip: *mut AnyObject, res: Vec<*mut AnyObject>, chips: [*mut AnyObject; 2],
@@ -342,5 +343,6 @@ unsafe fn face(b: *mut AnyObject, chip: &Chip, small: bool) {
         let _: () = msg_send![b, setConfiguration: config];
         let m: *mut AnyObject = if chip.menu.is_empty() { std::ptr::null_mut() } else { menu::menu("", std::ptr::null_mut(), &chip.menu, false) };
         let _: () = msg_send![b, setMenu: m];
+        let _: () = msg_send![b, setEnabled: !chip.off];
     }
 }

@@ -32,7 +32,10 @@ pub fn begin(window: &Window) {
 
 /// 这一帧要这个提示框。`danger` 时确定按钮是红的。返回假是没弹出来（还没有窗口，或者上面正弹着别的）：
 /// 调用的地方这一帧自己画一张（`ios::alert`），不然只剩一层点不动的遮罩。
-pub fn show(title: &str, body: &str, action: &str, danger: bool, refs_hide: Option<bool>) -> bool {
+pub fn show(title: &str, body: &str, action: &str, danger: bool, refs_hide: Option<bool>) -> bool { ask(title, body, action, danger, refs_hide, ("confirm-ok", "confirm-cancel")) }
+
+/// 同上，按钮点了走自己的两个标识（确定、取消）：不挂在 `Workspace::confirm` 上的提示框用（比如助手回滚前的提醒）。
+pub fn ask(title: &str, body: &str, action: &str, danger: bool, refs_hide: Option<bool>, (ok_id, cancel_id): (&'static str, &'static str)) -> bool {
     SEEN.with(|s| s.set(true));
     if ANSWERED.with(|a| a.get()) { return true; }
     let key = format!("{title}\n{body}\n{action}");
@@ -62,11 +65,11 @@ pub fn show(title: &str, body: &str, action: &str, danger: bool, refs_hide: Opti
             item
         };
         // 1 = Cancel，2 = Destructive，0 = Default
-        add(crate::settings::text("取消"), 1, "confirm-cancel");
+        add(crate::settings::text("取消"), 1, cancel_id);
         if refs_hide == Some(true) {
             add(crate::settings::tr("隐藏且不再提示", "Hide and don’t ask again"), 0, "confirm-hide-refs-always");
         }
-        let ok = add(action, if danger { 2 } else { 0 }, "confirm-ok");
+        let ok = add(action, if danger { 2 } else { 0 }, ok_id);
         if !danger { let _: () = msg_send![alert, setPreferredAction: ok]; }
         // 深浅色跟应用的设置，不跟系统。
         let _: () = msg_send![alert, setOverrideUserInterfaceStyle: if crate::theme::dark() { 2isize } else { 1isize }];

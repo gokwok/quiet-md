@@ -124,7 +124,7 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
     }
     let us = c.units();
     let any = |rng: &mut Rng| rng.pick(&us).id;
-    match rng.below(28) {
+    match rng.below(29) {
         0..=2 => {
             let s = *rng.pick(TEXTS);
             c.insert_text(s);
@@ -250,6 +250,16 @@ fn step(c: &mut Core, rng: &mut Rng) -> String {
             let anchor = if rng.chance(80) { Some(any(rng)) } else { None };
             let blocks = crate::paste::markdown_to_blocks(rng.pick(PASTES), crate::paste::Off::default());
             format!("insert_generated({anchor:?}) = {:?}", c.insert_generated(anchor, blocks))
+        }
+        27 => {
+            // 助手整篇改写：拿掉随便一块、其余倒过来，或者换成一段粘贴进来的块。
+            let blocks = if rng.chance(50) {
+                let mut bs: Vec<Block> = c.doc.blocks.iter().rev().cloned().collect();
+                if !bs.is_empty() { let i = rng.below(bs.len()); bs.remove(i); }
+                bs
+            } else { crate::paste::markdown_to_blocks(rng.pick(PASTES), crate::paste::Off::default()) };
+            c.replace_body(blocks);
+            "replace_body".into()
         }
         _ => {
             c.trailing_line();

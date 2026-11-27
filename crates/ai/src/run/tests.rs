@@ -337,7 +337,10 @@ fn agent_runs_read_tools_over_rounds() {
     assert_eq!(roles, ["system", "user", "assistant", "tool", "assistant", "tool", "tool", "assistant", "tool", "tool"]);
     assert_eq!(msgs[4]["tool_calls"].as_array().unwrap().len(), 2);
     assert!(msgs[6]["content"].as_str().unwrap().contains("周报放在"));
-    assert!(msgs[9]["content"].as_str().unwrap().contains("- [ ] [b2] 写下周计划"));
+    // SPACE.md 也按块读出、带块号；周报的块号接着往下编。
+    assert!(msgs[6]["content"].as_str().unwrap().contains("[b1] "));
+    let tasks = msgs[9]["content"].as_str().unwrap();
+    assert!(tasks.contains("- [ ] [b") && tasks.contains("] 写下周计划"), "{tasks}");
     let sys = msgs[0]["content"].as_str().unwrap();
     assert!(sys.contains("list_tasks") && sys.contains("块号") && sys.contains("只读不写"));
 }
